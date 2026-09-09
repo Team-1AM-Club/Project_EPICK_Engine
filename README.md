@@ -1,6 +1,10 @@
 # Project_EPICK_Engine
 Agent Engine Repository for Project EPICK
 
+**서비스 재현 CI 추가:** 잠금 의존성 설치, 전체 테스트와 두 가상 HTTP 시연, 성공·실패 산출물 보관을 구성했다.
+[CI 실행·결과 확인](docs/w4-service-ci.md) · [D-05 공동 합의 요청](docs/w4-d05-contract-decisions.md).
+GitHub 실행 여부는 Actions 기록으로 확인하며, 로컬 통과를 원격 CI 통과로 표시하지 않는다.
+
 **2026-09-09 팀 피드백 반영:** 서버 조회·정책 재검사, W3 기업 근거 연결, 입출력 JSON Schema와 가상 HTTP 통합 테스트를 추가했다.
 새 연결은 `create_service_router`를 사용한다. [실행·계약·파일 안내](docs/w4-service-handoff.md).
 실제 팀 인증·DB 연결, W3 계약 승인, 정렬 정책 승인과 운영 모델 선정은 남아 있다.

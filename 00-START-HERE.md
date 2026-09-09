@@ -2,6 +2,9 @@
 
 새 서비스 계약·연결 코드·가상 통합 테스트를 포함한 실행 가능한 전달본입니다.
 
+**추가 검토 반영:** [CI 설치·실행·산출물 안내](docs/w4-service-ci.md)와 [D-05 공동 합의 요청서](docs/w4-d05-contract-decisions.md)를 추가했습니다.
+CI는 전체 테스트와 두 HTTP 시연을 자동 실행하도록 구성했습니다. 실제 GitHub 실행은 Actions 기록에서 별도로 확인해야 합니다.
+
 1. [피드백 반영 결과](docs/w4-handoff-review-response-2026-09-09.md)를 먼저 읽습니다.
 2. [실행 방법과 백엔드 계약](docs/w4-service-handoff.md)으로 설치·테스트·가상 시연을 재현합니다.
 3. [공개 요청](samples/service-handoff/request.json), [서버 입력](samples/service-handoff/server-context.synthetic.json), [추천 결과](samples/service-handoff/results/synthetic-company.json)를 비교합니다.
@@ -9,7 +12,8 @@
 
 ## 검증과 범위
 
-전체 249개 테스트 통과. 별도 폴더의 새 Python 3.13.12 환경에서도 설치·249개 테스트·두 가상 HTTP 시연을 재현했습니다.
+이전 서비스 전달본은 전체 249개 테스트를 통과했습니다. 별도 폴더의 새 Python 3.13.12 환경에서도 설치·249개 테스트·두 가상 HTTP 시연을 재현한 기록은 VERIFICATION.json에 보존했습니다.
+현재 테스트 수와 실행 환경은 CI/로컬 실행의 `summary.json` 및 `tests.json`을 확인합니다. CI 실패·누락 방지 검사 7개를 추가했습니다.
 새 서비스 시연의 모델은 simulated-* 고정 응답입니다. 실제 모델 성능 보고서는 [이전 v4 보고서](docs/w4-review-v4-2026-09-09.md)입니다.
 이번 기업 연결 프롬프트의 실제 LLM 의미 정확도는 새로 측정하지 않았습니다. 실제 팀 DB/인증·W3 계약 승인·정렬 정책 승인·운영 모델 확정은 남아 있습니다.
 
@@ -81,7 +85,10 @@ git clone --branch feat/w4-service-handoff repository.bundle epick-w4-review
 | 파일 또는 폴더 | 기능 |
 |---|---|
 | examples/w4_service_demo.py | 가상 조회·정책 서버와 고정 응답 모델. 실제 운영 인증/모델이 아님 |
-| scripts/demo-service-handoff.py | 프로세스 내부 HTTP로 두 시연 실행. 출력은 output/service-handoff-20260909/ |
+| .github/workflows/w4-service-ci.yml | 잠금 설치 후 Windows/Linux 테스트·시연 실행, 성공·실패 산출물 14일 보관 |
+| scripts/verify_service_handoff.py | 전체 테스트·두 시연의 결과/환경/해시 기록. 실패·skip·발견 누락 시 실패 종료 |
+| tests/test_ci_verification.py | 테스트 누락·import 실패·skip·이전 성공 기록 재사용을 탐지하는 검사 |
+| scripts/demo-service-handoff.py | 프로세스 내부 HTTP 시연·스키마·기존 결과 비교. --output-dir로 저장 위치 지정 |
 | scripts/prepare-service-handoff.py | 이미 포함된 고정 가상 샘플·스키마 재생성 도구 |
 | tests/test_handoff_service.py | 신규 계약·기업 근거·권한·정책·삭제·원문 유출 검사 31개 |
 | tests/test_local_evaluation.py | HTTP 모의 통신과 서비스의 전문 미보존 검사 포함 |
@@ -94,7 +101,7 @@ git clone --branch feat/w4-service-handoff repository.bundle epick-w4-review
 | docs/ | 최신 연결 계약과 기존 구현·평가 기록 |
 | scripts/의 다른 파일 | 기존 평가·시연·감사 도구. 실제 모델 실행에는 별도 모델/환경 준비 필요 |
 | pyproject.toml, uv.lock | 패키지 의존성과 설치 버전 잠금 |
-| VERIFICATION.json | 이번 원본/새 환경 검증 범위와 미완료 항목 |
+| VERIFICATION.json | CI 추가 전 249개 테스트의 원본/새 환경 검증 기록과 미완료 항목 |
 
 과거 평가 보고서의 상세 원본 추론 로그·모델 가중치·소스 캡처·PDF 전체는 이 묶음에 포함하지 않았습니다.
 해당 과거 문서에서 이 파일들을 가리키는 링크는 전체 작업 폴더용입니다. 이번 API 통합 테스트와 가상 시연은 포함 파일만으로 재현됩니다.

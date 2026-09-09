@@ -8,19 +8,19 @@
 
 Python 3.10 이상. 저장소 또는 전달 ZIP의 루트에서 실행한다.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[api,test]"
-.\.venv\Scripts\python.exe -m unittest discover -s tests -q
-.\.venv\Scripts\python.exe scripts/demo-service-handoff.py
+```text
+uv sync --locked --extra api --extra test
+uv run --locked --extra api --extra test python scripts/verify_service_handoff.py --output-dir output/ci/local-01
 ```
 
-uv 사용 시 `uv sync --locked --extra api --extra test`, `uv run --locked python -m unittest discover -s tests -q`도 가능하다.
+uv 0.12.0을 사용하며 매 실행에 새로운 출력 폴더를 지정한다. [CI 및 결과 기록 안내](w4-service-ci.md)를 참조한다.
+개별 명령은 `uv run --locked --extra api --extra test python -m unittest discover -s tests -q`와
+`uv run --locked --extra api --extra test python scripts/demo-service-handoff.py`다.
 이 통합 데모는 서버와 모델을 모두 가상 구현으로 주입한다. API 키·GPU·외부 서버는 필요 없다.
 모델의 실제 추론 정확도 평가는 [이전 v4 보고서](w4-review-v4-2026-09-09.md)의 별도 결과다.
 이번 변경은 새 실제 모델 비교나 운영 모델 승인이 아니다.
 
-실행 결과:
+개별 시연 명령의 기본 출력(통합 검증 도구는 지정 폴더의 `demos/`에 저장):
 
 - `output/service-handoff-20260909/synthetic-company.json`: 명시적 가상 기업 진술 1개·우대 조건 1개와 가상 경험의 연결.
 - `output/service-handoff-20260909/diagnostic-company.json`: 원본 SK하이닉스 진단 샘플의 근거 사용 거부와 제한 표시.
@@ -118,6 +118,7 @@ LocalClient는 **`capture_traces=False`**로 생성한다. 기본 True는 기존
 ## 기업지식 수용 규칙
 
 `w4-knowledge-bundle/0.1`, `w3-w4-projection/0.1-draft`는 이번 W4 소비 투영 초안이다. 팀의 확정 W3 스키마를 새로 선언한 것이 아니다.
+추출/정규화/restriction revision과 index ACK는 아직 없으며 [D-05 합의 요청](w4-d05-contract-decisions.md)에서 공동 결정 후 반영한다.
 과거 일반 경로의 `ALLOWED`를 새 경로의 `USABLE`로 자동 변환하지 않는다. 상태 의미와 대응은 W3와 확인한다.
 
 - 현재 VERIFIED + USABLE인 Claim·명시 Requirement만 고려한다. PREFERRED는 필수 조건으로 바꾸지 않는다.
