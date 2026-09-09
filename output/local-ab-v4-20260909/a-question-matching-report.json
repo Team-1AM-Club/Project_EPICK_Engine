@@ -1,0 +1,5128 @@
+{
+  "schema_version": "w4-stage-report/0.3",
+  "scorer_version": "w4-source-context-meaning/0.3",
+  "benchmark_sha256": "4fd82a204c61dc2e32525645ede1e0d39c3591a62cd2178846dce877bf1efefd",
+  "policy_sha256": "8b09b46dac724ef5ce14f1fde113672aa0f3c0f37383f5583b94a6adfd565dd3",
+  "status": "PREVIEW_ONLY",
+  "results": [
+    {
+      "candidate_id": "gemma4-26b-qat",
+      "provider": "google-local-llama.cpp",
+      "model": "Gemma-4-26B-A4B-QAT",
+      "provenance": "CAPTURED",
+      "generation_config": {
+        "temperature": 0,
+        "top_k": 0,
+        "top_p": 1,
+        "min_p": 0,
+        "repeat_penalty": 1,
+        "presence_penalty": 0,
+        "seed": 42,
+        "max_tokens": 4096,
+        "stream": false,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "reasoning_effort": "none",
+        "cache_prompt": false,
+        "model_sha256": "a586dac572e606b1f2ad0011f7465aa1dffdb0f6516c5b5809fab35857865389",
+        "stage_response_formats": {
+          "question": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "criteria": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "criterion_id": {
+                        "type": "string",
+                        "enum": [
+                          "collaboration",
+                          "problem_solving",
+                          "challenge",
+                          "leadership",
+                          "learning",
+                          "responsibility",
+                          "custom_1",
+                          "custom_2",
+                          "custom_3",
+                          "custom_4",
+                          "custom_5",
+                          "custom_6"
+                        ]
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "question_quote": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "criterion_id",
+                      "label",
+                      "question_quote"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                },
+                "required_facts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "ROLE",
+                      "ACTION",
+                      "RESULT"
+                    ]
+                  },
+                  "minItems": 0
+                },
+                "needs_confirmation": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "criteria",
+                "required_facts",
+                "needs_confirmation"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "candidates": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "episode_id": {
+                        "type": "string"
+                      },
+                      "episode_version": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "relevance": {
+                        "type": "string",
+                        "enum": [
+                          "RELATED",
+                          "UNRELATED",
+                          "UNCERTAIN"
+                        ]
+                      },
+                      "fact_checks": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "fact_id": {
+                              "type": "string"
+                            },
+                            "usable": {
+                              "type": "boolean"
+                            },
+                            "issue": {
+                              "enum": [
+                                null,
+                                "PERSONAL_CONTRIBUTION_UNCLEAR",
+                                "NEGATED_OR_AMBIGUOUS_FACT",
+                                "INSUFFICIENT_CONTEXT",
+                                "INSTRUCTION_IN_SOURCE"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "fact_id",
+                            "usable",
+                            "issue"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "minItems": 0
+                      },
+                      "matches": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "criterion_id": {
+                              "type": "string"
+                            },
+                            "fact_ids": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              },
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "criterion_id",
+                            "fact_ids"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "minItems": 0
+                      }
+                    },
+                    "required": [
+                      "episode_id",
+                      "episode_version",
+                      "relevance",
+                      "fact_checks",
+                      "matches"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "candidates"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "extraction": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "units": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "unit_id": {
+                        "type": "string"
+                      },
+                      "kinds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "ROLE",
+                            "ACTION",
+                            "RESULT",
+                            "GOAL",
+                            "PERIOD",
+                            "OBSTACLE",
+                            "REFLECTION",
+                            "CONTEXT"
+                          ]
+                        },
+                        "minItems": 0
+                      },
+                      "subject": {
+                        "type": "string",
+                        "enum": [
+                          "SELF",
+                          "TEAM",
+                          "OTHER",
+                          "UNSPECIFIED",
+                          "MIXED"
+                        ]
+                      },
+                      "assertion": {
+                        "type": "string",
+                        "enum": [
+                          "AFFIRMED",
+                          "NEGATED",
+                          "PLANNED",
+                          "HYPOTHETICAL",
+                          "UNCERTAIN",
+                          "MIXED"
+                        ]
+                      },
+                      "issue": {
+                        "enum": [
+                          null,
+                          "INSUFFICIENT_CONTEXT",
+                          "INSTRUCTION_IN_SOURCE",
+                          "NO_EVIDENCE"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "unit_id",
+                      "kinds",
+                      "subject",
+                      "assertion",
+                      "issue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "units"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "schema_binding": "input_ids_and_cardinalities/0.2"
+      },
+      "scores": {
+        "question": 75.0,
+        "matching": 62.5
+      },
+      "total_score": 68.75,
+      "dimensions": {
+        "question": {
+          "json_valid": 100.0,
+          "schema_valid": 100.0,
+          "contract_valid": 100.0,
+          "correct": 75.0,
+          "scheduled": 12,
+          "criteria_correct": 75.0,
+          "required_facts_correct": 100.0,
+          "question_quote_valid": 83.333333,
+          "criterion_f1": 80.555556,
+          "literal_quote_valid": 100.0,
+          "context_preserved": 83.333333
+        },
+        "matching": {
+          "json_valid": 100.0,
+          "schema_valid": 100.0,
+          "contract_valid": 100.0,
+          "correct": 62.5,
+          "scheduled": 24,
+          "edge_f1": 94.444444,
+          "unsafe_fact_admissions": 1,
+          "contract_valid_safety_records": 24,
+          "scheduled_fact_checks": 72,
+          "diagnosed_fact_checks": 72,
+          "reported_unsafe_fact_admissions": 1,
+          "reported_unsafe_fact_references": 0
+        }
+      },
+      "eligible": false,
+      "gate_failures": [
+        "QUESTION_CONTEXT_FAILED",
+        "UNSAFE_FACT_ADMITTED"
+      ],
+      "split_scores": {
+        "holdout_v4": {
+          "question": 75.0,
+          "matching": 62.5
+        }
+      },
+      "details": [
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "matching",
+          "episode_id": "v4-shared-schedule-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "matching",
+          "episode_id": "v4-shared-schedule-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "matching",
+          "episode_id": "v4-attributed-fix-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "matching",
+          "episode_id": "v4-attributed-fix-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "fact",
+              "v4-attributed-fix-2",
+              "v4-attributed-fix-2-f3",
+              "True",
+              ""
+            ],
+            [
+              "relevance",
+              "v4-attributed-fix-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-attributed-fix-2",
+              "v4-attributed-fix-2-f3",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ],
+            [
+              "relevance",
+              "v4-attributed-fix-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "matching",
+          "episode_id": "v4-applied-study-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "matching",
+          "episode_id": "v4-applied-study-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "matching",
+          "episode_id": "v4-future-only-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "matching",
+          "episode_id": "v4-future-only-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-future-only-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "relevance",
+              "v4-future-only-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "matching",
+          "episode_id": "v4-denied-teamwork-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "matching",
+          "episode_id": "v4-denied-teamwork-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-denied-teamwork-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "relevance",
+              "v4-denied-teamwork-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "matching",
+          "episode_id": "v4-assigned-role-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "matching",
+          "episode_id": "v4-assigned-role-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [
+              "v4-assigned-role-2-f2"
+            ],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [
+            "v4-assigned-role-2-f2"
+          ],
+          "missing": [
+            [
+              "fact",
+              "v4-assigned-role-2",
+              "v4-assigned-role-2-f2",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ],
+            [
+              "relevance",
+              "v4-assigned-role-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-assigned-role-2",
+              "v4-assigned-role-2-f2",
+              "True",
+              ""
+            ],
+            [
+              "relevance",
+              "v4-assigned-role-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "matching",
+          "episode_id": "v4-hard-goal-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "matching",
+          "episode_id": "v4-hard-goal-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "matching",
+          "episode_id": "v4-excluded-leadership-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "matching",
+          "episode_id": "v4-excluded-leadership-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "edge",
+              "v4-excluded-leadership-2",
+              "problem_solving",
+              "v4-excluded-leadership-2-f2"
+            ],
+            [
+              "relevance",
+              "v4-excluded-leadership-2",
+              "RELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "relevance",
+              "v4-excluded-leadership-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": false,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": false,
+          "criterion_f1": 0.0
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "matching",
+          "episode_id": "v4-visitor-view-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "matching",
+          "episode_id": "v4-visitor-view-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "fact",
+              "v4-visitor-view-2",
+              "v4-visitor-view-2-f2",
+              "True",
+              ""
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-visitor-view-2",
+              "v4-visitor-view-2-f2",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": false,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": false,
+          "criterion_f1": 0.0
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "matching",
+          "episode_id": "v4-reproducibility-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "matching",
+          "episode_id": "v4-reproducibility-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "fact",
+              "v4-reproducibility-2",
+              "v4-reproducibility-2-f2",
+              "True",
+              ""
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-reproducibility-2",
+              "v4-reproducibility-2-f2",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "matching",
+          "episode_id": "v4-data-command-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "matching",
+          "episode_id": "v4-data-command-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-data-command-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "relevance",
+              "v4-data-command-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 0.6666666666666666
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "matching",
+          "episode_id": "v4-two-distinct-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "matching",
+          "episode_id": "v4-two-distinct-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.6666666666666666,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": [
+            [
+              "edge",
+              "v4-two-distinct-2",
+              "problem_solving",
+              "v4-two-distinct-2-f2"
+            ]
+          ]
+        }
+      ],
+      "rank": 1
+    },
+    {
+      "candidate_id": "qwen3-14b-q6",
+      "provider": "qwen-local-llama.cpp",
+      "model": "Qwen3-14B",
+      "provenance": "CAPTURED",
+      "generation_config": {
+        "temperature": 0,
+        "top_k": 0,
+        "top_p": 1,
+        "min_p": 0,
+        "repeat_penalty": 1,
+        "presence_penalty": 0,
+        "seed": 42,
+        "max_tokens": 4096,
+        "stream": false,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "reasoning_effort": "none",
+        "cache_prompt": false,
+        "model_sha256": "cbc303a666337cbac396c808d26a3875ab4290b1c6e47d2a157e26980ae5b421",
+        "stage_response_formats": {
+          "question": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "criteria": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "criterion_id": {
+                        "type": "string",
+                        "enum": [
+                          "collaboration",
+                          "problem_solving",
+                          "challenge",
+                          "leadership",
+                          "learning",
+                          "responsibility",
+                          "custom_1",
+                          "custom_2",
+                          "custom_3",
+                          "custom_4",
+                          "custom_5",
+                          "custom_6"
+                        ]
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "question_quote": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "criterion_id",
+                      "label",
+                      "question_quote"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                },
+                "required_facts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "ROLE",
+                      "ACTION",
+                      "RESULT"
+                    ]
+                  },
+                  "minItems": 0
+                },
+                "needs_confirmation": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "criteria",
+                "required_facts",
+                "needs_confirmation"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "candidates": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "episode_id": {
+                        "type": "string"
+                      },
+                      "episode_version": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "relevance": {
+                        "type": "string",
+                        "enum": [
+                          "RELATED",
+                          "UNRELATED",
+                          "UNCERTAIN"
+                        ]
+                      },
+                      "fact_checks": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "fact_id": {
+                              "type": "string"
+                            },
+                            "usable": {
+                              "type": "boolean"
+                            },
+                            "issue": {
+                              "enum": [
+                                null,
+                                "PERSONAL_CONTRIBUTION_UNCLEAR",
+                                "NEGATED_OR_AMBIGUOUS_FACT",
+                                "INSUFFICIENT_CONTEXT",
+                                "INSTRUCTION_IN_SOURCE"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "fact_id",
+                            "usable",
+                            "issue"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "minItems": 0
+                      },
+                      "matches": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "criterion_id": {
+                              "type": "string"
+                            },
+                            "fact_ids": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              },
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "criterion_id",
+                            "fact_ids"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "minItems": 0
+                      }
+                    },
+                    "required": [
+                      "episode_id",
+                      "episode_version",
+                      "relevance",
+                      "fact_checks",
+                      "matches"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "candidates"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "extraction": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "units": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "unit_id": {
+                        "type": "string"
+                      },
+                      "kinds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "ROLE",
+                            "ACTION",
+                            "RESULT",
+                            "GOAL",
+                            "PERIOD",
+                            "OBSTACLE",
+                            "REFLECTION",
+                            "CONTEXT"
+                          ]
+                        },
+                        "minItems": 0
+                      },
+                      "subject": {
+                        "type": "string",
+                        "enum": [
+                          "SELF",
+                          "TEAM",
+                          "OTHER",
+                          "UNSPECIFIED",
+                          "MIXED"
+                        ]
+                      },
+                      "assertion": {
+                        "type": "string",
+                        "enum": [
+                          "AFFIRMED",
+                          "NEGATED",
+                          "PLANNED",
+                          "HYPOTHETICAL",
+                          "UNCERTAIN",
+                          "MIXED"
+                        ]
+                      },
+                      "issue": {
+                        "enum": [
+                          null,
+                          "INSUFFICIENT_CONTEXT",
+                          "INSTRUCTION_IN_SOURCE",
+                          "NO_EVIDENCE"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "unit_id",
+                      "kinds",
+                      "subject",
+                      "assertion",
+                      "issue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "units"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "schema_binding": "input_ids_and_cardinalities/0.2"
+      },
+      "scores": {
+        "question": 66.666667,
+        "matching": 70.833333
+      },
+      "total_score": 68.75,
+      "dimensions": {
+        "question": {
+          "json_valid": 100.0,
+          "schema_valid": 100.0,
+          "contract_valid": 100.0,
+          "correct": 66.666667,
+          "scheduled": 12,
+          "criteria_correct": 66.666667,
+          "required_facts_correct": 91.666667,
+          "question_quote_valid": 83.333333,
+          "criterion_f1": 77.777778,
+          "literal_quote_valid": 91.666667,
+          "context_preserved": 83.333333
+        },
+        "matching": {
+          "json_valid": 100.0,
+          "schema_valid": 100.0,
+          "contract_valid": 100.0,
+          "correct": 70.833333,
+          "scheduled": 24,
+          "edge_f1": 86.111111,
+          "unsafe_fact_admissions": 3,
+          "contract_valid_safety_records": 24,
+          "scheduled_fact_checks": 72,
+          "diagnosed_fact_checks": 72,
+          "reported_unsafe_fact_admissions": 3,
+          "reported_unsafe_fact_references": 1
+        }
+      },
+      "eligible": false,
+      "gate_failures": [
+        "QUESTION_SOURCE_QUOTE_FAILED",
+        "QUESTION_CONTEXT_FAILED",
+        "UNSAFE_FACT_REFERENCED",
+        "UNSAFE_FACT_ADMITTED"
+      ],
+      "split_scores": {
+        "holdout_v4": {
+          "question": 66.666667,
+          "matching": 70.833333
+        }
+      },
+      "details": [
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "matching",
+          "episode_id": "v4-shared-schedule-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "matching",
+          "episode_id": "v4-shared-schedule-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "matching",
+          "episode_id": "v4-attributed-fix-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "matching",
+          "episode_id": "v4-attributed-fix-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [
+              "v4-attributed-fix-2-f2"
+            ],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [
+            "v4-attributed-fix-2-f2"
+          ],
+          "missing": [
+            [
+              "fact",
+              "v4-attributed-fix-2",
+              "v4-attributed-fix-2-f2",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ],
+            [
+              "relevance",
+              "v4-attributed-fix-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-attributed-fix-2",
+              "v4-attributed-fix-2-f2",
+              "True",
+              ""
+            ],
+            [
+              "relevance",
+              "v4-attributed-fix-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "matching",
+          "episode_id": "v4-applied-study-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "matching",
+          "episode_id": "v4-applied-study-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "matching",
+          "episode_id": "v4-future-only-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "matching",
+          "episode_id": "v4-future-only-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "matching",
+          "episode_id": "v4-denied-teamwork-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "matching",
+          "episode_id": "v4-denied-teamwork-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [
+              "v4-denied-teamwork-2-f2"
+            ],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [
+            "v4-denied-teamwork-2-f2"
+          ],
+          "missing": [
+            [
+              "fact",
+              "v4-denied-teamwork-2",
+              "v4-denied-teamwork-2-f2",
+              "False",
+              "NEGATED_OR_AMBIGUOUS_FACT"
+            ],
+            [
+              "relevance",
+              "v4-denied-teamwork-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-denied-teamwork-2",
+              "v4-denied-teamwork-2-f2",
+              "True",
+              ""
+            ],
+            [
+              "relevance",
+              "v4-denied-teamwork-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "matching",
+          "episode_id": "v4-assigned-role-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "matching",
+          "episode_id": "v4-assigned-role-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [
+              "v4-assigned-role-2-f2"
+            ],
+            "reported_unsafe_reference_ids": [
+              "v4-assigned-role-2-f2"
+            ],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [
+            "v4-assigned-role-2-f2"
+          ],
+          "missing": [
+            [
+              "fact",
+              "v4-assigned-role-2",
+              "v4-assigned-role-2-f2",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ],
+            [
+              "relevance",
+              "v4-assigned-role-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "edge",
+              "v4-assigned-role-2",
+              "responsibility",
+              "v4-assigned-role-2-f2"
+            ],
+            [
+              "fact",
+              "v4-assigned-role-2",
+              "v4-assigned-role-2-f2",
+              "True",
+              ""
+            ],
+            [
+              "relevance",
+              "v4-assigned-role-2",
+              "RELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "matching",
+          "episode_id": "v4-hard-goal-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "matching",
+          "episode_id": "v4-hard-goal-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 0.6666666666666666
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "matching",
+          "episode_id": "v4-excluded-leadership-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "matching",
+          "episode_id": "v4-excluded-leadership-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "edge",
+              "v4-excluded-leadership-2",
+              "problem_solving",
+              "v4-excluded-leadership-2-f2"
+            ],
+            [
+              "relevance",
+              "v4-excluded-leadership-2",
+              "RELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "relevance",
+              "v4-excluded-leadership-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": false,
+          "context_preserved": false,
+          "criteria_correct": false,
+          "required_facts_correct": false,
+          "question_quote_valid": false,
+          "criterion_f1": 0.0
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "matching",
+          "episode_id": "v4-visitor-view-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "matching",
+          "episode_id": "v4-visitor-view-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-visitor-view-2",
+              "UNRELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "edge",
+              "v4-visitor-view-2",
+              "custom_1",
+              "v4-visitor-view-2-f2"
+            ],
+            [
+              "relevance",
+              "v4-visitor-view-2",
+              "RELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": false,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": false,
+          "criterion_f1": 0.0
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "matching",
+          "episode_id": "v4-reproducibility-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "matching",
+          "episode_id": "v4-reproducibility-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "matching",
+          "episode_id": "v4-data-command-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "matching",
+          "episode_id": "v4-data-command-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-data-command-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "relevance",
+              "v4-data-command-2",
+              "UNRELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 0.6666666666666666
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "matching",
+          "episode_id": "v4-two-distinct-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "matching",
+          "episode_id": "v4-two-distinct-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.6666666666666666,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "fact",
+              "v4-two-distinct-2",
+              "v4-two-distinct-2-f1",
+              "True",
+              ""
+            ]
+          ],
+          "unexpected": [
+            [
+              "edge",
+              "v4-two-distinct-2",
+              "problem_solving",
+              "v4-two-distinct-2-f2"
+            ],
+            [
+              "fact",
+              "v4-two-distinct-2",
+              "v4-two-distinct-2-f1",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ]
+          ]
+        }
+      ],
+      "rank": 1
+    },
+    {
+      "candidate_id": "gemma4-12b-qat",
+      "provider": "google-local-llama.cpp",
+      "model": "Gemma-4-12B-QAT",
+      "provenance": "CAPTURED",
+      "generation_config": {
+        "temperature": 0,
+        "top_k": 0,
+        "top_p": 1,
+        "min_p": 0,
+        "repeat_penalty": 1,
+        "presence_penalty": 0,
+        "seed": 42,
+        "max_tokens": 4096,
+        "stream": false,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "reasoning_effort": "none",
+        "cache_prompt": false,
+        "model_sha256": "f568ac5de71c8fcac5d5794494388ad94db9e18b4368ca897e21b30d2448eeec",
+        "stage_response_formats": {
+          "question": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "criteria": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "criterion_id": {
+                        "type": "string",
+                        "enum": [
+                          "collaboration",
+                          "problem_solving",
+                          "challenge",
+                          "leadership",
+                          "learning",
+                          "responsibility",
+                          "custom_1",
+                          "custom_2",
+                          "custom_3",
+                          "custom_4",
+                          "custom_5",
+                          "custom_6"
+                        ]
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "question_quote": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "criterion_id",
+                      "label",
+                      "question_quote"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                },
+                "required_facts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "ROLE",
+                      "ACTION",
+                      "RESULT"
+                    ]
+                  },
+                  "minItems": 0
+                },
+                "needs_confirmation": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "criteria",
+                "required_facts",
+                "needs_confirmation"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "candidates": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "episode_id": {
+                        "type": "string"
+                      },
+                      "episode_version": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "relevance": {
+                        "type": "string",
+                        "enum": [
+                          "RELATED",
+                          "UNRELATED",
+                          "UNCERTAIN"
+                        ]
+                      },
+                      "fact_checks": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "fact_id": {
+                              "type": "string"
+                            },
+                            "usable": {
+                              "type": "boolean"
+                            },
+                            "issue": {
+                              "enum": [
+                                null,
+                                "PERSONAL_CONTRIBUTION_UNCLEAR",
+                                "NEGATED_OR_AMBIGUOUS_FACT",
+                                "INSUFFICIENT_CONTEXT",
+                                "INSTRUCTION_IN_SOURCE"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "fact_id",
+                            "usable",
+                            "issue"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "minItems": 0
+                      },
+                      "matches": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "criterion_id": {
+                              "type": "string"
+                            },
+                            "fact_ids": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              },
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "criterion_id",
+                            "fact_ids"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "minItems": 0
+                      }
+                    },
+                    "required": [
+                      "episode_id",
+                      "episode_version",
+                      "relevance",
+                      "fact_checks",
+                      "matches"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "candidates"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "extraction": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "units": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "unit_id": {
+                        "type": "string"
+                      },
+                      "kinds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "ROLE",
+                            "ACTION",
+                            "RESULT",
+                            "GOAL",
+                            "PERIOD",
+                            "OBSTACLE",
+                            "REFLECTION",
+                            "CONTEXT"
+                          ]
+                        },
+                        "minItems": 0
+                      },
+                      "subject": {
+                        "type": "string",
+                        "enum": [
+                          "SELF",
+                          "TEAM",
+                          "OTHER",
+                          "UNSPECIFIED",
+                          "MIXED"
+                        ]
+                      },
+                      "assertion": {
+                        "type": "string",
+                        "enum": [
+                          "AFFIRMED",
+                          "NEGATED",
+                          "PLANNED",
+                          "HYPOTHETICAL",
+                          "UNCERTAIN",
+                          "MIXED"
+                        ]
+                      },
+                      "issue": {
+                        "enum": [
+                          null,
+                          "INSUFFICIENT_CONTEXT",
+                          "INSTRUCTION_IN_SOURCE",
+                          "NO_EVIDENCE"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "unit_id",
+                      "kinds",
+                      "subject",
+                      "assertion",
+                      "issue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "units"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "schema_binding": "input_ids_and_cardinalities/0.2"
+      },
+      "scores": {
+        "question": 83.333333,
+        "matching": 50.0
+      },
+      "total_score": 66.666666,
+      "dimensions": {
+        "question": {
+          "json_valid": 100.0,
+          "schema_valid": 100.0,
+          "contract_valid": 100.0,
+          "correct": 83.333333,
+          "scheduled": 12,
+          "criteria_correct": 83.333333,
+          "required_facts_correct": 100.0,
+          "question_quote_valid": 91.666667,
+          "criterion_f1": 83.333333,
+          "literal_quote_valid": 100.0,
+          "context_preserved": 91.666667
+        },
+        "matching": {
+          "json_valid": 100.0,
+          "schema_valid": 100.0,
+          "contract_valid": 70.833333,
+          "correct": 50.0,
+          "scheduled": 24,
+          "edge_f1": 55.555556,
+          "unsafe_fact_admissions": 0,
+          "contract_valid_safety_records": 17,
+          "scheduled_fact_checks": 72,
+          "diagnosed_fact_checks": 72,
+          "reported_unsafe_fact_admissions": 0,
+          "reported_unsafe_fact_references": 6
+        }
+      },
+      "eligible": false,
+      "gate_failures": [
+        "INVALID_OR_MISSING_OUTPUT",
+        "QUESTION_CONTEXT_FAILED",
+        "UNSAFE_FACT_REFERENCED"
+      ],
+      "split_scores": {
+        "holdout_v4": {
+          "question": 83.333333,
+          "matching": 50.0
+        }
+      },
+      "details": [
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "matching",
+          "episode_id": "v4-shared-schedule-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "matching",
+          "episode_id": "v4-shared-schedule-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": false,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "error": "UNRELATED_HAS_MATCH"
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "matching",
+          "episode_id": "v4-attributed-fix-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "matching",
+          "episode_id": "v4-attributed-fix-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": false,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [
+              "v4-attributed-fix-2-f2"
+            ],
+            "unverifiable_fact_ids": []
+          },
+          "error": "INVALID_FACT_REFERENCE"
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "matching",
+          "episode_id": "v4-applied-study-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "matching",
+          "episode_id": "v4-applied-study-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-applied-study-2",
+              "UNRELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "edge",
+              "v4-applied-study-2",
+              "learning",
+              "v4-applied-study-2-f2"
+            ],
+            [
+              "relevance",
+              "v4-applied-study-2",
+              "RELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "matching",
+          "episode_id": "v4-future-only-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "matching",
+          "episode_id": "v4-future-only-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": false,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [
+              "v4-future-only-2-f2"
+            ],
+            "unverifiable_fact_ids": []
+          },
+          "error": "INVALID_FACT_REFERENCE"
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "matching",
+          "episode_id": "v4-denied-teamwork-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "matching",
+          "episode_id": "v4-denied-teamwork-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": false,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [
+              "v4-denied-teamwork-2-f2"
+            ],
+            "unverifiable_fact_ids": []
+          },
+          "error": "INVALID_FACT_REFERENCE"
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "matching",
+          "episode_id": "v4-assigned-role-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "matching",
+          "episode_id": "v4-assigned-role-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": false,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [
+              "v4-assigned-role-2-f2"
+            ],
+            "unverifiable_fact_ids": []
+          },
+          "error": "INVALID_FACT_REFERENCE"
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "matching",
+          "episode_id": "v4-hard-goal-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "matching",
+          "episode_id": "v4-hard-goal-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-hard-goal-2",
+              "UNRELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "edge",
+              "v4-hard-goal-2",
+              "challenge",
+              "v4-hard-goal-2-f2"
+            ],
+            [
+              "relevance",
+              "v4-hard-goal-2",
+              "RELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "matching",
+          "episode_id": "v4-excluded-leadership-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "matching",
+          "episode_id": "v4-excluded-leadership-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.6666666666666666,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": [
+            [
+              "edge",
+              "v4-excluded-leadership-2",
+              "collaboration",
+              "v4-excluded-leadership-2-f2"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 0.0
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "matching",
+          "episode_id": "v4-visitor-view-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "matching",
+          "episode_id": "v4-visitor-view-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": false,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [
+              "v4-visitor-view-2-f2"
+            ],
+            "unverifiable_fact_ids": []
+          },
+          "error": "INVALID_FACT_REFERENCE"
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": false,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": false,
+          "criterion_f1": 0.0
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "matching",
+          "episode_id": "v4-reproducibility-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "matching",
+          "episode_id": "v4-reproducibility-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-reproducibility-2",
+              "UNRELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "edge",
+              "v4-reproducibility-2",
+              "custom_1",
+              "v4-reproducibility-2-f2"
+            ],
+            [
+              "relevance",
+              "v4-reproducibility-2",
+              "RELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "matching",
+          "episode_id": "v4-data-command-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "matching",
+          "episode_id": "v4-data-command-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": false,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [
+              "v4-data-command-2-f2"
+            ],
+            "unverifiable_fact_ids": []
+          },
+          "error": "INVALID_FACT_REFERENCE"
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "matching",
+          "episode_id": "v4-two-distinct-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "matching",
+          "episode_id": "v4-two-distinct-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.6666666666666666,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": [
+            [
+              "edge",
+              "v4-two-distinct-2",
+              "problem_solving",
+              "v4-two-distinct-2-f2"
+            ]
+          ]
+        }
+      ],
+      "rank": 3
+    },
+    {
+      "candidate_id": "qwen35-9b-q4",
+      "provider": "qwen-local-llama.cpp",
+      "model": "Qwen3.5-9B",
+      "provenance": "CAPTURED",
+      "generation_config": {
+        "temperature": 0,
+        "top_k": 0,
+        "top_p": 1,
+        "min_p": 0,
+        "repeat_penalty": 1,
+        "presence_penalty": 0,
+        "seed": 42,
+        "max_tokens": 4096,
+        "stream": false,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "reasoning_effort": "none",
+        "cache_prompt": false,
+        "model_sha256": "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
+        "stage_response_formats": {
+          "question": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "criteria": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "criterion_id": {
+                        "type": "string",
+                        "enum": [
+                          "collaboration",
+                          "problem_solving",
+                          "challenge",
+                          "leadership",
+                          "learning",
+                          "responsibility",
+                          "custom_1",
+                          "custom_2",
+                          "custom_3",
+                          "custom_4",
+                          "custom_5",
+                          "custom_6"
+                        ]
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "question_quote": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "criterion_id",
+                      "label",
+                      "question_quote"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                },
+                "required_facts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "ROLE",
+                      "ACTION",
+                      "RESULT"
+                    ]
+                  },
+                  "minItems": 0
+                },
+                "needs_confirmation": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "criteria",
+                "required_facts",
+                "needs_confirmation"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "candidates": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "episode_id": {
+                        "type": "string"
+                      },
+                      "episode_version": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "relevance": {
+                        "type": "string",
+                        "enum": [
+                          "RELATED",
+                          "UNRELATED",
+                          "UNCERTAIN"
+                        ]
+                      },
+                      "fact_checks": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "fact_id": {
+                              "type": "string"
+                            },
+                            "usable": {
+                              "type": "boolean"
+                            },
+                            "issue": {
+                              "enum": [
+                                null,
+                                "PERSONAL_CONTRIBUTION_UNCLEAR",
+                                "NEGATED_OR_AMBIGUOUS_FACT",
+                                "INSUFFICIENT_CONTEXT",
+                                "INSTRUCTION_IN_SOURCE"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "fact_id",
+                            "usable",
+                            "issue"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "minItems": 0
+                      },
+                      "matches": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "criterion_id": {
+                              "type": "string"
+                            },
+                            "fact_ids": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              },
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "criterion_id",
+                            "fact_ids"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "minItems": 0
+                      }
+                    },
+                    "required": [
+                      "episode_id",
+                      "episode_version",
+                      "relevance",
+                      "fact_checks",
+                      "matches"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "candidates"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "extraction": {
+            "type": "json_object",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "units": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "unit_id": {
+                        "type": "string"
+                      },
+                      "kinds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "ROLE",
+                            "ACTION",
+                            "RESULT",
+                            "GOAL",
+                            "PERIOD",
+                            "OBSTACLE",
+                            "REFLECTION",
+                            "CONTEXT"
+                          ]
+                        },
+                        "minItems": 0
+                      },
+                      "subject": {
+                        "type": "string",
+                        "enum": [
+                          "SELF",
+                          "TEAM",
+                          "OTHER",
+                          "UNSPECIFIED",
+                          "MIXED"
+                        ]
+                      },
+                      "assertion": {
+                        "type": "string",
+                        "enum": [
+                          "AFFIRMED",
+                          "NEGATED",
+                          "PLANNED",
+                          "HYPOTHETICAL",
+                          "UNCERTAIN",
+                          "MIXED"
+                        ]
+                      },
+                      "issue": {
+                        "enum": [
+                          null,
+                          "INSUFFICIENT_CONTEXT",
+                          "INSTRUCTION_IN_SOURCE",
+                          "NO_EVIDENCE"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "unit_id",
+                      "kinds",
+                      "subject",
+                      "assertion",
+                      "issue"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "units"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "schema_binding": "input_ids_and_cardinalities/0.2"
+      },
+      "scores": {
+        "question": 75.0,
+        "matching": 50.0
+      },
+      "total_score": 62.5,
+      "dimensions": {
+        "question": {
+          "json_valid": 100.0,
+          "schema_valid": 100.0,
+          "contract_valid": 100.0,
+          "correct": 75.0,
+          "scheduled": 12,
+          "criteria_correct": 75.0,
+          "required_facts_correct": 100.0,
+          "question_quote_valid": 83.333333,
+          "criterion_f1": 80.555556,
+          "literal_quote_valid": 100.0,
+          "context_preserved": 83.333333
+        },
+        "matching": {
+          "json_valid": 100.0,
+          "schema_valid": 100.0,
+          "contract_valid": 95.833333,
+          "correct": 50.0,
+          "scheduled": 24,
+          "edge_f1": 81.944444,
+          "unsafe_fact_admissions": 2,
+          "contract_valid_safety_records": 23,
+          "scheduled_fact_checks": 72,
+          "diagnosed_fact_checks": 72,
+          "reported_unsafe_fact_admissions": 2,
+          "reported_unsafe_fact_references": 2
+        }
+      },
+      "eligible": false,
+      "gate_failures": [
+        "INVALID_OR_MISSING_OUTPUT",
+        "QUESTION_CONTEXT_FAILED",
+        "UNSAFE_FACT_REFERENCED",
+        "UNSAFE_FACT_ADMITTED"
+      ],
+      "split_scores": {
+        "holdout_v4": {
+          "question": 75.0,
+          "matching": 50.0
+        }
+      },
+      "details": [
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "matching",
+          "episode_id": "v4-shared-schedule-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-shared-schedule",
+          "axis": "matching",
+          "episode_id": "v4-shared-schedule-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 0,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "fact",
+              "v4-shared-schedule-2",
+              "v4-shared-schedule-2-f1",
+              "True",
+              ""
+            ],
+            [
+              "fact",
+              "v4-shared-schedule-2",
+              "v4-shared-schedule-2-f2",
+              "True",
+              ""
+            ],
+            [
+              "fact",
+              "v4-shared-schedule-2",
+              "v4-shared-schedule-2-f3",
+              "True",
+              ""
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-shared-schedule-2",
+              "v4-shared-schedule-2-f1",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ],
+            [
+              "fact",
+              "v4-shared-schedule-2",
+              "v4-shared-schedule-2-f2",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ],
+            [
+              "fact",
+              "v4-shared-schedule-2",
+              "v4-shared-schedule-2-f3",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "matching",
+          "episode_id": "v4-attributed-fix-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-attributed-fix",
+          "axis": "matching",
+          "episode_id": "v4-attributed-fix-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": false,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [
+              "v4-attributed-fix-2-f2"
+            ],
+            "unverifiable_fact_ids": []
+          },
+          "error": "INVALID_FACT_REFERENCE"
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "matching",
+          "episode_id": "v4-applied-study-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-applied-study",
+          "axis": "matching",
+          "episode_id": "v4-applied-study-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 0,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "fact",
+              "v4-applied-study-2",
+              "v4-applied-study-2-f1",
+              "True",
+              ""
+            ],
+            [
+              "fact",
+              "v4-applied-study-2",
+              "v4-applied-study-2-f2",
+              "True",
+              ""
+            ],
+            [
+              "fact",
+              "v4-applied-study-2",
+              "v4-applied-study-2-f3",
+              "True",
+              ""
+            ],
+            [
+              "relevance",
+              "v4-applied-study-2",
+              "UNRELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-applied-study-2",
+              "v4-applied-study-2-f1",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ],
+            [
+              "fact",
+              "v4-applied-study-2",
+              "v4-applied-study-2-f2",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ],
+            [
+              "fact",
+              "v4-applied-study-2",
+              "v4-applied-study-2-f3",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ],
+            [
+              "relevance",
+              "v4-applied-study-2",
+              "UNCERTAIN"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "matching",
+          "episode_id": "v4-future-only-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-future-only",
+          "axis": "matching",
+          "episode_id": "v4-future-only-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "fact",
+              "v4-future-only-2",
+              "v4-future-only-2-f1",
+              "True",
+              ""
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-future-only-2",
+              "v4-future-only-2-f1",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "matching",
+          "episode_id": "v4-denied-teamwork-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-denied-teamwork",
+          "axis": "matching",
+          "episode_id": "v4-denied-teamwork-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [
+              "v4-denied-teamwork-2-f2"
+            ],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [
+            "v4-denied-teamwork-2-f2"
+          ],
+          "missing": [
+            [
+              "fact",
+              "v4-denied-teamwork-2",
+              "v4-denied-teamwork-2-f2",
+              "False",
+              "NEGATED_OR_AMBIGUOUS_FACT"
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-denied-teamwork-2",
+              "v4-denied-teamwork-2-f2",
+              "True",
+              ""
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "matching",
+          "episode_id": "v4-assigned-role-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-assigned-role",
+          "axis": "matching",
+          "episode_id": "v4-assigned-role-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [
+              "v4-assigned-role-2-f2"
+            ],
+            "reported_unsafe_reference_ids": [
+              "v4-assigned-role-2-f2"
+            ],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 2,
+          "fact_count": 3,
+          "unsafe_fact_ids": [
+            "v4-assigned-role-2-f2"
+          ],
+          "missing": [
+            [
+              "fact",
+              "v4-assigned-role-2",
+              "v4-assigned-role-2-f2",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ],
+            [
+              "relevance",
+              "v4-assigned-role-2",
+              "UNCERTAIN"
+            ]
+          ],
+          "unexpected": [
+            [
+              "edge",
+              "v4-assigned-role-2",
+              "responsibility",
+              "v4-assigned-role-2-f2"
+            ],
+            [
+              "fact",
+              "v4-assigned-role-2",
+              "v4-assigned-role-2-f2",
+              "True",
+              ""
+            ],
+            [
+              "relevance",
+              "v4-assigned-role-2",
+              "RELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": false,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": false,
+          "criterion_f1": 0.6666666666666666
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "matching",
+          "episode_id": "v4-hard-goal-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-hard-goal",
+          "axis": "matching",
+          "episode_id": "v4-hard-goal-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-hard-goal-2",
+              "UNRELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "relevance",
+              "v4-hard-goal-2",
+              "UNCERTAIN"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "matching",
+          "episode_id": "v4-excluded-leadership-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-excluded-leadership",
+          "axis": "matching",
+          "episode_id": "v4-excluded-leadership-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 0,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "edge",
+              "v4-excluded-leadership-2",
+              "problem_solving",
+              "v4-excluded-leadership-2-f2"
+            ],
+            [
+              "fact",
+              "v4-excluded-leadership-2",
+              "v4-excluded-leadership-2-f1",
+              "True",
+              ""
+            ],
+            [
+              "fact",
+              "v4-excluded-leadership-2",
+              "v4-excluded-leadership-2-f2",
+              "True",
+              ""
+            ],
+            [
+              "fact",
+              "v4-excluded-leadership-2",
+              "v4-excluded-leadership-2-f3",
+              "True",
+              ""
+            ],
+            [
+              "relevance",
+              "v4-excluded-leadership-2",
+              "RELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-excluded-leadership-2",
+              "v4-excluded-leadership-2-f1",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ],
+            [
+              "fact",
+              "v4-excluded-leadership-2",
+              "v4-excluded-leadership-2-f2",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ],
+            [
+              "fact",
+              "v4-excluded-leadership-2",
+              "v4-excluded-leadership-2-f3",
+              "False",
+              "PERSONAL_CONTRIBUTION_UNCLEAR"
+            ],
+            [
+              "relevance",
+              "v4-excluded-leadership-2",
+              "UNCERTAIN"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 0.0
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "matching",
+          "episode_id": "v4-visitor-view-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-visitor-view",
+          "axis": "matching",
+          "episode_id": "v4-visitor-view-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "relevance",
+              "v4-visitor-view-2",
+              "UNRELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "edge",
+              "v4-visitor-view-2",
+              "custom_1",
+              "v4-visitor-view-2-f2"
+            ],
+            [
+              "relevance",
+              "v4-visitor-view-2",
+              "RELATED"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "literal_quote_valid": true,
+          "context_preserved": false,
+          "criteria_correct": false,
+          "required_facts_correct": true,
+          "question_quote_valid": false,
+          "criterion_f1": 0.0
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "matching",
+          "episode_id": "v4-reproducibility-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-reproducibility",
+          "axis": "matching",
+          "episode_id": "v4-reproducibility-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 0,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "fact",
+              "v4-reproducibility-2",
+              "v4-reproducibility-2-f1",
+              "True",
+              ""
+            ],
+            [
+              "fact",
+              "v4-reproducibility-2",
+              "v4-reproducibility-2-f2",
+              "True",
+              ""
+            ],
+            [
+              "fact",
+              "v4-reproducibility-2",
+              "v4-reproducibility-2-f3",
+              "True",
+              ""
+            ],
+            [
+              "relevance",
+              "v4-reproducibility-2",
+              "UNRELATED"
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-reproducibility-2",
+              "v4-reproducibility-2-f1",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ],
+            [
+              "fact",
+              "v4-reproducibility-2",
+              "v4-reproducibility-2-f2",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ],
+            [
+              "fact",
+              "v4-reproducibility-2",
+              "v4-reproducibility-2-f3",
+              "False",
+              "INSUFFICIENT_CONTEXT"
+            ],
+            [
+              "relevance",
+              "v4-reproducibility-2",
+              "UNCERTAIN"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "matching",
+          "episode_id": "v4-data-command-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-data-command",
+          "axis": "matching",
+          "episode_id": "v4-data-command-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 1,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [
+            [
+              "fact",
+              "v4-data-command-2",
+              "v4-data-command-2-f1",
+              "True",
+              ""
+            ],
+            [
+              "fact",
+              "v4-data-command-2",
+              "v4-data-command-2-f3",
+              "True",
+              ""
+            ]
+          ],
+          "unexpected": [
+            [
+              "fact",
+              "v4-data-command-2",
+              "v4-data-command-2-f1",
+              "False",
+              "INSTRUCTION_IN_SOURCE"
+            ],
+            [
+              "fact",
+              "v4-data-command-2",
+              "v4-data-command-2-f3",
+              "False",
+              "INSTRUCTION_IN_SOURCE"
+            ]
+          ]
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "question",
+          "episode_id": null,
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "literal_quote_valid": true,
+          "context_preserved": true,
+          "criteria_correct": true,
+          "required_facts_correct": true,
+          "question_quote_valid": true,
+          "criterion_f1": 1.0
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "matching",
+          "episode_id": "v4-two-distinct-1",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": true,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 1.0,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": []
+        },
+        {
+          "case_id": "v4-two-distinct",
+          "axis": "matching",
+          "episode_id": "v4-two-distinct-2",
+          "repeat": 0,
+          "split": "holdout_v4",
+          "json_valid": true,
+          "schema_valid": true,
+          "contract_valid": true,
+          "correct": false,
+          "safety_diagnostics": {
+            "scheduled_fact_checks": 3,
+            "diagnosed_fact_checks": 3,
+            "reported_unsafe_fact_ids": [],
+            "reported_unsafe_reference_ids": [],
+            "unverifiable_fact_ids": []
+          },
+          "matching_edge_f1": 0.6666666666666666,
+          "fact_usability_correct": 3,
+          "fact_count": 3,
+          "unsafe_fact_ids": [],
+          "missing": [],
+          "unexpected": [
+            [
+              "edge",
+              "v4-two-distinct-2",
+              "problem_solving",
+              "v4-two-distinct-2-f2"
+            ]
+          ]
+        }
+      ],
+      "rank": 4
+    }
+  ],
+  "recommendation": {
+    "status": "WITHHELD",
+    "candidate_ids": [],
+    "blockers": [
+      "DRAFT_OR_EXPLORATORY_EVALUATION",
+      "NO_MODEL_PASSED_REQUIRED_GATES"
+    ]
+  },
+  "limitations": [
+    "Draft references are not human-approved ground truth.",
+    "Extraction is scored separately and is not included in this 50:50 score.",
+    "Longer quotes are accepted only when they contain a complete reference anchor.",
+    "Per-experience accuracy uses equally weighted candidate requests, not batch accuracy."
+  ]
+}

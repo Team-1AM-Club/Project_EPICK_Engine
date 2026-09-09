@@ -1,0 +1,658 @@
+{
+  "schema_version": "w4-detailed-output/0.1",
+  "request_id": "staged-v4-synthetic-demo",
+  "project_id": "project-demo-sk-hynix",
+  "data_kind": "SYNTHETIC",
+  "status": "COMPLETED_WITH_LIMITATIONS",
+  "question_scope": {
+    "scope_id": "skhynix-2026-march-R260521-IT",
+    "question_id": "expertise",
+    "user_theme": null,
+    "catalog_sha256": "84f84710aa12628aa7a52ad31ae5aba9a99753768be57db5317607ed712146fb",
+    "status": "DRAFT_FOR_LOCAL_REVIEW",
+    "official_text": null,
+    "is_official_rubric": false,
+    "form_constraints": {
+      "max_characters": null,
+      "required": null,
+      "max_hashtags": null
+    },
+    "enforced_form_constraints": []
+  },
+  "candidates": [
+    {
+      "episode_id": "episode-library-reservation",
+      "episode_version": 1,
+      "title": "도서관 예약 도구 개선",
+      "status": "DIRECT_MATCH",
+      "content_checks": [
+        {
+          "check_id": "expertise.specific_area",
+          "description": "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+          "status": "SUPPORTED",
+          "model_status": "SUPPORTED",
+          "validation_issue": null,
+          "evidence": [
+            {
+              "evidence_id": "extract:episode-library-reservation:v1:u6",
+              "episode_id": "episode-library-reservation",
+              "episode_version": 1,
+              "start": 173,
+              "end": 224,
+              "exact_quote": "저는 4월에 트랜잭션 처리를 학습한 뒤 5월과 6월에 테스트를 반복하며 코드를 수정했습니다.",
+              "kinds": [
+                "ACTION",
+                "PERIOD"
+              ],
+              "subject": "SELF",
+              "assertion": "AFFIRMED",
+              "issue": null
+            }
+          ],
+          "follow_up_question": null
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "description": "학습을 지속하거나 반복한 과정이 드러나는가",
+          "status": "SUPPORTED",
+          "model_status": "SUPPORTED",
+          "validation_issue": null,
+          "evidence": [
+            {
+              "evidence_id": "extract:episode-library-reservation:v1:u6",
+              "episode_id": "episode-library-reservation",
+              "episode_version": 1,
+              "start": 173,
+              "end": 224,
+              "exact_quote": "저는 4월에 트랜잭션 처리를 학습한 뒤 5월과 6월에 테스트를 반복하며 코드를 수정했습니다.",
+              "kinds": [
+                "ACTION",
+                "PERIOD"
+              ],
+              "subject": "SELF",
+              "assertion": "AFFIRMED",
+              "issue": null
+            }
+          ],
+          "follow_up_question": null
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "description": "배운 내용을 실제 작업에 사용한 행동이 있는가",
+          "status": "SUPPORTED",
+          "model_status": "SUPPORTED",
+          "validation_issue": null,
+          "evidence": [
+            {
+              "evidence_id": "extract:episode-library-reservation:v1:u6",
+              "episode_id": "episode-library-reservation",
+              "episode_version": 1,
+              "start": 173,
+              "end": 224,
+              "exact_quote": "저는 4월에 트랜잭션 처리를 학습한 뒤 5월과 6월에 테스트를 반복하며 코드를 수정했습니다.",
+              "kinds": [
+                "ACTION",
+                "PERIOD"
+              ],
+              "subject": "SELF",
+              "assertion": "AFFIRMED",
+              "issue": null
+            },
+            {
+              "evidence_id": "extract:episode-library-reservation:v1:u7",
+              "episode_id": "episode-library-reservation",
+              "episode_version": 1,
+              "start": 225,
+              "end": 259,
+              "exact_quote": "마지막 테스트에서는 중복 예약이 6건에서 1건으로 줄었습니다.",
+              "kinds": [
+                "RESULT"
+              ],
+              "subject": "UNSPECIFIED",
+              "assertion": "AFFIRMED",
+              "issue": null
+            }
+          ],
+          "follow_up_question": null
+        }
+      ],
+      "reasons": [
+        "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+        "학습을 지속하거나 반복한 과정이 드러나는가",
+        "배운 내용을 실제 작업에 사용한 행동이 있는가"
+      ],
+      "confirmation_items": [],
+      "ranking_evidence_kind_count": 3,
+      "rank": 1,
+      "tied_on_quality_keys": false
+    },
+    {
+      "episode_id": "v4-raw-study",
+      "episode_version": 1,
+      "title": "가상 원문 v4-raw-study",
+      "status": "DIRECT_MATCH",
+      "content_checks": [
+        {
+          "check_id": "expertise.specific_area",
+          "description": "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+          "status": "SUPPORTED",
+          "model_status": "SUPPORTED",
+          "validation_issue": null,
+          "evidence": [
+            {
+              "evidence_id": "extract:v4-raw-study:v1:u2",
+              "episode_id": "v4-raw-study",
+              "episode_version": 1,
+              "start": 25,
+              "end": 71,
+              "exact_quote": "저는 6주 동안 매주 JSON Schema 안내서를 읽고 검증 예제를 실습했습니다.",
+              "kinds": [
+                "ACTION",
+                "PERIOD"
+              ],
+              "subject": "SELF",
+              "assertion": "AFFIRMED",
+              "issue": null
+            }
+          ],
+          "follow_up_question": null
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "description": "학습을 지속하거나 반복한 과정이 드러나는가",
+          "status": "SUPPORTED",
+          "model_status": "SUPPORTED",
+          "validation_issue": null,
+          "evidence": [
+            {
+              "evidence_id": "extract:v4-raw-study:v1:u2",
+              "episode_id": "v4-raw-study",
+              "episode_version": 1,
+              "start": 25,
+              "end": 71,
+              "exact_quote": "저는 6주 동안 매주 JSON Schema 안내서를 읽고 검증 예제를 실습했습니다.",
+              "kinds": [
+                "ACTION",
+                "PERIOD"
+              ],
+              "subject": "SELF",
+              "assertion": "AFFIRMED",
+              "issue": null
+            }
+          ],
+          "follow_up_question": null
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "description": "배운 내용을 실제 작업에 사용한 행동이 있는가",
+          "status": "SUPPORTED",
+          "model_status": "SUPPORTED",
+          "validation_issue": null,
+          "evidence": [
+            {
+              "evidence_id": "extract:v4-raw-study:v1:u3",
+              "episode_id": "v4-raw-study",
+              "episode_version": 1,
+              "start": 72,
+              "end": 104,
+              "exact_quote": "저는 학습한 검증 규칙을 파일 업로드 기능에 적용했습니다.",
+              "kinds": [
+                "ACTION"
+              ],
+              "subject": "SELF",
+              "assertion": "AFFIRMED",
+              "issue": null
+            }
+          ],
+          "follow_up_question": null
+        }
+      ],
+      "reasons": [
+        "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+        "학습을 지속하거나 반복한 과정이 드러나는가",
+        "배운 내용을 실제 작업에 사용한 행동이 있는가"
+      ],
+      "confirmation_items": [],
+      "ranking_evidence_kind_count": 2,
+      "rank": 2,
+      "tied_on_quality_keys": false
+    },
+    {
+      "episode_id": "episode-learning",
+      "episode_version": 1,
+      "title": "새 기술을 학습해 반복 작업 자동화",
+      "status": "PARTIAL_MATCH",
+      "content_checks": [
+        {
+          "check_id": "expertise.specific_area",
+          "description": "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+          "status": "SUPPORTED",
+          "model_status": "SUPPORTED",
+          "validation_issue": null,
+          "evidence": [
+            {
+              "evidence_id": "extract:episode-learning:v1:u2",
+              "episode_id": "episode-learning",
+              "episode_version": 1,
+              "start": 30,
+              "end": 82,
+              "exact_quote": "저는 처음 사용하는 Python을 학습하고 공식 문서를 읽어 데이터 정리 코드에 적용했습니다.",
+              "kinds": [
+                "ACTION"
+              ],
+              "subject": "SELF",
+              "assertion": "AFFIRMED",
+              "issue": null
+            }
+          ],
+          "follow_up_question": null
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "description": "학습을 지속하거나 반복한 과정이 드러나는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "description": "배운 내용을 실제 작업에 사용한 행동이 있는가",
+          "status": "SUPPORTED",
+          "model_status": "SUPPORTED",
+          "validation_issue": null,
+          "evidence": [
+            {
+              "evidence_id": "extract:episode-learning:v1:u2",
+              "episode_id": "episode-learning",
+              "episode_version": 1,
+              "start": 30,
+              "end": 82,
+              "exact_quote": "저는 처음 사용하는 Python을 학습하고 공식 문서를 읽어 데이터 정리 코드에 적용했습니다.",
+              "kinds": [
+                "ACTION"
+              ],
+              "subject": "SELF",
+              "assertion": "AFFIRMED",
+              "issue": null
+            },
+            {
+              "evidence_id": "extract:episode-learning:v1:u3",
+              "episode_id": "episode-learning",
+              "episode_version": 1,
+              "start": 83,
+              "end": 109,
+              "exact_quote": "3개 데이터 파일의 정리 작업을 자동화했습니다.",
+              "kinds": [
+                "RESULT"
+              ],
+              "subject": "SELF",
+              "assertion": "AFFIRMED",
+              "issue": null
+            }
+          ],
+          "follow_up_question": null
+        }
+      ],
+      "reasons": [
+        "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+        "배운 내용을 실제 작업에 사용한 행동이 있는가"
+      ],
+      "confirmation_items": [
+        {
+          "check_id": "expertise.sustained_learning",
+          "status": "NOT_SHOWN",
+          "question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        }
+      ],
+      "ranking_evidence_kind_count": 2,
+      "rank": 3,
+      "tied_on_quality_keys": false
+    },
+    {
+      "episode_id": "episode-team-api",
+      "episode_version": 1,
+      "title": "팀 프로젝트의 API 협업과 오류 개선",
+      "status": "NEEDS_CONFIRMATION",
+      "content_checks": [
+        {
+          "check_id": "expertise.specific_area",
+          "description": "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "어떤 지식이나 기술을 어떤 방법으로 배웠나요?"
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "description": "학습을 지속하거나 반복한 과정이 드러나는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "description": "배운 내용을 실제 작업에 사용한 행동이 있는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "배운 내용을 실제로 어디에 어떻게 사용했나요?"
+        }
+      ],
+      "reasons": [],
+      "confirmation_items": [
+        {
+          "check_id": "expertise.specific_area",
+          "status": "NOT_SHOWN",
+          "question": "어떤 지식이나 기술을 어떤 방법으로 배웠나요?"
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "status": "NOT_SHOWN",
+          "question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "status": "NOT_SHOWN",
+          "question": "배운 내용을 실제로 어디에 어떻게 사용했나요?"
+        }
+      ],
+      "ranking_evidence_kind_count": 0,
+      "rank": 4,
+      "tied_on_quality_keys": true
+    },
+    {
+      "episode_id": "episode-team-unclear",
+      "episode_version": 1,
+      "title": "팀의 성과만 기록한 협업 경험",
+      "status": "NEEDS_CONFIRMATION",
+      "content_checks": [
+        {
+          "check_id": "expertise.specific_area",
+          "description": "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "어떤 지식이나 기술을 어떤 방법으로 배웠나요?"
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "description": "학습을 지속하거나 반복한 과정이 드러나는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "description": "배운 내용을 실제 작업에 사용한 행동이 있는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "배운 내용을 실제로 어디에 어떻게 사용했나요?"
+        }
+      ],
+      "reasons": [],
+      "confirmation_items": [
+        {
+          "check_id": "expertise.specific_area",
+          "status": "NOT_SHOWN",
+          "question": "어떤 지식이나 기술을 어떤 방법으로 배웠나요?"
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "status": "NOT_SHOWN",
+          "question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "status": "NOT_SHOWN",
+          "question": "배운 내용을 실제로 어디에 어떻게 사용했나요?"
+        }
+      ],
+      "ranking_evidence_kind_count": 0,
+      "rank": 5,
+      "tied_on_quality_keys": true
+    },
+    {
+      "episode_id": "v4-raw-challenge",
+      "episode_version": 1,
+      "title": "가상 원문 v4-raw-challenge",
+      "status": "NEEDS_CONFIRMATION",
+      "content_checks": [
+        {
+          "check_id": "expertise.specific_area",
+          "description": "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "어떤 지식이나 기술을 어떤 방법으로 배웠나요?"
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "description": "학습을 지속하거나 반복한 과정이 드러나는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "description": "배운 내용을 실제 작업에 사용한 행동이 있는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "배운 내용을 실제로 어디에 어떻게 사용했나요?"
+        }
+      ],
+      "reasons": [],
+      "confirmation_items": [
+        {
+          "check_id": "expertise.specific_area",
+          "status": "NOT_SHOWN",
+          "question": "어떤 지식이나 기술을 어떤 방법으로 배웠나요?"
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "status": "NOT_SHOWN",
+          "question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "status": "NOT_SHOWN",
+          "question": "배운 내용을 실제로 어디에 어떻게 사용했나요?"
+        }
+      ],
+      "ranking_evidence_kind_count": 0,
+      "rank": 6,
+      "tied_on_quality_keys": true
+    },
+    {
+      "episode_id": "v4-raw-cooperation",
+      "episode_version": 1,
+      "title": "가상 원문 v4-raw-cooperation",
+      "status": "NEEDS_CONFIRMATION",
+      "content_checks": [
+        {
+          "check_id": "expertise.specific_area",
+          "description": "어떤 직무 지식·기술을 익혔는지 구체적으로 드러나는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "어떤 지식이나 기술을 어떤 방법으로 배웠나요?"
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "description": "학습을 지속하거나 반복한 과정이 드러나는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "description": "배운 내용을 실제 작업에 사용한 행동이 있는가",
+          "status": "NOT_SHOWN",
+          "model_status": "NOT_SHOWN",
+          "validation_issue": null,
+          "evidence": [],
+          "follow_up_question": "배운 내용을 실제로 어디에 어떻게 사용했나요?"
+        }
+      ],
+      "reasons": [],
+      "confirmation_items": [
+        {
+          "check_id": "expertise.specific_area",
+          "status": "NOT_SHOWN",
+          "question": "어떤 지식이나 기술을 어떤 방법으로 배웠나요?"
+        },
+        {
+          "check_id": "expertise.sustained_learning",
+          "status": "NOT_SHOWN",
+          "question": "그 학습을 언제부터 어떤 주기로 이어 갔나요?"
+        },
+        {
+          "check_id": "expertise.practical_use",
+          "status": "NOT_SHOWN",
+          "question": "배운 내용을 실제로 어디에 어떻게 사용했나요?"
+        }
+      ],
+      "ranking_evidence_kind_count": 0,
+      "rank": 7,
+      "tied_on_quality_keys": true
+    }
+  ],
+  "snapshot": {
+    "snapshot_id": "snapshot-extraction-demo-v1",
+    "extracted_episode_versions": {
+      "episode-learning": 1,
+      "episode-team-api": 1,
+      "episode-team-unclear": 1,
+      "episode-library-reservation": 1,
+      "v4-raw-cooperation": 1,
+      "v4-raw-study": 1,
+      "v4-raw-challenge": 1
+    }
+  },
+  "diagnostics": [],
+  "follow_up_questions": [],
+  "ranking_policy": [
+    "문항 전체의 근거 상태",
+    "지원 근거의 종류 수",
+    "경험 ID"
+  ],
+  "subcheck_counts_used_as_ranking_points": false,
+  "inference": {
+    "extraction": {
+      "mode": "LLM",
+      "provider": "google-local-llama.cpp",
+      "model": "Gemma-4-12B-QAT",
+      "prompt_version": "w4-source-unit-extraction/0.3",
+      "prompt_sha256": "a44b9c7c15ccce0791a4333a3c113294f94519c79276a1b9b1c4005b64e809ff",
+      "calls": [
+        {
+          "stage": "extraction",
+          "episode_id": "episode-learning",
+          "episode_version": 1,
+          "input_sha256": "55bbf903fafa7c24133967fc13503716b51acc6e00f96359b14abeb0784e8c7a"
+        },
+        {
+          "stage": "extraction",
+          "episode_id": "episode-team-api",
+          "episode_version": 1,
+          "input_sha256": "30dfb643d20bedc58707e41ed7fa70ab2320c1cad41f7da01275a479319ef477"
+        },
+        {
+          "stage": "extraction",
+          "episode_id": "episode-team-unclear",
+          "episode_version": 1,
+          "input_sha256": "e1109c6b745e5bc6c0ac8534d3633ea52ff4ca9c505e3360d79be8f6cacf2f8c"
+        },
+        {
+          "stage": "extraction",
+          "episode_id": "episode-library-reservation",
+          "episode_version": 1,
+          "input_sha256": "a9171cbadaa49049f08e55cb27e1ad90c597ba42095c4226d631b205ee026b6b"
+        },
+        {
+          "stage": "extraction",
+          "episode_id": "v4-raw-cooperation",
+          "episode_version": 1,
+          "input_sha256": "3a36cbc15ccdb3e719c8c72d3fc7ebf70a64832b75ec6c3e4887a7e62db3342c"
+        },
+        {
+          "stage": "extraction",
+          "episode_id": "v4-raw-study",
+          "episode_version": 1,
+          "input_sha256": "26e6abb6e4e85a34f4cfb81315e826c832c011e9cfa4359edc970ae315f463a1"
+        },
+        {
+          "stage": "extraction",
+          "episode_id": "v4-raw-challenge",
+          "episode_version": 1,
+          "input_sha256": "914c3e41ecb9e27defd027787c47d16a83e290c3d66d8ca8a833054f930a7b72"
+        }
+      ]
+    },
+    "judgment": {
+      "mode": "LLM",
+      "provider": "google-local-llama.cpp",
+      "model": "Gemma-4-26B-A4B-QAT",
+      "prompt_version": "w4-draft-content-checks/0.2",
+      "prompt_sha256": "543138c6447abd8106f7385756e3c42b4c116beab711a0629a1e81ce650a892c",
+      "calls": [
+        {
+          "episode_id": "episode-learning",
+          "input_sha256": "bcbaea3064715af1c6cfb16ba209e419fdcaf565db2a20e4884886e0f5142c26"
+        },
+        {
+          "episode_id": "episode-team-api",
+          "input_sha256": "8d30f508c964833c8e1d06b70058c824166a31cae5856992b87cf371cae7613f"
+        },
+        {
+          "episode_id": "episode-team-unclear",
+          "input_sha256": "8cb396f57abaa61bb5648d708e270b0d68926f7dacf88b718f491b0cf10f622f"
+        },
+        {
+          "episode_id": "episode-library-reservation",
+          "input_sha256": "83347504bcc71c7e731254384482d4fe62094e26e2817a7d6f0996000c10f632"
+        },
+        {
+          "episode_id": "v4-raw-cooperation",
+          "input_sha256": "57eec4707638e475638e7a0320a5a7433d9e6f6152822df21497162cdd861f75"
+        },
+        {
+          "episode_id": "v4-raw-study",
+          "input_sha256": "2572856fa3dd9e69cb863e97000572c82e6fa33f1cd3f677bc5cf6356bb4fe29"
+        },
+        {
+          "episode_id": "v4-raw-challenge",
+          "input_sha256": "a00a0ff255859181604726cff955266d90bd69836af1da24fdeee38b542dc2b5"
+        }
+      ]
+    },
+    "selection_status": "EXPLORATORY_NOT_PRODUCTION_SELECTED"
+  },
+  "eligibility_assessment": {
+    "status": "NOT_ASSESSED"
+  },
+  "limitations": [
+    "문항 5개·내용 점검 10개는 공식 지원서가 확인되지 않은 해석 초안입니다.",
+    "SUPPORTED는 원문 진술의 뒷받침이며 실제 수행·인과·지원 자격의 독립 검증이 아닙니다.",
+    "미확인 글자 수·필수 여부를 적용하지 않았으며 NOT_SHOWN은 경험의 부재를 뜻하지 않습니다.",
+    "일부 점검의 충족을 별도 가산점으로 더하지 않습니다. 같은 정렬 조건이면 경험 ID로 순서를 정합니다."
+  ]
+}

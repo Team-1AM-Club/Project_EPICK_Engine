@@ -1,0 +1,103 @@
+{
+  "status": "ASSISTANT_REVIEW_NOT_HUMAN_APPROVED",
+  "queue": [
+    {
+      "profile": "a",
+      "candidate_id": "gemma4-12b-qat",
+      "case_id": "v4-visitor-view",
+      "label": "고객 관점의 요구 파악",
+      "quote": "방문자의 요구를 관찰하고 그 관점에서 제안한",
+      "literal_valid": true,
+      "context_valid": true,
+      "review_type": "UNREGISTERED_LABEL_REQUIRES_SEMANTIC_REVIEW",
+      "score_changed": false
+    },
+    {
+      "profile": "a",
+      "candidate_id": "qwen35-9b-q4",
+      "case_id": "v4-visitor-view",
+      "label": "방문자 관점의 관찰과 제안",
+      "quote": "방문자의 요구를 관찰하고 그 관점에서 제안한 경험의 역할, 행동, 결과를 쓰세요.",
+      "literal_valid": true,
+      "context_valid": true,
+      "review_type": "UNREGISTERED_LABEL_REQUIRES_SEMANTIC_REVIEW",
+      "score_changed": false
+    },
+    {
+      "profile": "b",
+      "candidate_id": "gemma4-12b-qat",
+      "case_id": "v4-reproducibility",
+      "label": "절차 기록 및 공유",
+      "quote": "다른 사람이 같은 절차를 재현할 수 있도록 기록한 경험",
+      "literal_valid": true,
+      "context_valid": true,
+      "review_type": "UNREGISTERED_LABEL_REQUIRES_SEMANTIC_REVIEW",
+      "score_changed": false
+    },
+    {
+      "profile": "b",
+      "candidate_id": "gemma4-26b-qat",
+      "case_id": "v4-visitor-view",
+      "label": "사용자 관점 제안",
+      "quote": "방문자의 요구를 관찰하고 그 관점에서 제안한 경험",
+      "literal_valid": true,
+      "context_valid": true,
+      "review_type": "UNREGISTERED_LABEL_REQUIRES_SEMANTIC_REVIEW",
+      "score_changed": false
+    },
+    {
+      "profile": "b",
+      "candidate_id": "gemma4-26b-qat",
+      "case_id": "v4-reproducibility",
+      "label": "절차의 재현성",
+      "quote": "다른 사람이 같은 절차를 재현할 수 있도록 기록한 경험",
+      "literal_valid": true,
+      "context_valid": true,
+      "review_type": "UNREGISTERED_LABEL_REQUIRES_SEMANTIC_REVIEW",
+      "score_changed": false
+    },
+    {
+      "profile": "b",
+      "candidate_id": "qwen3-14b-q6",
+      "case_id": "v4-reproducibility",
+      "label": "기록·전달",
+      "quote": "다른 사람이 같은 절차를 재현할 수 있도록 기록한 경험의 역할, 행동, 결과를 쓰세요.",
+      "literal_valid": true,
+      "context_valid": true,
+      "review_type": "UNREGISTERED_LABEL_REQUIRES_SEMANTIC_REVIEW",
+      "score_changed": false
+    },
+    {
+      "profile": "b",
+      "candidate_id": "qwen35-9b-q4",
+      "case_id": "v4-visitor-view",
+      "label": "방문자 관점 기반 제안",
+      "quote": "방문자의 요구를 관찰하고 그 관점에서 제안한 경험의 역할, 행동, 결과를 쓰세요.",
+      "literal_valid": true,
+      "context_valid": true,
+      "review_type": "UNREGISTERED_LABEL_REQUIRES_SEMANTIC_REVIEW",
+      "score_changed": false
+    }
+  ],
+  "notes": [
+    {
+      "case_id": "v4-visitor-view",
+      "candidate": "b/gemma4-26b-qat",
+      "observed_label": "사용자 관점 제안",
+      "assessment": "사전 등록한 사용자 관점의 제안과 조사 차이로 보임. 인용·문맥 검사는 통과. 팀 의미 검토 대상으로 분리함."
+    },
+    {
+      "case_id": "v4-reproducibility",
+      "candidate": "b/gemma4-26b-qat",
+      "observed_label": "절차의 재현성",
+      "assessment": "사전 등록한 절차 재현성과 조사 차이로 보임. 기존 점수·정답은 수정하지 않음."
+    },
+    {
+      "case_id": "v4-reproducibility",
+      "candidate": "b/gemma4-12b-qat",
+      "observed_label": "절차 기록 및 공유",
+      "assessment": "재현성을 직접 드러내는 label보다 범위가 넓어 별도 의미 검토가 필요함."
+    }
+  ],
+  "policy": "Raw-score failures from unregistered wording are not all confirmed semantic errors. Review notes never approve production selection or retroactively change held-out scores."
+}

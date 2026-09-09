@@ -1,0 +1,28 @@
+{
+  "status": "PASSED",
+  "profile": "a",
+  "captured_calls": 168,
+  "frozen_files_verified": 62,
+  "source_index": [
+    {
+      "candidate_id": "qwen35-9b-q4",
+      "directory": "G:\\내 드라이브\\codex\\원티드 ai\\Project_EPICK_Engine\\output\\local-ab-v4-20260909\\a-qwen35-9b-q4",
+      "captured_calls": 42
+    },
+    {
+      "candidate_id": "qwen3-14b-q6",
+      "directory": "G:\\내 드라이브\\codex\\원티드 ai\\Project_EPICK_Engine\\output\\local-ab-v4-20260909\\a-qwen3-14b-q6",
+      "captured_calls": 42
+    },
+    {
+      "candidate_id": "gemma4-12b-qat",
+      "directory": "G:\\내 드라이브\\codex\\원티드 ai\\Project_EPICK_Engine\\output\\local-ab-v4-20260909\\a-gemma4-12b-qat",
+      "captured_calls": 42
+    },
+    {
+      "candidate_id": "gemma4-26b-qat",
+      "directory": "G:\\내 드라이브\\codex\\원티드 ai\\Project_EPICK_Engine\\output\\local-ab-v4-20260909\\a-gemma4-26b-qat",
+      "captured_calls": 42
+    }
+  ]
+}
