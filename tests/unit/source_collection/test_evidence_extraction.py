@@ -111,7 +111,7 @@ def test_fixture_extraction_emits_valid_evidence_in_source_order() -> None:
 
     parsed = extract_static_candidate(_candidate(document))
 
-    assert PARSER_VERSION == "epick-static-evidence-v1"
+    assert PARSER_VERSION == "epick-static-evidence-v3"
     assert parsed.extraction_status is ExtractionStatus.COMPLETE
     assert parsed.evidence
     assert all(validate_evidence_locator(document, evidence) for evidence in parsed.evidence)

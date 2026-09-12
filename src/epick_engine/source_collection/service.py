@@ -67,7 +67,7 @@ from epick_engine.source_collection.parsing import (
     StaticPostingParseResult,
     compute_content_hash,
     extract_static_candidate,
-    parse_static_posting,
+    parse_approved_static_posting,
 )
 from epick_engine.source_collection.persistence import (
     PreparedCollectionCommit,
@@ -1118,7 +1118,7 @@ class StaticCollectionExecution:
         valid_from = _unknown_date()
         valid_to = _unknown_date()
         posting_parse = (
-            parse_static_posting(parsed)
+            parse_approved_static_posting(parsed)
             if input_value.source_type is SourceType.JOB_POSTING
             else None
         )

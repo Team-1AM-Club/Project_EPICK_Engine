@@ -38,7 +38,7 @@ from epick_engine.source_collection.parsing import (
     StaticParseResult,
     compute_content_hash,
     extract_static_candidate,
-    parse_static_posting,
+    parse_approved_static_posting,
 )
 from epick_engine.source_collection.persistence import PreparedCollectionCommit
 from epick_engine.source_collection.policy import (
@@ -87,6 +87,9 @@ SEMANTIC_POSTING_DOCUMENT = (
     "<h2>Organization</h2><p>Cloud Platform</p>"
     "<h2>Published</h2><p>Published: 2026-09-01</p>"
     "<h2>Deadline</h2><p>Deadline: 2026-09-30</p></main></body></html>"
+)
+H1_ONLY_JOB_POSTING_DOCUMENT = (
+    "<html><body><main><h1>H1 Platform Engineer</h1></main></body></html>"
 )
 FORGED_SECTION_SENTINEL = "FORGED_SECTION_TEXT_MUST_NOT_LEAK"
 OFFICIAL_JSON_DOCUMENT = (
@@ -334,6 +337,15 @@ def _semantic_posting_candidate() -> StaticResponseCandidate:
     )
 
 
+def _h1_only_job_posting_candidate() -> StaticResponseCandidate:
+    return replace(
+        _candidate(),
+        document=UntrustedDocument(text=H1_ONLY_JOB_POSTING_DOCUMENT),
+        raw_size=len(H1_ONLY_JOB_POSTING_DOCUMENT.encode()),
+        decompressed_size=len(H1_ONLY_JOB_POSTING_DOCUMENT.encode()),
+    )
+
+
 def _section_key(
     evidence_keys: tuple[str, ...],
     text_raw: str,
@@ -561,7 +573,7 @@ def test_static_execution_runs_policy_fetch_parse_and_prepares_excerpts_only_com
     assert prepared.extraction_revision is not None
     assert prepared.extraction_revision.output_hash == compute_job_posting_parser_output_hash(
         _parse_result(),
-        parse_static_posting(_parse_result()),
+        parse_approved_static_posting(_parse_result()),
     )
     assert prepared.extraction_revision.evidence_ids == tuple(
         evidence.evidence_id for evidence in prepared.evidence
@@ -646,7 +658,7 @@ def test_static_execution_maps_job_posting_sections_to_prepared_revision_and_env
     events: list[str] = []
     candidate = _sectioned_candidate()
     parsed = extract_static_candidate(candidate)
-    expected_drafts = parse_static_posting(parsed).sections
+    expected_drafts = parse_approved_static_posting(parsed).sections
     execution, _provider, _collector, _parser = _execution(
         input_value=_input(),
         fetch_result=_fetch_result(candidate),
@@ -708,15 +720,19 @@ def test_static_execution_persists_one_semantic_posting_parse_dates_and_v2_hash(
     events: list[str] = []
     candidate = _semantic_posting_candidate()
     parsed = extract_static_candidate(candidate)
-    expected_semantic = parse_static_posting(parsed)
+    expected_semantic = parse_approved_static_posting(parsed)
     parse_calls: list[StaticParseResult] = []
-    original_parse_static_posting = service_module.parse_static_posting
+    original_parse_approved_static_posting = service_module.parse_approved_static_posting
 
     def record_semantic_parse(value: StaticParseResult):
         parse_calls.append(value)
-        return original_parse_static_posting(value)
+        return original_parse_approved_static_posting(value)
 
-    monkeypatch.setattr(service_module, "parse_static_posting", record_semantic_parse)
+    monkeypatch.setattr(
+        service_module,
+        "parse_approved_static_posting",
+        record_semantic_parse,
+    )
     execution, _provider, _collector, _parser = _execution(
         input_value=_input(),
         fetch_result=_fetch_result(candidate),
@@ -772,11 +788,43 @@ def test_static_execution_persists_one_semantic_posting_parse_dates_and_v2_hash(
     ) != compute_job_posting_parser_output_hash(parsed, expected_semantic)
 
 
+def test_static_execution_uses_approved_parser_for_authorized_h1_only_job_posting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    candidate = _h1_only_job_posting_candidate()
+    parsed = extract_static_candidate(candidate)
+    parse_calls: list[StaticParseResult] = []
+    original_parse_approved_static_posting = service_module.parse_approved_static_posting
+
+    def record_approved_parse(value: StaticParseResult):
+        result = original_parse_approved_static_posting(value)
+        parse_calls.append(value)
+        assert result.job_title.value == "H1 Platform Engineer"
+        return result
+
+    monkeypatch.setattr(
+        service_module,
+        "parse_approved_static_posting",
+        record_approved_parse,
+    )
+    execution, _provider, _collector, _parser = _execution(
+        input_value=_input(),
+        fetch_result=_fetch_result(candidate),
+        parse_result=parsed,
+        events=events,
+    )
+
+    execution.run_once(_Context(_command()))
+
+    assert parse_calls == [parsed]
+
+
 def test_static_execution_keeps_partial_job_posting_sections_and_limitations() -> None:
     events: list[str] = []
     candidate = _sectioned_candidate()
     partial = _partial_parse_result(extract_static_candidate(candidate))
-    expected_drafts = parse_static_posting(partial).sections
+    expected_drafts = parse_approved_static_posting(partial).sections
     execution, _provider, _collector, _parser = _execution(
         input_value=_input(),
         fetch_result=_fetch_result(candidate),
@@ -812,7 +860,11 @@ def test_static_execution_leaves_non_job_posting_sections_empty(
     def unexpected_semantic_parse(_parsed: StaticParseResult) -> None:
         raise AssertionError("non-job source must not use posting semantic parsing")
 
-    monkeypatch.setattr(service_module, "parse_static_posting", unexpected_semantic_parse)
+    monkeypatch.setattr(
+        service_module,
+        "parse_approved_static_posting",
+        unexpected_semantic_parse,
+    )
 
     prepared = execution.run_once(_Context(_command()))
 
@@ -991,6 +1043,7 @@ def test_static_execution_does_not_repeat_worker_entered_resume_stage(
         session_factory=lambda: None,
         lock_authority=lambda *_args, **_kwargs: None,
         committer=committer,
+        replayer=lambda *_args, **_kwargs: None,
         clock=lambda: NOW,
     )
 
@@ -1271,6 +1324,7 @@ def test_worker_policy_denied_commits_observation_at_actual_policy_revision() ->
         session_factory=lambda: None,
         lock_authority=lambda *_args, **_kwargs: None,
         committer=committer,
+        replayer=lambda *_args, **_kwargs: None,
         clock=lambda: NOW,
     )
 

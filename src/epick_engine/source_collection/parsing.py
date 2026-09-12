@@ -25,7 +25,7 @@ from epick_engine.source_collection.contracts import (
 from epick_engine.source_collection.policy import Representation
 
 HASH_PROFILE_VERSION: Final = "epick-response-sha256-v1"
-PARSER_VERSION: Final = "epick-static-evidence-v1"
+PARSER_VERSION: Final = "epick-static-evidence-v3"
 
 _ORIGIN_KIND: Final = "static_html"
 _JSON_ORIGIN_KIND: Final = "json_value"
@@ -84,7 +84,11 @@ _STATICALLY_VISIBLE_XPATH: Final = (
 )
 _BLOCK_XPATH: Final = (
     "//*[self::h1 or self::h2 or self::h3 or self::h4 or self::h5 or "
-    "self::h6 or self::p or self::li or self::dt or self::dd or self::time]"
+    "self::h6 or self::p or self::li or self::dt or self::dd or self::time or "
+    "(self::strong and not(ancestor::*[self::p or self::li or self::dt or "
+    "self::dd or self::td or self::th or self::h1 or self::h2 or self::h3 or "
+    "self::h4 or self::h5 or self::h6 or self::span]) and "
+    "not(parent::*/text()[normalize-space()]))]"
     "[not(ancestor::script) and not(ancestor::style) and "
     "not(ancestor::template) and not(ancestor::noscript)]"
     f"[{_STATICALLY_VISIBLE_XPATH}]"
@@ -129,13 +133,33 @@ _PREFERRED_TEXT = re.compile(
     r"\b(?:preferred|nice to have|bonus|desirable)\b",
     re.IGNORECASE,
 )
+_PREFERRED_HEADING = re.compile(
+    r"\s*bonus points for\s*(?::|…|\.\.\.)?\s*$",
+    re.IGNORECASE,
+)
+_INLINE_QUALIFICATION_LABEL = re.compile(
+    r"\s*(?:what you(?:'|’)ll bring|bonus points for)\b",
+    re.IGNORECASE,
+)
 _REQUIRED_TEXT = re.compile(
     r"\b(?:required|must|mandatory|shall|need(?:s)?\s+to)\b",
     re.IGNORECASE,
 )
 _REQUIRED_HEADING = re.compile(r"\b(?:requirements?|qualifications?)\b", re.IGNORECASE)
+_WHAT_YOU_BRING_HEADING = re.compile(
+    r"\s*what you(?:'|’)ll bring\s*:?\s*$",
+    re.IGNORECASE,
+)
 _DUTIES_HEADING = re.compile(
     r"\b(?:duties|responsibilities|what you(?:'|’)ll do)\b",
+    re.IGNORECASE,
+)
+_DUTIES_STANDALONE_HEADING = re.compile(
+    r"\s*(?:duties|responsibilities|what you(?:'|’)ll do)\s*:?\s*$",
+    re.IGNORECASE,
+)
+_GENERAL_STANDALONE_HEADING = re.compile(
+    r"\s*what you(?:'|’)ll get\s*:?\s*$",
     re.IGNORECASE,
 )
 _LOCATION_HEADING = re.compile(r"\b(?:location|workplace)\b", re.IGNORECASE)
@@ -242,7 +266,7 @@ class PostingSectionDraft:
 
 @dataclass(frozen=True, slots=True)
 class PostingIdentityValue:
-    """Evidence-aware identity field without inference from a document heading or URL."""
+    """Evidence-aware identity field with its verified supporting Evidence."""
 
     status: Literal["known", "unknown"]
     value: str | None
@@ -981,7 +1005,11 @@ def _html_time_published_at(
         item.locator.value: item for item in evidence if item.locator.kind is LocatorKind.XPATH
     }
     evidence_by_key = {item.evidence_key: item for item in evidence}
-    semantic_sections = _semantic_sections(source_sections, evidence_by_key)
+    semantic_sections = _semantic_sections(
+        source_sections,
+        evidence_by_key,
+        _classify_posting_section,
+    )
     published_evidence_keys = {
         evidence_key
         for section in semantic_sections
@@ -1087,8 +1115,21 @@ def _explicit_date_value(
 def parse_static_posting(parsed: StaticParseResult) -> StaticPostingParseResult:
     """Classify verified static evidence without reparsing HTML or inferring identities."""
 
+    return _parse_static_posting_with_classifier(parsed, _classify_posting_section)
+
+
+def _parse_static_posting_with_classifier(
+    parsed: StaticParseResult,
+    classify_section: Callable[[str, str | None], PostingSectionKind],
+    standalone_heading_kind: Callable[[str], PostingSectionKind | None] | None = None,
+) -> StaticPostingParseResult:
     evidence_by_key = {evidence.evidence_key: evidence for evidence in parsed.evidence}
-    sections = _semantic_sections(parsed.sections, evidence_by_key)
+    sections = _semantic_sections(
+        parsed.sections,
+        evidence_by_key,
+        classify_section,
+        standalone_heading_kind,
+    )
     job_title, organization = _identity_values(sections, evidence_by_key)
     published_at = _semantic_published_at(
         parsed.published_at,
@@ -1107,9 +1148,45 @@ def parse_static_posting(parsed: StaticParseResult) -> StaticPostingParseResult:
     )
 
 
+def parse_approved_static_posting(parsed: StaticParseResult) -> StaticPostingParseResult:
+    """Allow one verified H1 title for a policy-authorized individual job posting."""
+
+    posting = _parse_static_posting_with_classifier(
+        parsed,
+        _classify_approved_posting_section,
+        _approved_standalone_heading_kind,
+    )
+    evidence_by_key = {evidence.evidence_key: evidence for evidence in parsed.evidence}
+    h1_evidence_keys = _h1_evidence_keys(posting.sections, evidence_by_key)
+    if any(
+        _SEMANTIC_UNKNOWN.search(evidence_by_key[evidence_key].text_excerpt)
+        for evidence_key in h1_evidence_keys
+    ):
+        return replace(
+            posting,
+            job_title=PostingIdentityValue(
+                status="unknown",
+                value=None,
+                evidence_keys=h1_evidence_keys,
+            ),
+        )
+    if (
+        posting.job_title.status == "known"
+        or posting.job_title.evidence_keys
+        or parsed.extraction_status is not ExtractionStatus.COMPLETE
+    ):
+        return posting
+    return replace(
+        posting,
+        job_title=_identity_value_from_verified_h1(posting.sections, evidence_by_key),
+    )
+
+
 def _semantic_sections(
     source_sections: tuple[ExtractedSectionDraft, ...],
     evidence_by_key: dict[str, EvidenceDraft],
+    classify_section: Callable[[str, str | None], PostingSectionKind],
+    standalone_heading_kind: Callable[[str], PostingSectionKind | None] | None = None,
 ) -> tuple[PostingSectionDraft, ...]:
     sections: list[PostingSectionDraft] = []
     section_key_counts: dict[str, int] = {}
@@ -1122,6 +1199,8 @@ def _semantic_sections(
         )
         heading_key = _heading_evidence_key(source_section, evidence_by_key)
         content_keys = tuple(key for key in evidence_keys if key != heading_key)
+        active_heading_raw = source_section.heading_raw
+        active_heading_kind: PostingSectionKind | None = None
         heading_key_pending = (
             heading_key
             if _should_bind_heading_evidence(
@@ -1162,7 +1241,15 @@ def _semantic_sections(
             text_raw = evidence.text_excerpt
             if _is_reference_label(text_raw):
                 continue
-            kind = _classify_posting_section(text_raw, source_section.heading_raw)
+            virtual_heading_kind = (
+                standalone_heading_kind(text_raw) if standalone_heading_kind is not None else None
+            )
+            if virtual_heading_kind is not None:
+                active_heading_raw = text_raw
+                active_heading_kind = virtual_heading_kind
+                heading_key_pending = evidence_key
+                continue
+            kind = active_heading_kind or classify_section(text_raw, active_heading_raw)
             section_evidence_keys = (
                 (heading_key_pending, evidence_key)
                 if heading_key_pending is not None
@@ -1182,7 +1269,7 @@ def _semantic_sections(
                 PostingSectionDraft(
                     section_key=section_key,
                     kind=kind,
-                    heading_raw=source_section.heading_raw,
+                    heading_raw=active_heading_raw,
                     text_raw=text_raw,
                     evidence_keys=section_evidence_keys,
                     order=len(sections),
@@ -1212,7 +1299,10 @@ def _heading_evidence_key(
 
 
 def _is_h1_evidence(evidence: EvidenceDraft) -> bool:
-    return re.search(r"/h1(?:\[|$)", evidence.locator.value, re.IGNORECASE) is not None
+    return (
+        evidence.locator.kind is LocatorKind.XPATH
+        and re.search(r"/h1(?:\[|$)", evidence.locator.value, re.IGNORECASE) is not None
+    )
 
 
 def _should_bind_heading_evidence(
@@ -1266,6 +1356,36 @@ def _classify_posting_section(
     if _ORGANIZATION_HEADING.fullmatch(heading) is not None:
         return PostingSectionKind.ORGANIZATION
     return PostingSectionKind.GENERAL
+
+
+def _approved_standalone_heading_kind(text_raw: str) -> PostingSectionKind | None:
+    if _DUTIES_STANDALONE_HEADING.fullmatch(text_raw):
+        return PostingSectionKind.DUTIES
+    if _WHAT_YOU_BRING_HEADING.fullmatch(text_raw):
+        return PostingSectionKind.REQUIRED
+    if _PREFERRED_HEADING.fullmatch(text_raw):
+        return PostingSectionKind.PREFERRED
+    if _GENERAL_STANDALONE_HEADING.fullmatch(text_raw):
+        return PostingSectionKind.GENERAL
+    return None
+
+
+def _classify_approved_posting_section(
+    text_raw: str,
+    heading_raw: str | None,
+) -> PostingSectionKind:
+    heading = heading_raw or ""
+    if _PREFERRED_HEADING.fullmatch(heading):
+        return PostingSectionKind.PREFERRED
+    if _WHAT_YOU_BRING_HEADING.fullmatch(heading):
+        return PostingSectionKind.REQUIRED
+
+    kind = _classify_posting_section(text_raw, heading_raw)
+    if _INLINE_QUALIFICATION_LABEL.match(text_raw) and kind is PostingSectionKind.PREFERRED:
+        if _REQUIRED_HEADING.search(heading):
+            return PostingSectionKind.REQUIRED
+        return PostingSectionKind.GENERAL
+    return kind
 
 
 def _relation_text(text_raw: str) -> str | None:
@@ -1351,6 +1471,45 @@ def _title_evidence_keys(sections: tuple[PostingSectionDraft, ...]) -> tuple[str
         for section in sections
         if section.kind is PostingSectionKind.TITLE
         for evidence_key in section.evidence_keys
+    )
+
+
+def _identity_value_from_verified_h1(
+    sections: tuple[PostingSectionDraft, ...],
+    evidence_by_key: dict[str, EvidenceDraft],
+) -> PostingIdentityValue:
+    h1_evidence_keys = _h1_evidence_keys(sections, evidence_by_key)
+    if len(h1_evidence_keys) != 1:
+        return PostingIdentityValue(
+            status="unknown",
+            value=None,
+            evidence_keys=h1_evidence_keys,
+        )
+    evidence_key = h1_evidence_keys[0]
+    value = evidence_by_key[evidence_key].text_excerpt.strip()
+    if not value or _SEMANTIC_UNKNOWN.search(value):
+        return PostingIdentityValue(
+            status="unknown",
+            value=None,
+            evidence_keys=h1_evidence_keys,
+        )
+    return PostingIdentityValue(
+        status="known",
+        value=value,
+        evidence_keys=h1_evidence_keys,
+    )
+
+
+def _h1_evidence_keys(
+    sections: tuple[PostingSectionDraft, ...],
+    evidence_by_key: dict[str, EvidenceDraft],
+) -> tuple[str, ...]:
+    return _unique_evidence_keys(
+        evidence_key
+        for section in sections
+        if section.kind is PostingSectionKind.TITLE
+        for evidence_key in section.evidence_keys
+        if (evidence := evidence_by_key.get(evidence_key)) is not None and _is_h1_evidence(evidence)
     )
 
 
@@ -1732,7 +1891,10 @@ def _build_candidates(
         excerpt = _visible_text(node, work_budget)
         if not excerpt:
             continue
-        if _tag_name(node) in _HEADING_TAGS:
+        tag_name = _tag_name(node)
+        if tag_name == "strong" and _approved_standalone_heading_kind(excerpt) is None:
+            continue
+        if tag_name in _HEADING_TAGS:
             finish_section()
             active_keys = []
             active_heading = excerpt
@@ -1765,7 +1927,7 @@ def _build_candidates(
         )
         evidence.append(draft)
         active_keys.append(evidence_key)
-        if _tag_name(node) in _HEADING_TAGS:
+        if tag_name in _HEADING_TAGS:
             active_heading_key = evidence_key
         if node.xpath("string(@data-field)").get() == "posting-date":
             published_key = evidence_key

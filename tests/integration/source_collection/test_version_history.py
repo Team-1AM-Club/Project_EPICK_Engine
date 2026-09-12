@@ -39,7 +39,12 @@ from tests.unit.source_collection.test_service_pipeline import (
 )
 
 import epick_engine.source_collection.parsing as parsing_module
-from epick_engine.source_collection.contracts import Locator, LocatorKind, SourceEvent
+from epick_engine.source_collection.contracts import (
+    Locator,
+    LocatorKind,
+    PostingSectionKind,
+    SourceEvent,
+)
 from epick_engine.source_collection.parsing import EvidenceDraft
 from epick_engine.source_collection.persistence import (
     Base,
@@ -406,6 +411,144 @@ def test_parser_execution_history_distinguishes_delivery_rerun_output_and_failur
                 }
             ),
             frozenset({"a" * 64, "b" * 64}),
+        )
+
+
+def test_parser_v3_changed_output_preserves_prior_revision_evidence_and_snapshot(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _, source, policy = _seed_source(session_factory)
+
+    initial_command = _command(source)
+    initial = _complete_prepared(
+        initial_command,
+        source,
+        policy,
+        aggregate_revision=1,
+    )
+    initial = replace(
+        initial,
+        source_version=replace(
+            initial.source_version,
+            first_parser_version="epick-static-evidence-v2",
+        ),
+        extraction_revision=replace(
+            initial.extraction_revision,
+            parser_version="epick-static-evidence-v2",
+        ),
+        parser_execution=replace(
+            initial.parser_execution,
+            parser_version="epick-static-evidence-v2",
+        ),
+    )
+    commit_prepared_collection(
+        session_factory,
+        command=initial_command,
+        prepared=initial,
+        lock_authority=_locker(initial_command, pointer_eligible=True),
+    )
+
+    changed_command = _command(source)
+    changed = _complete_prepared(
+        changed_command,
+        source,
+        policy,
+        aggregate_revision=2,
+        source_version_id=initial.source_version.source_version_id,
+        evidence_id=initial.evidence[0].evidence_id,
+        content_hash=initial.source_version.content_hash,
+    )
+    changed_section = changed.extraction_revision.posting_sections[0].model_copy(
+        update={
+            "section_key": "preferred-v3",
+            "kind": PostingSectionKind.PREFERRED,
+        }
+    )
+    changed = replace(
+        changed,
+        source_version=replace(
+            changed.source_version,
+            first_parser_version="epick-static-evidence-v2",
+        ),
+        extraction_revision=replace(
+            changed.extraction_revision,
+            parser_version=parsing_module.PARSER_VERSION,
+            output_hash="b" * 64,
+            posting_sections=(changed_section,),
+        ),
+        parser_execution=replace(
+            changed.parser_execution,
+            parser_version=parsing_module.PARSER_VERSION,
+            output_hash="b" * 64,
+        ),
+    )
+    commit_prepared_collection(
+        session_factory,
+        command=changed_command,
+        prepared=changed,
+        lock_authority=_locker(changed_command, pointer_eligible=True),
+    )
+
+    with session_factory() as session:
+        revisions = {
+            revision.extraction_revision_id: revision
+            for revision in session.scalars(
+                select(ExtractionRevision).where(
+                    ExtractionRevision.source_version_id == initial.source_version.source_version_id
+                )
+            )
+        }
+        evidence = session.scalars(
+            select(Evidence).where(
+                Evidence.source_version_id == initial.source_version.source_version_id
+            )
+        ).all()
+        observations = {
+            observation.observation_id: observation
+            for observation in session.scalars(
+                select(SourceObservation).where(SourceObservation.source_id == source.source_id)
+            )
+        }
+        source_versions = session.scalars(
+            select(SourceVersion).where(SourceVersion.source_id == source.source_id)
+        ).all()
+        initial_event = session.get(OutboxEvent, initial.events[0].event_id)
+
+        assert (
+            parsing_module.PARSER_VERSION,
+            [(item.source_version_id, item.content_hash) for item in source_versions],
+            len(revisions),
+            frozenset(item.output_hash for item in revisions.values()),
+            revisions[initial.extraction_revision.extraction_revision_id].parser_version,
+            revisions[initial.extraction_revision.extraction_revision_id].posting_sections[0][
+                "kind"
+            ],
+            revisions[changed.extraction_revision.extraction_revision_id].parser_version,
+            revisions[changed.extraction_revision.extraction_revision_id].posting_sections[0][
+                "kind"
+            ],
+            [(item.evidence_id, item.text_excerpt) for item in evidence],
+            frozenset(observations),
+            frozenset(item.source_version_id for item in observations.values()),
+            initial_event.payload if initial_event is not None else None,
+        ) == (
+            "epick-static-evidence-v3",
+            [(initial.source_version.source_version_id, initial.source_version.content_hash)],
+            2,
+            frozenset({"a" * 64, "b" * 64}),
+            "epick-static-evidence-v2",
+            PostingSectionKind.REQUIRED.value,
+            "epick-static-evidence-v3",
+            PostingSectionKind.PREFERRED.value,
+            [(initial.evidence[0].evidence_id, initial.evidence[0].text_excerpt)],
+            frozenset(
+                {
+                    initial.observation.snapshot.observation_id,
+                    changed.observation.snapshot.observation_id,
+                }
+            ),
+            frozenset({initial.source_version.source_version_id}),
+            initial.events[0].payload.model_dump(mode="json"),
         )
 
 

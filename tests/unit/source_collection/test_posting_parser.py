@@ -20,6 +20,7 @@ decisions; those remain W3 responsibilities.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +106,10 @@ def _evidence_by_annotation_ref(
 
 def _parse_static_posting(parsed: StaticParseResult) -> Any:
     return parsing_module.parse_static_posting(parsed)
+
+
+def _parse_approved_static_posting(parsed: StaticParseResult) -> Any:
+    return parsing_module.parse_approved_static_posting(parsed)
 
 
 def test_annotation_evidence_refs_are_exact_static_parse_inputs() -> None:
@@ -474,3 +479,307 @@ def test_descriptive_role_and_company_headings_remain_general_and_unknown() -> N
     assert semantic.job_title.value is None
     assert semantic.organization.status == "unknown"
     assert semantic.organization.value is None
+
+
+def test_approved_parser_uses_verified_h1_as_job_title_fallback() -> None:
+    job_title = "Senior Platform Engineer"
+    document = f"""
+    <html><body><main>
+      <h1>{job_title}</h1>
+      <p>Build reliable platform services.</p>
+    </main></body></html>
+    """
+    parsed = _static_parse_result(document)
+    h1_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == job_title
+    )
+
+    semantic = _parse_approved_static_posting(parsed)
+
+    assert h1_evidence.locator.kind is LocatorKind.XPATH
+    assert semantic.job_title.status == "known"
+    assert semantic.job_title.value == job_title
+    assert tuple(semantic.job_title.evidence_keys) == (h1_evidence.evidence_key,)
+
+
+def test_approved_parser_does_not_promote_h1_from_partial_parse() -> None:
+    parsed = replace(
+        _static_parse_result("<html><body><main><h1>Platform Engineer</h1></main></body></html>"),
+        extraction_status=ExtractionStatus.PARTIAL,
+        limitations=("evidence budget reached",),
+    )
+
+    semantic = _parse_approved_static_posting(parsed)
+
+    assert semantic.job_title.status == "unknown"
+    assert semantic.job_title.value is None
+    assert semantic.job_title.evidence_keys == ()
+
+
+def test_approved_parser_prefers_exact_job_title_heading_over_differing_h1() -> None:
+    h1_title = "Platform Engineer"
+    explicit_title = "Principal Security Engineer"
+    document = f"""
+    <html><body><main>
+      <h1>{h1_title}</h1>
+      <section><h2>Job title</h2><p>{explicit_title}</p></section>
+    </main></body></html>
+    """
+    parsed = _static_parse_result(document)
+    h1_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == h1_title
+    )
+    heading_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == "Job title"
+    )
+    value_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == explicit_title
+    )
+
+    semantic = _parse_approved_static_posting(parsed)
+
+    assert semantic.job_title.status == "known"
+    assert semantic.job_title.value == explicit_title
+    assert tuple(semantic.job_title.evidence_keys) == (
+        heading_evidence.evidence_key,
+        value_evidence.evidence_key,
+    )
+    assert h1_evidence.evidence_key not in semantic.job_title.evidence_keys
+
+
+def test_approved_parser_prefers_inline_role_over_h1_fallback() -> None:
+    h1_title = "Platform Engineer"
+    inline_title = "Staff Security Engineer"
+    document = f"""
+    <html><body><main>
+      <h1>{h1_title}</h1>
+      <p>Role: {inline_title}</p>
+    </main></body></html>
+    """
+    parsed = _static_parse_result(document)
+    inline_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == f"Role: {inline_title}"
+    )
+
+    semantic = _parse_approved_static_posting(parsed)
+
+    assert semantic.job_title.status == "known"
+    assert semantic.job_title.value == inline_title
+    assert tuple(semantic.job_title.evidence_keys) == (inline_evidence.evidence_key,)
+
+
+def test_approved_parser_semantic_unknown_h1_overrides_explicit_and_inline_titles() -> None:
+    unknown_marker = "Role not available"
+    explicit_title = "Principal Security Engineer"
+    inline_title = "Staff Security Engineer"
+    document = f"""
+    <html><body><main>
+      <h1>{unknown_marker}</h1>
+      <section><h2>Job title</h2><p>{explicit_title}</p></section>
+      <p>Role: {inline_title}</p>
+    </main></body></html>
+    """
+    parsed = _static_parse_result(document)
+    unknown_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == unknown_marker
+    )
+
+    semantic = _parse_approved_static_posting(parsed)
+
+    assert semantic.job_title.status == "unknown"
+    assert semantic.job_title.value is None
+    assert unknown_evidence.evidence_key in semantic.job_title.evidence_keys
+
+
+def test_approved_parser_bare_unknown_h1_overrides_explicit_title() -> None:
+    document = """
+    <html><body><main>
+      <h1>Unknown</h1>
+      <section><h2>Job title</h2><p>Staff Engineer</p></section>
+    </main></body></html>
+    """
+    parsed = _static_parse_result(document)
+    unknown_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == "Unknown"
+    )
+
+    semantic = _parse_approved_static_posting(parsed)
+
+    assert semantic.job_title.status == "unknown"
+    assert semantic.job_title.value is None
+    assert unknown_evidence.evidence_key in semantic.job_title.evidence_keys
+
+
+def test_approved_parser_bare_unknown_h1_overrides_inline_title() -> None:
+    document = """
+    <html><body><main>
+      <h1>Unknown</h1>
+      <p>Role: Staff Engineer</p>
+    </main></body></html>
+    """
+    parsed = _static_parse_result(document)
+    unknown_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == "Unknown"
+    )
+
+    semantic = _parse_approved_static_posting(parsed)
+
+    assert semantic.job_title.status == "unknown"
+    assert semantic.job_title.value is None
+    assert unknown_evidence.evidence_key in semantic.job_title.evidence_keys
+
+
+def test_approved_parser_conflicting_h1_titles_fail_closed_with_all_h1_evidence() -> None:
+    first_title = "Platform Engineer"
+    second_title = "Security Engineer"
+    document = f"""
+    <html><body><main>
+      <h1>{first_title}</h1>
+      <p>Build reliable platform services.</p>
+      <h1>{second_title}</h1>
+      <p>Protect customer data.</p>
+    </main></body></html>
+    """
+    parsed = _static_parse_result(document)
+    first_h1_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == first_title
+    )
+    second_h1_evidence = next(
+        evidence for evidence in parsed.evidence if evidence.text_excerpt == second_title
+    )
+
+    semantic = _parse_approved_static_posting(parsed)
+
+    assert semantic.job_title.status == "unknown"
+    assert semantic.job_title.value is None
+    assert tuple(semantic.job_title.evidence_keys) == (
+        first_h1_evidence.evidence_key,
+        second_h1_evidence.evidence_key,
+    )
+
+
+def test_mozilla_style_standalone_headings_classify_until_next_heading() -> None:
+    document = """
+    <html><body><main>
+      <h1>Senior Platform Engineer</h1>
+      <section>
+        <h2>What you’ll bring</h2>
+        <p>Experience designing reliable distributed systems.</p>
+        <p>Clear written communication across teams.</p>
+        <h2>Bonus points for</h2>
+        <p>Kubernetes operations background.</p>
+        <h2>About the team</h2>
+        <p>The team builds shared cloud services.</p>
+      </section>
+    </main></body></html>
+    """
+
+    semantic = _parse_approved_static_posting(_static_parse_result(document))
+    kinds_by_text = {section.text_raw: section.kind for section in semantic.sections}
+
+    assert (
+        kinds_by_text["Experience designing reliable distributed systems."],
+        kinds_by_text["Clear written communication across teams."],
+        kinds_by_text["Kubernetes operations background."],
+        kinds_by_text["The team builds shared cloud services."],
+    ) == (
+        PostingSectionKind.REQUIRED,
+        PostingSectionKind.REQUIRED,
+        PostingSectionKind.PREFERRED,
+        PostingSectionKind.GENERAL,
+    )
+
+
+def test_approved_standalone_emphasis_labels_define_semantic_sections() -> None:
+    document = """
+    <html><body><main>
+      <h1>Senior Platform Engineer</h1>
+      <section>
+        <strong>Standalone emphasis only</strong>
+        <p>Context remains general.</p>
+        <p><strong>What you’ll do:</strong></p>
+        <ul><li>Build reliable service boundaries.</li></ul>
+        <strong>What you’ll bring:</strong>
+        <ul><li>Experience designing distributed systems.</li></ul>
+        <strong>Bonus points for…</strong>
+        <ul><li>Kubernetes operations background.</li></ul>
+        <p><strong>What you’ll get:</strong></p>
+        <ul><li>Annual learning support.</li></ul>
+      </section>
+    </main></body></html>
+    """
+
+    parsed = _static_parse_result(document)
+    assert "Standalone emphasis only" not in {evidence.text_excerpt for evidence in parsed.evidence}
+
+    semantic = _parse_approved_static_posting(parsed)
+    kinds_by_text = {section.text_raw: section.kind for section in semantic.sections}
+
+    assert (
+        kinds_by_text["Build reliable service boundaries."],
+        kinds_by_text["Experience designing distributed systems."],
+        kinds_by_text["Kubernetes operations background."],
+        kinds_by_text["Annual learning support."],
+    ) == (
+        PostingSectionKind.DUTIES,
+        PostingSectionKind.REQUIRED,
+        PostingSectionKind.PREFERRED,
+        PostingSectionKind.GENERAL,
+    )
+
+    unapproved = _parse_static_posting(parsed)
+    unapproved_kinds = {section.text_raw: section.kind for section in unapproved.sections}
+
+    assert (
+        unapproved_kinds["Build reliable service boundaries."],
+        unapproved_kinds["Experience designing distributed systems."],
+        unapproved_kinds["Kubernetes operations background."],
+        unapproved_kinds["Annual learning support."],
+    ) == (PostingSectionKind.GENERAL,) * 4
+
+
+def test_mozilla_style_headings_require_the_approved_parser() -> None:
+    document = """
+    <html><body><main><section>
+      <h2>What you'll bring</h2>
+      <p>Experience designing reliable distributed systems.</p>
+      <h2>Bonus points for</h2>
+      <p>Kubernetes operations background.</p>
+    </section></main></body></html>
+    """
+
+    semantic = _parse_static_posting(_static_parse_result(document))
+    kinds_by_text = {section.text_raw: section.kind for section in semantic.sections}
+
+    assert (
+        kinds_by_text["Experience designing reliable distributed systems."],
+        kinds_by_text["Kubernetes operations background."],
+    ) == (PostingSectionKind.GENERAL, PostingSectionKind.GENERAL)
+
+
+def test_mozilla_style_heading_phrases_are_not_promoted_when_inline() -> None:
+    document = """
+    <html><body><main><section>
+      <h2>Overview</h2>
+      <p>What you'll bring: curiosity and sound judgment.</p>
+      <p>Bonus points for: public speaking experience.</p>
+      <p>Bonus points for public speaking experience.</p>
+    </section></main></body></html>
+    """
+
+    semantic = _parse_approved_static_posting(_static_parse_result(document))
+    kinds_by_text = {section.text_raw: section.kind for section in semantic.sections}
+
+    assert (
+        kinds_by_text["What you'll bring: curiosity and sound judgment."],
+        kinds_by_text["Bonus points for: public speaking experience."],
+        kinds_by_text["Bonus points for public speaking experience."],
+    ) == (
+        PostingSectionKind.GENERAL,
+        PostingSectionKind.GENERAL,
+        PostingSectionKind.GENERAL,
+    )
+
+
+def test_mozilla_heading_semantics_advance_parser_version() -> None:
+    assert parsing_module.PARSER_VERSION == "epick-static-evidence-v3"
