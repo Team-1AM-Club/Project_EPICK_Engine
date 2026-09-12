@@ -39,6 +39,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 from epick_engine.source_collection.contracts import (
     CollectionCommand,
     CollectionResult,
+    CollectionStage,
     DateValue,
     ExtractionStatus,
     Locator,
@@ -1832,6 +1833,8 @@ def _replay_attempt(
     *,
     command: CollectionCommand,
     attempt_id: UUID,
+    allow_deliver_resume_stage: bool = False,
+    allow_initial_policy_revision: bool = False,
 ) -> CollectionResult | None:
     attempt = session.scalar(
         select(CollectionAttempt)
@@ -1856,14 +1859,47 @@ def _replay_attempt(
         "owner_deletion_epoch": command.owner_deletion_epoch,
         "policy_revision": command.policy_revision,
     }
+    is_initial_policy_replay = (
+        allow_initial_policy_revision
+        and command.resume_stage is CollectionStage.POLICY
+        and command.policy_revision is None
+    )
+    if allow_deliver_resume_stage and command.resume_stage is CollectionStage.DELIVER:
+        expected.pop("resume_stage")
+    if is_initial_policy_replay:
+        expected.pop("policy_revision")
     _assert_immutable_row(attempt, expected, entity="collection attempt")
-    if attempt.result_payload is None or attempt.finalized_at is None:
+    if (attempt.result_payload is None) != (attempt.finalized_at is None):
+        raise PersistenceConflict("collection attempt finalization state is inconsistent")
+    if attempt.result_payload is None:
         raise PersistenceConflict("collection attempt is not finalized")
     try:
         result = CollectionResult.model_validate(attempt.result_payload)
     except ValueError as error:
         raise PersistenceConflict("stored collection result is invalid") from error
-    _validate_result_against_command(result, command)
+    result_payload = result.model_dump(mode="json")
+    if attempt.result_payload != result_payload:
+        raise PersistenceConflict("stored collection result is inconsistent")
+    _assert_immutable_row(
+        attempt,
+        {
+            "result_version": result.result_version,
+            "checkpoint_ref": result.checkpoint_ref,
+            "result_refs": result_payload["successful_source_refs"],
+            "failures": result_payload["failures"],
+            "required_actions": result_payload["required_actions"],
+        },
+        entity="collection attempt result",
+    )
+    replay_command = command
+    if is_initial_policy_replay:
+        _assert_immutable_row(
+            attempt,
+            {"policy_revision": result.policy_revision},
+            entity="collection attempt",
+        )
+        replay_command = command.model_copy(update={"policy_revision": result.policy_revision})
+    _validate_result_against_command(result, replay_command)
     return result
 
 
@@ -2681,6 +2717,36 @@ def _create_collection_attempt(
     session.add(created)
     session.flush()
     return created
+
+
+def replay_committed_collection(
+    session_factory: Callable[[], Session],
+    *,
+    command: CollectionCommand,
+    attempt_id: UUID,
+    lock_authority: ExecutionAuthorityLocker,
+) -> CollectionResult | None:
+    """Return a finalized committed result after same-transaction authority validation."""
+
+    with session_scope(session_factory) as session:
+        with session.begin():
+            grant = lock_authority(
+                session,
+                command=command,
+                attempt_id=attempt_id,
+            )
+            _validate_authority(
+                grant=grant,
+                command=command,
+                attempt_id=attempt_id,
+            )
+            return _replay_attempt(
+                session,
+                command=command,
+                attempt_id=attempt_id,
+                allow_deliver_resume_stage=True,
+                allow_initial_policy_revision=True,
+            )
 
 
 def commit_prepared_collection(

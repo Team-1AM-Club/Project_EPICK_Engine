@@ -8,7 +8,7 @@ from threading import Barrier, Lock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import Engine, create_engine, event, func, select, text
+from sqlalchemy import Engine, create_engine, event, func, null, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 import epick_engine.source_collection.contracts as contracts
@@ -16,6 +16,7 @@ import epick_engine.source_collection.persistence as persistence_module
 from epick_engine.source_collection.contracts import (
     CollectionCommand,
     CollectionResult,
+    CollectionStage,
     DateValue,
     ExtractionStatus,
     Locator,
@@ -49,6 +50,7 @@ from epick_engine.source_collection.persistence import (
     SourceVersion,
     StaleExecution,
     commit_prepared_collection,
+    replay_committed_collection,
     resolve_request_deduplication,
 )
 
@@ -584,6 +586,295 @@ def test_same_command_replays_stored_result_without_appending_rows(
         attempt = session.get(CollectionAttempt, first.attempt_id)
         assert attempt is not None
         assert attempt.result_payload == first.result.model_dump(mode="json")
+
+
+def test_replay_committed_collection_returns_finalized_result_without_appending_rows(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _, source, policy = _seed_source(session_factory)
+    command = _command(source)
+    prepared = _complete_prepared(command, source, policy, aggregate_revision=1)
+    commit_prepared_collection(
+        session_factory,
+        command=command,
+        prepared=prepared,
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+    with session_factory() as session:
+        before = _counts(session)
+
+    replayed = replay_committed_collection(
+        session_factory,
+        command=command,
+        attempt_id=prepared.attempt_id,
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+
+    assert replayed == prepared.result
+    with session_factory() as session:
+        assert _counts(session) == before
+
+
+def test_replay_committed_collection_reuses_bound_policy_result_for_initial_command(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _, source, policy = _seed_source(session_factory)
+    initial_command = CollectionCommand.model_validate(
+        {
+            **_command(source).model_dump(mode="json"),
+            "resume_stage": CollectionStage.POLICY.value,
+            "policy_revision": None,
+        }
+    )
+    bound_command = CollectionCommand.model_validate(
+        {
+            **initial_command.model_dump(mode="json"),
+            "policy_revision": policy.revision,
+        }
+    )
+    prepared = _complete_prepared(bound_command, source, policy, aggregate_revision=1)
+    commit_prepared_collection(
+        session_factory,
+        command=bound_command,
+        prepared=prepared,
+        lock_authority=_locker(bound_command, pointer_eligible=True),
+    )
+    with session_factory() as session:
+        before = _counts(session)
+        attempt = session.get(CollectionAttempt, prepared.attempt_id)
+        assert attempt is not None
+        assert attempt.resume_stage == CollectionStage.POLICY.value
+        assert attempt.policy_revision == policy.revision
+
+    replayed = replay_committed_collection(
+        session_factory,
+        command=initial_command,
+        attempt_id=prepared.attempt_id,
+        lock_authority=_locker(initial_command, pointer_eligible=True),
+    )
+
+    assert replayed == prepared.result
+    with session_factory() as session:
+        assert _counts(session) == before
+
+
+@pytest.mark.parametrize(
+    "stored_updates",
+    [
+        {"resume_stage": CollectionStage.FETCH.value},
+        {"purpose_ref": "00000000-0000-4000-8000-000000000298"},
+    ],
+)
+def test_replay_committed_collection_rejects_initial_policy_stored_mismatches(
+    session_factory: sessionmaker[Session],
+    stored_updates: Mapping[str, object],
+) -> None:
+    _, source, policy = _seed_source(session_factory)
+    initial_command = CollectionCommand.model_validate(
+        {
+            **_command(source).model_dump(mode="json"),
+            "resume_stage": CollectionStage.POLICY.value,
+            "policy_revision": None,
+        }
+    )
+    stored_command = CollectionCommand.model_validate(
+        {
+            **initial_command.model_dump(mode="json"),
+            "policy_revision": policy.revision,
+            **stored_updates,
+        }
+    )
+    prepared = _complete_prepared(stored_command, source, policy, aggregate_revision=1)
+    commit_prepared_collection(
+        session_factory,
+        command=stored_command,
+        prepared=prepared,
+        lock_authority=_locker(stored_command, pointer_eligible=True),
+    )
+    with session_factory() as session:
+        before = _counts(session)
+
+    with pytest.raises(PersistenceConflict, match="immutable payload"):
+        replay_committed_collection(
+            session_factory,
+            command=initial_command,
+            attempt_id=prepared.attempt_id,
+            lock_authority=_locker(initial_command, pointer_eligible=True),
+        )
+
+    with session_factory() as session:
+        assert _counts(session) == before
+
+
+def test_replay_committed_collection_returns_none_without_attempt(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _, source, _ = _seed_source(session_factory)
+    command = _command(source)
+
+    replayed = replay_committed_collection(
+        session_factory,
+        command=command,
+        attempt_id=uuid4(),
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+
+    assert replayed is None
+    with session_factory() as session:
+        assert _counts(session) == (0, 0, 0, 0, 0, 0, 0)
+
+
+def test_replay_committed_collection_allows_deliver_for_original_resume_stage(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _, source, policy = _seed_source(session_factory)
+    command = _command(source)
+    prepared = _complete_prepared(command, source, policy, aggregate_revision=1)
+    commit_prepared_collection(
+        session_factory,
+        command=command,
+        prepared=prepared,
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+    deliver_command = CollectionCommand.model_validate(
+        {
+            **command.model_dump(mode="json"),
+            "resume_stage": CollectionStage.DELIVER.value,
+        }
+    )
+    with session_factory() as session:
+        before = _counts(session)
+        attempt = session.get(CollectionAttempt, prepared.attempt_id)
+        assert attempt is not None
+        assert attempt.resume_stage == command.resume_stage.value
+
+    replayed = replay_committed_collection(
+        session_factory,
+        command=deliver_command,
+        attempt_id=prepared.attempt_id,
+        lock_authority=_locker(deliver_command, pointer_eligible=True),
+    )
+
+    assert replayed == prepared.result
+    with session_factory() as session:
+        assert _counts(session) == before
+
+
+def test_replay_committed_collection_reuses_durable_failure_without_appending_rows(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _, source, policy = _seed_source(session_factory)
+    command = _command(source)
+    prepared = _failure_prepared(command, source, policy, aggregate_revision=1)
+    commit_prepared_collection(
+        session_factory,
+        command=command,
+        prepared=prepared,
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+    expected_payload = prepared.result.model_dump(mode="json")
+    with session_factory() as session:
+        before = _counts(session)
+        attempt = session.get(CollectionAttempt, prepared.attempt_id)
+        assert attempt is not None
+        assert attempt.input_version == command.input_version
+        assert attempt.core_source_decision["analysis_input_version"] == command.input_version
+        assert attempt.result_version == prepared.result.result_version
+        assert attempt.resume_stage == command.resume_stage.value
+        assert attempt.checkpoint_ref == prepared.result.checkpoint_ref
+        assert attempt.failures == expected_payload["failures"]
+        assert attempt.result_payload == expected_payload
+
+    replayed = replay_committed_collection(
+        session_factory,
+        command=command,
+        attempt_id=prepared.attempt_id,
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+
+    assert replayed == prepared.result
+    with session_factory() as session:
+        assert _counts(session) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "stale_value"),
+    [
+        ("execution_fence", "stale-fence"),
+        ("owner_deletion_epoch", 1),
+    ],
+)
+def test_replay_committed_collection_rejects_stale_authority_without_w2_writes(
+    session_factory: sessionmaker[Session],
+    field: str,
+    stale_value: str | int,
+) -> None:
+    _, source, _ = _seed_source(session_factory)
+    command = _command(source)
+    attempt_id = uuid4()
+
+    def stale_locker(
+        session: Session, *, command: CollectionCommand, attempt_id: UUID
+    ) -> ExecutionAuthorityGrant:
+        session.execute(
+            select(Source.source_id).where(Source.source_id == command.source_id)
+        ).scalar_one()
+        return replace(
+            _grant(command, attempt_id, pointer_eligible=True),
+            **{field: stale_value},
+        )
+
+    with pytest.raises(StaleExecution, match="execution authority"):
+        replay_committed_collection(
+            session_factory,
+            command=command,
+            attempt_id=attempt_id,
+            lock_authority=stale_locker,
+        )
+
+    with session_factory() as session:
+        assert _counts(session) == (0, 0, 0, 0, 0, 0, 0)
+
+
+def test_replay_committed_collection_rejects_unfinalized_attempt(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _, source, _ = _seed_source(session_factory)
+    command = _command(source)
+    attempt_id = uuid4()
+    with session_factory.begin() as session:
+        session.add(
+            CollectionAttempt(
+                attempt_id=attempt_id,
+                owner_user_id=command.authenticated_owner_ref,
+                job_id=command.job_id,
+                project_id=None,
+                command_id=command.command_id,
+                input_version=command.input_version,
+                target_ref=str(command.source_id),
+                purpose_ref=str(command.purpose_ref),
+                core_source_decision=command.model_dump(mode="json")["core_source_decision"],
+                resume_stage=command.resume_stage.value,
+                policy_revision=command.policy_revision,
+                result_version=1,
+                execution_fence=command.execution_fence,
+                owner_deletion_epoch=command.owner_deletion_epoch,
+                checkpoint_ref=None,
+                result_refs=[],
+                failures=[],
+                required_actions=[],
+                result_payload=null(),
+                finalized_at=None,
+            )
+        )
+
+    with pytest.raises(PersistenceConflict, match="not finalized"):
+        replay_committed_collection(
+            session_factory,
+            command=command,
+            attempt_id=attempt_id,
+            lock_authority=_locker(command, pointer_eligible=True),
+        )
 
 
 def test_stale_authority_rejects_before_any_w2_write(

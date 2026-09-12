@@ -299,10 +299,22 @@ def _parse_and_prepare(context: WorkerExecutionContext) -> PreparedCollectionCom
     return _prepared(context.permit, _complete_result(context.command))
 
 
+def _no_replay(
+    _session_factory: object,
+    *,
+    command: CollectionCommand,
+    attempt_id: object,
+    lock_authority: object,
+) -> None:
+    del _session_factory, command, attempt_id, lock_authority
+
+
 def _worker(
     control: _Control,
     factory: _Factory,
     committer: _Committer,
+    *,
+    replayer: Callable[..., CollectionResult | None] = _no_replay,
 ) -> SourceCollectionWorker:
     return SourceCollectionWorker(
         control=control,
@@ -310,6 +322,7 @@ def _worker(
         session_factory=lambda: None,
         lock_authority=lambda *_args, **_kwargs: None,
         committer=committer,
+        replayer=replayer,
         clock=lambda: NOW,
     )
 
@@ -325,6 +338,7 @@ def _standard_worker(
     close_error: Exception | None = None,
     commit_error: Exception | None = None,
     finalize_error: Exception | None = None,
+    replayer: Callable[..., CollectionResult | None] = _no_replay,
 ) -> tuple[SourceCollectionWorker, _Control, _Execution, _Factory, _Committer, list[str]]:
     events: list[str] = []
     control = _Control(
@@ -336,7 +350,221 @@ def _standard_worker(
     execution = _Execution(events, run, close_error=close_error)
     factory = _Factory(events, execution)
     committer = _Committer(events, error=commit_error)
-    return _worker(control, factory, committer), control, execution, factory, committer, events
+    return (
+        _worker(control, factory, committer, replayer=replayer),
+        control,
+        execution,
+        factory,
+        committer,
+        events,
+    )
+
+
+def test_replayer_preflight_runs_before_factory_when_no_result_exists() -> None:
+    command = _command()
+    events: list[str] = []
+    control = _Control(_permit(command), events)
+    execution = _Execution(events, _parse_and_prepare)
+    factory = _Factory(events, execution)
+    committer = _Committer(events)
+
+    def replayer(
+        _session_factory: object,
+        *,
+        command: CollectionCommand,
+        attempt_id: object,
+        lock_authority: object,
+    ) -> None:
+        del _session_factory, command, attempt_id, lock_authority
+        events.append("replay")
+
+    worker = _worker(control, factory, committer, replayer=replayer)
+
+    worker.handle(command.model_dump())
+
+    assert events.index("replay") < events.index("factory")
+
+
+def test_committed_result_skips_execution_and_committer_then_finalizes() -> None:
+    command = _command(resume_stage=CollectionStage.DELIVER)
+    events: list[str] = []
+    permit = _permit(command)
+    control = _Control(permit, events)
+    execution = _Execution(events, _parse_and_prepare)
+    factory = _Factory(events, execution)
+    committer = _Committer(events)
+    committed = _complete_result(command)
+    replay_calls: list[tuple[CollectionCommand, object]] = []
+
+    def replayer(
+        _session_factory: object,
+        *,
+        command: CollectionCommand,
+        attempt_id: object,
+        lock_authority: object,
+    ) -> CollectionResult:
+        del _session_factory, lock_authority
+        events.append("replay")
+        replay_calls.append((command, attempt_id))
+        return committed
+
+    worker = _worker(control, factory, committer, replayer=replayer)
+
+    result = worker.handle(command.model_dump())
+
+    assert result == committed
+    assert replay_calls == [(permit.command, permit.attempt_id)]
+    assert events == ["authorize", "replay", "stage:deliver", "finalize"]
+    assert factory.permits == []
+    assert execution.run_count == 0
+    assert execution.close_count == 0
+    assert committer.prepared == []
+    assert control.finalized == [(permit, committed)]
+    assert control.stopped == []
+
+
+def test_replayed_finalize_failure_does_not_record_stopped() -> None:
+    command = _command(resume_stage=CollectionStage.DELIVER)
+    events: list[str] = []
+    permit = _permit(command)
+    control = _Control(
+        permit,
+        events,
+        finalize_error=RuntimeError("finalize failed"),
+    )
+    execution = _Execution(events, _parse_and_prepare)
+    factory = _Factory(events, execution)
+    committer = _Committer(events)
+    committed = _complete_result(command)
+
+    def replayer(
+        _session_factory: object,
+        *,
+        command: CollectionCommand,
+        attempt_id: object,
+        lock_authority: object,
+    ) -> CollectionResult:
+        del _session_factory, command, attempt_id, lock_authority
+        events.append("replay")
+        return committed
+
+    worker = _worker(control, factory, committer, replayer=replayer)
+
+    with pytest.raises(RuntimeError, match="finalize failed"):
+        worker.handle(command.model_dump())
+
+    assert factory.permits == []
+    assert execution.run_count == 0
+    assert committer.prepared == []
+    assert events == ["authorize", "replay", "stage:deliver", "finalize"]
+    assert control.finalized == [(permit, committed)]
+    assert control.stopped == []
+
+
+def test_replayed_stage_permit_failure_skips_execution_without_stopping() -> None:
+    command = _command(resume_stage=CollectionStage.DELIVER)
+    events: list[str] = []
+    permit = _permit(command)
+    committed = _complete_result(command)
+
+    def reject_stage_permit(
+        current_permit: WorkerExecutionPermit,
+        stage: CollectionStage,
+        policy_revision: int | None,
+    ) -> WorkerExecutionPermit:
+        assert stage is CollectionStage.DELIVER
+        assert policy_revision == committed.policy_revision
+        return replace(current_permit, attempt_id=uuid4())
+
+    control = _Control(permit, events, stage_callback=reject_stage_permit)
+    execution = _Execution(events, _parse_and_prepare)
+    factory = _Factory(events, execution)
+    committer = _Committer(events)
+
+    def replayer(
+        _session_factory: object,
+        *,
+        command: CollectionCommand,
+        attempt_id: object,
+        lock_authority: object,
+    ) -> CollectionResult:
+        del _session_factory, command, attempt_id, lock_authority
+        events.append("replay")
+        return committed
+
+    worker = _worker(control, factory, committer, replayer=replayer)
+
+    with pytest.raises(WorkerAuthorizationError, match="changed attempt_id"):
+        worker.handle(command.model_dump())
+
+    assert events == ["authorize", "replay", "stage:deliver"]
+    assert factory.permits == []
+    assert execution.run_count == 0
+    assert committer.prepared == []
+    assert control.finalized == []
+    assert control.stopped == []
+
+
+def test_invalid_replayed_result_is_rejected_before_stage_gate_or_execution() -> None:
+    command = _command()
+    events: list[str] = []
+    permit = _permit(command)
+    valid_result = _failure_result(command)
+    invalid_result = valid_result.model_copy(
+        update={
+            "failures": [
+                valid_result.failures[0].model_copy(
+                    update={
+                        "core_decision_revision": (
+                            command.core_source_decision.decision_revision + 1
+                        )
+                    }
+                )
+            ]
+        }
+    )
+    stage_calls: list[CollectionStage] = []
+
+    def count_stage_call(
+        current_permit: WorkerExecutionPermit,
+        stage: CollectionStage,
+        policy_revision: int | None,
+    ) -> WorkerExecutionPermit:
+        del policy_revision
+        stage_calls.append(stage)
+        return current_permit
+
+    control = _Control(permit, events, stage_callback=count_stage_call)
+    execution = _Execution(events, _parse_and_prepare)
+    factory = _Factory(events, execution)
+    committer = _Committer(events)
+
+    def replayer(
+        _session_factory: object,
+        *,
+        command: CollectionCommand,
+        attempt_id: object,
+        lock_authority: object,
+    ) -> CollectionResult:
+        del _session_factory, command, attempt_id, lock_authority
+        events.append("replay")
+        return invalid_result
+
+    worker = _worker(control, factory, committer, replayer=replayer)
+
+    with pytest.raises(
+        WorkerContractViolation,
+        match="failure core_decision_revision",
+    ):
+        worker.handle(command.model_dump())
+
+    assert events == ["authorize", "replay"]
+    assert stage_calls == []
+    assert factory.permits == []
+    assert execution.run_count == 0
+    assert committer.prepared == []
+    assert control.finalized == []
+    assert control.stopped == []
 
 
 def test_fetch_resume_enters_stage_before_factory_and_finalizes_once() -> None:
@@ -967,11 +1195,27 @@ def test_policy_failure_after_binding_revision_commits_without_fetch() -> None:
 
 def test_deliver_resume_is_rejected_before_external_runner_side_effects() -> None:
     command = _command(resume_stage=CollectionStage.DELIVER)
-    worker, control, execution, _, committer, _ = _standard_worker(command)
+    replay_calls: list[tuple[CollectionCommand, object]] = []
+
+    def no_replay(
+        _session_factory: object,
+        *,
+        command: CollectionCommand,
+        attempt_id: object,
+        lock_authority: object,
+    ) -> None:
+        del _session_factory, lock_authority
+        replay_calls.append((command, attempt_id))
+
+    worker, control, execution, _, committer, _ = _standard_worker(
+        command,
+        replayer=no_replay,
+    )
 
     with pytest.raises(WorkerAuthorizationError):
         worker.handle(command.model_dump())
 
+    assert replay_calls == [(control.permit.command, control.permit.attempt_id)]
     assert execution.run_count == 0
     assert committer.prepared == []
     assert len(control.stopped) == 1

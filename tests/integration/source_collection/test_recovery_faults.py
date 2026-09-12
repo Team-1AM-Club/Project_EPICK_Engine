@@ -71,9 +71,16 @@ def _source_worker(
     permit,
     run: Callable,
     finalize_error: Exception | None = None,
+    stage_callback: Callable | None = None,
+    committer: Callable = commit_prepared_collection,
 ) -> tuple[SourceCollectionWorker, _Control, _Execution]:
     events: list[str] = []
-    control = _Control(permit, events, finalize_error=finalize_error)
+    control = _Control(
+        permit,
+        events,
+        finalize_error=finalize_error,
+        stage_callback=stage_callback,
+    )
     execution = _Execution(events, run)
     return (
         SourceCollectionWorker(
@@ -81,6 +88,7 @@ def _source_worker(
             execution_factory=_Factory(events, execution),
             session_factory=session_factory,
             lock_authority=_locker(command, pointer_eligible=True),
+            committer=committer,
             clock=lambda: NOW,
         ),
         control,
@@ -155,9 +163,24 @@ def test_w2_commit_fault_rolls_back_result_and_outbox_graph(
     def commit_fault_session_factory() -> Session:
         session = recovery_session_factory()
 
+        @event.listens_for(session, "before_flush")
+        def remember_w2_write(
+            pending_session: Session,
+            _flush_context: object,
+            _instances: object,
+        ) -> None:
+            if pending_session.new or pending_session.dirty or pending_session.deleted:
+                pending_session.info["w2_write_seen"] = True
+
         @event.listens_for(session, "before_commit", once=True)
-        def fail_commit(_session: Session) -> None:
-            raise RuntimeError("synthetic W2 commit fault")
+        def fail_write_commit(pending_session: Session) -> None:
+            if (
+                pending_session.new
+                or pending_session.dirty
+                or pending_session.deleted
+                or pending_session.info.get("w2_write_seen", False)
+            ):
+                raise RuntimeError("synthetic W2 commit fault")
 
         return session
 
@@ -220,18 +243,121 @@ def test_w2_post_commit_crash_redelivery_reuses_stored_result_without_new_rows(
         result_version=2,
         message="must be ignored after committed replay",
     )
+    redelivery_command = command.model_copy(update={"resume_stage": CollectionStage.DELIVER})
+    redelivery_permit = replace(permit, command=redelivery_command)
+    replay_worker, replay_control, replay_execution = _source_worker(
+        command=redelivery_command,
+        session_factory=recovery_session_factory,
+        permit=redelivery_permit,
+        run=_prepared_runner(redelivery),
+    )
+
+    replayed = replay_worker.handle(redelivery_command.model_dump(mode="json"))
+
+    assert replayed == initial.result
+    assert replay_execution.events == ["authorize", "stage:deliver", "finalize"]
+    assert replay_execution.run_count == 0
+    assert replay_execution.close_count == 0
+    assert replay_control.finalized == [(redelivery_permit, initial.result)]
+    with recovery_session_factory() as session:
+        assert _counts(session) == counts_after_commit
+
+
+@pytest.mark.approved_postgres
+def test_w2_policy_none_post_commit_crash_redelivery_binds_policy_before_finalization(
+    recovery_session_factory: sessionmaker[Session],
+) -> None:
+    _, source, policy = _seed_source(recovery_session_factory)
+    command = _command(source).model_copy(
+        update={
+            "resume_stage": CollectionStage.POLICY,
+            "policy_revision": None,
+        }
+    )
+    permit = _permit(command)
+    bound_policy_revision = policy.revision
+    bound_command = command.model_copy(update={"policy_revision": bound_policy_revision})
+    initial = _complete_prepared(
+        bound_command,
+        source,
+        policy,
+        attempt_id=permit.attempt_id,
+        aggregate_revision=1,
+    )
+
+    def bind_policy_revision(
+        current_permit,
+        stage: CollectionStage,
+        policy_revision: int | None,
+    ):
+        if stage is CollectionStage.POLICY and policy_revision == bound_policy_revision:
+            return replace(
+                current_permit,
+                command=current_permit.command.model_copy(
+                    update={"policy_revision": policy_revision}
+                ),
+            )
+        return current_permit
+
+    def bind_policy_then_prepare(context):
+        context.enter_stage(
+            CollectionStage.POLICY,
+            policy_revision=bound_policy_revision,
+        )
+        context.enter_stage(
+            CollectionStage.PARSE,
+            policy_revision=context.command.policy_revision,
+        )
+        return initial
+
+    crashing_worker, crashing_control, crashing_execution = _source_worker(
+        command=command,
+        session_factory=recovery_session_factory,
+        permit=permit,
+        run=bind_policy_then_prepare,
+        finalize_error=RuntimeError("synthetic crash after commit"),
+        stage_callback=bind_policy_revision,
+    )
+
+    with pytest.raises(RuntimeError, match="crash after commit"):
+        crashing_worker.handle(command.model_dump(mode="json"))
+
+    assert crashing_execution.close_count == 1
+    assert crashing_control.stopped == []
+    with recovery_session_factory() as session:
+        counts_after_commit = _counts(session)
+    assert counts_after_commit == (1, 1, 1, 1, 1, 1, 1)
+
+    def must_not_run(_context):
+        raise AssertionError("committed replay must not run the collection execution")
+
+    def must_not_commit(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("committed replay must not commit a collection result")
+
     replay_worker, replay_control, replay_execution = _source_worker(
         command=command,
         session_factory=recovery_session_factory,
         permit=replace(permit),
-        run=_prepared_runner(redelivery),
+        run=must_not_run,
+        stage_callback=bind_policy_revision,
+        committer=must_not_commit,
     )
 
     replayed = replay_worker.handle(command.model_dump(mode="json"))
 
     assert replayed == initial.result
-    assert replay_execution.close_count == 1
-    assert replay_control.finalized == [(permit, initial.result)]
+    assert replay_execution.events == [
+        "authorize",
+        "stage:policy",
+        "stage:deliver",
+        "finalize",
+    ]
+    assert replay_execution.run_count == 0
+    assert replay_execution.close_count == 0
+    finalized_permit, finalized_result = replay_control.finalized[0]
+    assert finalized_permit.command.policy_revision == bound_policy_revision
+    assert finalized_result == initial.result
+    assert replay_control.stopped == []
     with recovery_session_factory() as session:
         assert _counts(session) == counts_after_commit
 

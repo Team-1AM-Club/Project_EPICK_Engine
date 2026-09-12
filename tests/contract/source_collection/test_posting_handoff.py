@@ -326,6 +326,7 @@ def _run_posting_handoff() -> tuple[
         session_factory=lambda: object(),
         lock_authority=object(),
         committer=committer,
+        replayer=lambda *_args, **_kwargs: None,
         clock=lambda: NOW,
     )
 

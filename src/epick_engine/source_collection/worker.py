@@ -33,6 +33,7 @@ from epick_engine.source_collection.persistence import (
     OutboxEvent,
     PreparedCollectionCommit,
     commit_prepared_collection,
+    replay_committed_collection,
 )
 
 
@@ -133,6 +134,20 @@ class PreparedCollectionCommitter(Protocol):
         lock_authority: ExecutionAuthorityLocker,
     ) -> CollectionResult:
         """Persist one prepared attempt or return its idempotent replay result."""
+
+
+class CommittedCollectionReplayer(Protocol):
+    """Load a finalized result under the W1 same-transaction authority lock."""
+
+    def __call__(
+        self,
+        session_factory: Callable[[], Session],
+        *,
+        command: CollectionCommand,
+        attempt_id: UUID,
+        lock_authority: ExecutionAuthorityLocker,
+    ) -> CollectionResult | None:
+        """Return the committed result for an attempt, when one exists."""
 
 
 Clock = Callable[[], datetime]
@@ -310,6 +325,7 @@ class SourceCollectionWorker:
         session_factory: Callable[[], Session],
         lock_authority: ExecutionAuthorityLocker,
         committer: PreparedCollectionCommitter = commit_prepared_collection,
+        replayer: CommittedCollectionReplayer = replay_committed_collection,
         clock: Clock = _utc_now,
     ) -> None:
         self._control = control
@@ -317,6 +333,7 @@ class SourceCollectionWorker:
         self._session_factory = session_factory
         self._lock_authority = lock_authority
         self._committer = committer
+        self._replayer = replayer
         self._clock = clock
 
     def handle(self, payload: object) -> CollectionResult:
@@ -333,6 +350,51 @@ class SourceCollectionWorker:
             if isinstance(issued_permit, WorkerExecutionPermit):
                 permit_to_stop = issued_permit
             self._validate_initial_permit(command, issued_permit)
+
+            stop_error_code = "committed_result_replay_failed"
+            replayed_result = self._replayer(
+                self._session_factory,
+                command=issued_permit.command,
+                attempt_id=issued_permit.attempt_id,
+                lock_authority=self._lock_authority,
+            )
+            if replayed_result is not None:
+                resources_closed = True
+                commit_completed = True
+                validation_command = issued_permit.command
+                if (
+                    validation_command.resume_stage is CollectionStage.POLICY
+                    and validation_command.policy_revision is None
+                ):
+                    validation_command = validation_command.model_copy(
+                        update={"policy_revision": replayed_result.policy_revision}
+                    )
+                self._validate_result(replayed_result, command=validation_command)
+                context = WorkerExecutionContext(
+                    control=self._control,
+                    permit=issued_permit,
+                    clock=self._clock,
+                )
+                resume_stage = context.command.resume_stage
+                context.enter_stage(
+                    resume_stage,
+                    policy_revision=replayed_result.policy_revision,
+                )
+                permit_to_stop = context.permit
+                if resume_stage is not CollectionStage.DELIVER:
+                    context.enter_stage(
+                        CollectionStage.DELIVER,
+                        policy_revision=replayed_result.policy_revision,
+                    )
+                    permit_to_stop = context.permit
+                self._validate_result(replayed_result, command=context.command)
+                self._control.finalize_execution(
+                    context.permit,
+                    replayed_result,
+                    resources_closed=True,
+                )
+                return replayed_result
+
             if issued_permit.command.resume_stage is CollectionStage.DELIVER:
                 raise WorkerAuthorizationError(
                     "deliver-stage replay requires the W1 committed-result adapter"

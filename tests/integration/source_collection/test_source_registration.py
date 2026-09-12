@@ -320,6 +320,7 @@ def _run_pipeline(
         ),
         session_factory=lambda: None,
         lock_authority=lambda *_args, **_kwargs: None,
+        replayer=lambda *_args, **_kwargs: None,
         committer=commit,
         clock=lambda: NOW,
     )
