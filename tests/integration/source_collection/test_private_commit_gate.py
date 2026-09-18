@@ -74,7 +74,9 @@ def session_factory(database_engine: Engine) -> sessionmaker[Session]:
 
 
 def _pair() -> tuple[CollectionCommand, CollectionResult]:
-    raw = json.loads((FIXTURES / "w2_commit_gate_proposal/digest-vector.json").read_text())
+    raw = json.loads(
+        (FIXTURES / "w2_commit_gate_proposal/digest-vector.json").read_text(encoding="utf-8")
+    )
     command_id, job_id, owner_ref = uuid4(), uuid4(), uuid4()
     raw["command"].update(
         command_id=str(command_id), job_id=str(job_id), authenticated_owner_ref=str(owner_ref)
@@ -95,7 +97,9 @@ def _gate(
     epoch: int | None = None,
 ) -> CommitGateCommand:
     raw = json.loads(
-        (FIXTURES / f"w1_private_contract/private-w2-commit-gate-{action.lower()}.json").read_text()
+        (FIXTURES / f"w1_private_contract/private-w2-commit-gate-{action.lower()}.json").read_text(
+            encoding="utf-8"
+        )
     )
     raw.update(
         message_id=str(uuid4()),
