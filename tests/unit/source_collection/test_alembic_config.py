@@ -23,7 +23,10 @@ def test_alembic_uses_the_project_migration_directory_without_a_stored_url() -> 
 def test_source_collection_migration_is_the_only_head() -> None:
     scripts = ScriptDirectory.from_config(_alembic_config())
 
-    assert scripts.get_heads() == ["0003_source_retention_origin"]
+    assert scripts.get_heads() == ["0004_private_commit_gate"]
+    assert scripts.get_revision("0004_private_commit_gate").down_revision == (
+        "0003_source_retention_origin"
+    )
     assert scripts.get_revision("0003_source_retention_origin").down_revision == "0002_job_posting"
 
 

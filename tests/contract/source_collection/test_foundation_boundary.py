@@ -48,7 +48,7 @@ from epick_engine.source_collection.contracts import (
 
 ENGINE_ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_DIR = ENGINE_ROOT.parent / "specs" / "001-official-source-collection" / "contracts"
-MIGRATION_HEAD = "0003_source_retention_origin"
+MIGRATION_HEAD = "0004_private_commit_gate"
 
 
 def _load_json(name: str) -> dict[str, Any]:

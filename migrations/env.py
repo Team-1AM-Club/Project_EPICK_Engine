@@ -5,6 +5,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy.engine import Connection
 
+from epick_engine.source_collection import commit_gate_store  # noqa: F401
 from epick_engine.source_collection.persistence import (
     Base,
     create_database_engine,
