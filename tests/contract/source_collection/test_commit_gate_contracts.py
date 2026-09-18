@@ -19,7 +19,7 @@ from epick_engine.source_collection.w1_transport import W1WireContractError
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 W1 = FIXTURES / "w1_private_contract"
 PROPOSAL = FIXTURES / "w2_commit_gate_proposal"
-CONTRACTS = Path(__file__).resolve().parents[4] / "specs/001-official-source-collection/contracts"
+CONTRACTS = Path(__file__).resolve().parents[3] / "contracts/w2-private"
 MESSAGE_ID = UUID("50000000-0000-4000-8000-000000000001")
 OCCURRED_AT = datetime(2026, 9, 18, tzinfo=UTC)
 
