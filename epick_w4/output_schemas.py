@@ -50,7 +50,13 @@ SCHEMAS = {
 
 
 def schema_for(stage, payload):
+    if stage in ("c01_question", "c01_claims", "c01_requirements"):
+        from .c01_staged import schema_for as staged_schema
+        return staged_schema(stage, payload)
     """Bind input IDs and enforce coherent states, without supplying judgments."""
+    if stage == "c01_company_details":
+        from .c01_detail import schema_for as c01_schema
+        return c01_schema(payload)
     if stage == "company_details":
         from .company_detail import schema_for as company_schema
         return company_schema(payload)

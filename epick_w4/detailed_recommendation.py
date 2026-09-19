@@ -132,7 +132,7 @@ def _assess(response, item, question):
     return sorted(result, key=lambda r: list(wanted).index(r["check_id"]))
 
 
-def recommend_extracted(raw, extraction, *, question, top_k, user_id, llm, company_context=None):
+def recommend_extracted(raw, extraction, *, question, top_k, user_id, llm, company_context=None, c01_split=False):
     """Internal stage boundary for sequential GPU loading; revalidate source and scope."""
     items = _source_checked(raw, extraction, user_id)
     # Reconstruct the approved catalog content even for direct Python callers.
@@ -151,16 +151,31 @@ def recommend_extracted(raw, extraction, *, question, top_k, user_id, llm, compa
                                      check_sample_company_detail, outbound_payload)
         prompt, prompt_version, stage = COMPANY_PROMPT, COMPANY_VERSION, "company_details"
         check_payload = check_sample_company_detail
+        if company_context.c01:
+            from .c01_detail import PROMPT as C01_PROMPT, PROMPT_VERSION as C01_VERSION, check_sample_c01_detail
+            prompt, prompt_version, stage = C01_PROMPT, C01_VERSION, "c01_company_details"
+            check_payload = check_sample_c01_detail
         payloads = [outbound_payload(p, company_context) for p in payloads]
     if not llm.simulated:
         for outbound in payloads:
             check_payload(prompt, outbound)
+    split = c01_split and company_context is not None and company_context.c01
+    if split:
+        from .c01_staged import PROMPTS, VERSION, assess
+        prompt, prompt_version = PROMPTS, VERSION
     candidates, calls = [], []
     for item, outbound in zip(items, payloads):
-        response = llm.complete_json(stage=stage, system_prompt=prompt, payload=deepcopy(outbound))
+        if split:
+            response, stage_calls = assess(llm, outbound)
+            calls.extend(stage_calls)
+        else:
+            response = llm.complete_json(stage=stage, system_prompt=prompt, payload=deepcopy(outbound))
+            calls.append({"episode_id": item["episode"]["episode_id"], "input_sha256": content_hash(outbound)})
         support, used_refs = None, None
         if company_context is not None:
             from .company_detail import company_support
+            if company_context.c01:
+                from .c01_detail import company_support
             support, used_refs = company_support(response, item, company_context)
             response = {"checks": response["checks"]}
         checks = _assess(response, item, question)
@@ -187,7 +202,6 @@ def recommend_extracted(raw, extraction, *, question, top_k, user_id, llm, compa
                            "ranking_evidence_kind_count": len(kinds)})
         if company_context is not None:
             candidates[-1].update(company_support=support, used_company_refs=used_refs)
-        calls.append({"episode_id": episode["episode_id"], "input_sha256": content_hash(outbound)})
     order = {"DIRECT_MATCH": 0, "PARTIAL_MATCH": 1, "NEEDS_CONFIRMATION": 2}
     candidates.sort(key=lambda c: (order[c["status"]], -c["ranking_evidence_kind_count"], c["episode_id"]))
     ranking = candidates[:top_k]
@@ -226,7 +240,7 @@ def recommend_extracted(raw, extraction, *, question, top_k, user_id, llm, compa
     return result
 
 
-def recommend_from_raw(payload, *, user_id, extraction_llm, judgment_llm, company_context=None):
+def recommend_from_raw(payload, *, user_id, extraction_llm, judgment_llm, company_context=None, c01_split=False):
     raw, question, top_k = prepare_request(payload, user_id)
     if not judgment_llm.simulated and question["user_theme"] not in (None, "꾸준히 배우고 적용하는 태도"):
         raise LLMError("LLM_SYNTHETIC_SAMPLE_REQUIRED", "input")
@@ -236,7 +250,7 @@ def recommend_from_raw(payload, *, user_id, extraction_llm, judgment_llm, compan
         empty["episodes"] = []
         extraction = extract_evidence(empty, user_id=user_id, llm=extraction_llm)
         return recommend_extracted(empty, extraction, question=question, top_k=top_k, user_id=user_id,
-                                   llm=judgment_llm, company_context=company_context)
+                                   llm=judgment_llm, company_context=company_context, c01_split=c01_split)
     extraction = extract_evidence(raw, user_id=user_id, llm=extraction_llm)
     return recommend_extracted(raw, extraction, question=question, top_k=top_k, user_id=user_id,
-                               llm=judgment_llm, company_context=company_context)
+                               llm=judgment_llm, company_context=company_context, c01_split=c01_split)

@@ -95,7 +95,7 @@ def company_support(response, item, company):
 
 
 def finish_company_result(result, company):
-    result["schema_version"] = "w4-detailed-output/0.2"
+    result["schema_version"] = "w4-detailed-output/0.3" if company.c01 else "w4-detailed-output/0.2"
     result["processing_status"] = result.pop("status")
     result["company_context"] = deepcopy(company.summary)
     result["ranking_policy_approval"] = "PENDING_PRODUCT_REVIEW"

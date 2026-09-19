@@ -1,5 +1,7 @@
 # W4 백엔드 연결 계약 — 2026-09-09 피드백 반영
 
+**2026-09-17 최신 확인:** 백엔드에 추천 API와 저장 구조가 추가됐다. [현재 W1 연결 계획·실제 DTO 대조](w4-w1-bridge-plan-2026-09-17.md)를 먼저 읽는다. 아래의 비어 있는 `feat/BE` 파일 설명은 9월 9일 당시 기록이다.
+
 **새 서비스 연결 기준은 [서비스 계약·실행 안내](w4-service-handoff.md)다.**
 `create_service_router`가 서버 조회·정책 재검사와 W3 근거 투영을 적용한다.
 요청은 `w4-service-input/0.1`, 서버 내부 입력은 `w4-server-context/0.1`, 출력은 `w4-detailed-output/0.2`다.

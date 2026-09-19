@@ -1,5 +1,22 @@
+> 최신 W1 연결 작업: [HTTP context·runtime 인계 r5](docs/w4-http-runtime-handoff-2026-09-20.md) · [staging 실행 안내](docs/w4-http-runtime-deployment-2026-09-20.md). REAL은 비활성 상태이며 실제 AWS/공동 CT-12는 아직 미실행입니다.
+
 # Project_EPICK_Engine
 Agent Engine Repository for Project EPICK
+
+**2026-09-19 runtime 후속:** W1 commit 519b9127의 wire 채택 원본을 확인하고 정확한 commit/schema hash에 맞춘 호환 처리를 추가했다.
+[실제 runtime 회신 r4](docs/w4-actual-runtime-handoff-reply-2026-09-19.md) · [최신 코드·파일 안내](docs/w4-actual-runtime-handoff-guide-2026-09-19.md).
+관련85개·전체466개 로컬 검사와 복구가 통과했다. 공유 producer commit·image·실제 context/IAM/SQS·공동 CT-12·정책 승인은 미완료, REAL 비활성이다.
+
+**2026-09-19 r3.1 당시:** W4 Question Core의 job_id 결속 생성기, 영속 SQLite outbox와 send-only relay를 추가했다.
+W1 후보 원문 2개의 checksum을 확인하고 type:null을 지원하도록 codec을 수정했다. 후보 원문은 변경하지 않았다.
+후보 검토 → D01–D03 합의 → 채택본 SHA 교환 → 실제 연결·공동 CT-12 순서이며 운영 전송은 비활성이다.
+[W1 필수 양식 회신 r3.1](docs/w4-mandatory-r3-reply-2026-09-19.md) · [코드·실행 안내](docs/w4-question-core-producer.md) · [최신 전달 안내](docs/w4-question-core-mandatory-r3-handoff-2026-09-19.md).
+이번 r3.1은 문서 형식 보완이며, 직전 r3의 관련73개·전체454개 검증 증거를 보존했다. 정책 승인·공유 producer commit·실제 연결은 미완료다.
+
+**2026-09-18 최신:** C01 판단을 문항·기업 진술·세부 조건으로 분리하고 네 로컬 모델을 새 가상 사례로 실제 비교했다.
+W1 Run 실행 어댑터와 가상 DB 연결 검사를 추가했다. 운영 모델 선정과 실제 팀 DB 연결은 검토 전이다.
+[현재 순서](docs/w4-workflow.md) · [최신 비교·시연·351개 검사 결과](docs/w4-staged-result-2026-09-18.md) · [W1 연결 계약·코드](docs/w4-w1-bridge-contract-2026-09-18.md).
+아래 9월 9일 수치와 백엔드 상태는 당시 기록이다.
 
 **서비스 재현 CI 추가:** 잠금 의존성 설치, 전체 테스트와 두 가상 HTTP 시연, 성공·실패 산출물 보관을 구성했다.
 [CI 실행·결과 확인](docs/w4-service-ci.md) · [D-05 공동 합의 요청](docs/w4-d05-contract-decisions.md).
@@ -17,7 +34,7 @@ Gemma 12B B의 추출은 83.33%, 경험 판단 최고점은 Qwen 14B A와 Gemma 
 실제 조합 시연 52회와 보완 판단 35회를 별도로 확인했고 테스트 216개가 통과했다.
 [최신 결과·실행 안내](docs/w4-review-v4-2026-09-09.md) · [백엔드 연결 계약](docs/w4-backend-integration.md) · [이전 v3 결과](docs/w4-review-v3-2026-09-09.md).
 `POST /w4/recommend-from-raw`는 서로 다른 추출·판단 모델로 문항별 상세 점검을 적용한다.
-팀 서비스 `feat/BE`는 빈 구조 파일만 있어 실제 인증·DB·검색 연동은 남아 있다.
+9월 9일에는 팀 서비스 `feat/BE`가 빈 구조였으나, 9월 18일에는 추천 API·DTO·모의 실행기가 구현된 것을 확인했다. 실제 연결 범위는 위 최신 계약을 따른다.
 기존 규칙·모의 출력과의 구분은 [데모 상태](docs/w4-demo-status.md)에 정리했다.
 
 ## W4 첫 구현: 문항별 경험 매칭·추천
@@ -171,3 +188,11 @@ python -m unittest discover -s tests -v
 
 다음 통합에서는 백엔드가 인증·프로젝트·Snapshot을 제공하고, 경험 목록 공급을 Graph·Vector 검색으로 교체한다.
 LLM 문항 해석·의미 매칭·추출의 실제 예비 비교를 완료했다. 정답의 사람 검토, 관측된 오류 개선과 새 사례 재평가가 남아 있다.
+
+2026-09-17: W3 C01 r2 수신 어댑터, 복합 조건 보존, 신호·ACK·추천 캐시 무효화를 연결했다.
+새 서버 입력 0.2와 출력 0.3의 사용법·검증 결과는 [C01 연결 안내](docs/w4-c01-integration-2026-09-17.md),
+팀 검토 항목은 [A1–A5 회신 초안](docs/w4-c01-adoption-reply-2026-09-17.md)을 참조한다.
+
+2026-09-18: 기업 기준의 의미·분야 판단을 보완하고 새 가상 사례 7개로 실제 추출과 네 모델 판단을 연결했다.
+[재평가 보고서](docs/w4-c01-domain-evaluation-2026-09-18.md)에 기존 달리기 오연결의 API 재검증,
+모델별 남은 오류와 로컬 테스트 323개 결과를 정리했다. 운영 모델 선정은 보류 상태다.

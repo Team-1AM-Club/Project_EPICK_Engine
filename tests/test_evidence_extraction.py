@@ -312,6 +312,10 @@ class ExtractionTests(unittest.TestCase):
         for version in ("v3", "v4"):
             fixed = json.loads((ROOT / f"samples/extraction/raw-experiences.{version}.synthetic.json").read_text(encoding="utf-8"))
             expected.update(content_hash(model_payload(e, source_units(e["raw_text"]))) for e in fixed["episodes"])
+        domain = json.loads((ROOT / "samples/c01/domain-input.synthetic.json").read_text(encoding="utf-8"))
+        expected.update(content_hash(model_payload(e, source_units(e["raw_text"]))) for e in domain["episodes"])
+        fresh = json.loads((ROOT / "samples/c01/fresh-input.synthetic.json").read_text(encoding="utf-8"))
+        expected.update(content_hash(model_payload(e, source_units(e["raw_text"]))) for e in fresh["episodes"])
         self.assertEqual(allowed, {"payload_sha256": sorted(expected)})
         for episode in self.value["episodes"]:
             check_sample_payload("extraction", EXTRACTION_PROMPT, model_payload(episode, source_units(episode["raw_text"])))

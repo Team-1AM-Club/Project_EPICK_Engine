@@ -27,6 +27,7 @@ def refs_for(criteria):
 class CompanyContext:
     criteria: tuple[dict, ...]
     summary: dict
+    c01: bool = False
 
 
 def _index(items, key):

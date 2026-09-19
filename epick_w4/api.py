@@ -89,10 +89,11 @@ def create_router(*, authenticate: Callable, client_factory: Callable[[], JsonCl
 
 
 def create_service_router(*, authenticate: Callable, backend, client_factory: Callable,
-                          extraction_client_factory: Callable) -> APIRouter:
+                          extraction_client_factory: Callable, c01_consumer=None, c01_split=False) -> APIRouter:
     """Mount this router alone in the team service; factories must not call models."""
     from pydantic import ValidationError
     from .service_adapter import ServiceError, execute_service
+    from .c01_consumer import C01Error
 
     router = APIRouter()
 
@@ -114,8 +115,14 @@ def create_service_router(*, authenticate: Callable, backend, client_factory: Ca
         try:
             result = await run_in_threadpool(execute_service, payload, user_id=user_id, backend=backend,
                                             extraction_factory=extraction_client_factory,
-                                            judgment_factory=client_factory)
+                                            judgment_factory=client_factory, c01_consumer=c01_consumer,
+                                            c01_split=c01_split)
             return JSONResponse(result)
+        except C01Error as error:
+            safe = {"C01_CONSUMER_NOT_CONFIGURED", "C01_STATUS_UNAVAILABLE", "C01_CONTEXT_CHANGED",
+                    "C01_SOURCE_NOT_READY", "C01_SOURCE_EXPIRED", "C01_SIGNAL_CONFLICT", "C01_DELIVERY_FAILED"}
+            return JSONResponse({"error": error.code if error.code in safe else "SERVICE_FAILURE"},
+                                status_code=error.status if error.code in safe else 503)
         except ServiceError as error:
             # Only this module's fixed codes are exposed; never provider exception text.
             safe = {"BACKEND_UNAVAILABLE", "PROJECT_NOT_FOUND", "BACKEND_CONTEXT_INVALID", "CONTEXT_CHANGED",

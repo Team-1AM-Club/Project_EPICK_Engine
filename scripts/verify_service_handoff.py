@@ -63,7 +63,7 @@ def run_suite(suite, stream, minimum=MINIMUM_TESTS):
 
 def source_hashes():
     files = [ROOT / "pyproject.toml", ROOT / "uv.lock"]
-    for folder in ("epick_w4", "examples", "scripts", "tests", "samples", "schemas", ".github"):
+    for folder in ("epick_w4", "examples", "scripts", "tests", "samples", "schemas", ".github", "deploy"):
         files.extend(p for p in (ROOT / folder).rglob("*")
                      if p.is_file() and "__pycache__" not in p.parts)
     return {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()

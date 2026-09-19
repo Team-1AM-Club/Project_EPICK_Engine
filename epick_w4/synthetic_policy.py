@@ -28,6 +28,12 @@ def check_sample_inputs(question_text: str, pool: list[Candidate]):
 
 
 def check_sample_payload(stage: str, system_prompt: str, payload: dict):
+    if stage in ("c01_question", "c01_claims", "c01_requirements"):
+        from .c01_staged import check_sample
+        return check_sample(stage, system_prompt, payload)
+    if stage == "c01_company_details":
+        from .c01_detail import check_sample_c01_detail
+        return check_sample_c01_detail(system_prompt, payload)
     if stage == "company_details":
         from .company_detail import check_sample_company_detail
         return check_sample_company_detail(system_prompt, payload)

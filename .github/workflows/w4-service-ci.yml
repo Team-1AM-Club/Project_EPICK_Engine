@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [develop]
   push:
-    branches: [develop, feat/w4-service-handoff]
+    branches: [develop, feat/w4-service-handoff, feat/w4-question-core-runtime]
   workflow_dispatch:
 
 permissions:
@@ -53,4 +53,39 @@ jobs:
           name: w4-service-${{ matrix.os }}-py${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: output/ci/
           if-no-files-found: error
+          retention-days: 14
+
+  question-core-container:
+    name: Question Core container / synthetic config
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build pinned container without publishing
+        run: docker build --build-arg W4_SOURCE_SHA="$GITHUB_SHA" -f deploy/question-core/Dockerfile -t w4-ct12-ci .
+      - name: Verify entrypoint and persistent store across two containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker volume create w4-ct12-ci-outbox
+          trap 'docker volume rm w4-ct12-ci-outbox' EXIT
+          mkdir -p output/ci/container
+          for attempt in 1 2; do
+            docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+              --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+              -e W1_W4_CONTEXT_BEARER=SYNTHETIC-CI-NOT-A-SECRET \
+              -v "$PWD/samples/question-core-w1-context-20260919:/run/w4-plan:ro" \
+              -v w4-ct12-ci-outbox:/var/lib/w4 w4-ct12-ci check \
+              | tee "output/ci/container/check-$attempt.json"
+          done
+          docker image inspect --format '{{.Id}}' w4-ct12-ci > output/ci/container/local-image-id.txt
+      - name: Retain container smoke evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: w4-question-core-container-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/ci/container/
+          if-no-files-found: warn
           retention-days: 14
