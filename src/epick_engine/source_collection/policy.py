@@ -98,7 +98,7 @@ _OPERATION_PERMISSION_FIELD = {
     PolicyOperation.REDISTRIBUTE: "redistribution_permission",
 }
 
-_INTEGER_LIMIT_FIELDS = frozenset(
+_POSITIVE_INTEGER_LIMIT_FIELDS = frozenset(
     {
         "site_concurrency",
         "global_concurrency",
@@ -106,10 +106,11 @@ _INTEGER_LIMIT_FIELDS = frozenset(
         "max_response_bytes",
         "max_decompressed_bytes",
         "max_redirects",
-        "general_retry_limit",
         "retention_days",
     }
 )
+_NONNEGATIVE_LIMIT_FIELDS = frozenset({"general_retry_limit"})
+_INTEGER_LIMIT_FIELDS = _POSITIVE_INTEGER_LIMIT_FIELDS | _NONNEGATIVE_LIMIT_FIELDS
 _FLOAT_LIMIT_FIELDS = frozenset({"connect_timeout_seconds", "read_timeout_seconds"})
 _EXECUTION_LIMIT_FIELDS = _INTEGER_LIMIT_FIELDS | _FLOAT_LIMIT_FIELDS
 _ALLOWED_QUERY_NAMES = frozenset({"id"})
@@ -152,10 +153,16 @@ def parse_execution_limits(values: Mapping[str, object]) -> ExecutionLimits:
         raise ExecutionPolicyUnconfigured(f"unknown execution limit: {unknown}")
 
     parsed: dict[str, int | float] = {}
-    for field in _INTEGER_LIMIT_FIELDS:
+    for field in _POSITIVE_INTEGER_LIMIT_FIELDS:
         value = values[field]
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ExecutionPolicyUnconfigured(f"{field} must be a positive integer")
+        parsed[field] = value
+
+    for field in _NONNEGATIVE_LIMIT_FIELDS:
+        value = values[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ExecutionPolicyUnconfigured(f"{field} must be a non-negative integer")
         parsed[field] = value
 
     for field in _FLOAT_LIMIT_FIELDS:

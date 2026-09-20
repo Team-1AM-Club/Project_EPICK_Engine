@@ -1,4 +1,4 @@
-"""Pinned W1 gate codec; W2 proposals are unadopted and disconnected from queues."""
+"""W1-adopted private gate codec; proposal wire names remain compatibility pins."""
 
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ def _digest(command: CollectionCommand, result: CollectionResult) -> str:
 
 
 def staged_result_digest(command: CollectionCommand, result: CollectionResult) -> str:
-    """Hash only revalidated, bound command/result JSON; this is an unadopted proposal.
+    """Hash only revalidated, bound command/result JSON under the W1-adopted profile.
 
     Arrays retain order and Unicode is not normalized. Delivery IDs/timestamps,
     operation ID and lease ID are not hash inputs; none is invented here.
@@ -127,7 +127,7 @@ def staged_result_digest(command: CollectionCommand, result: CollectionResult) -
 
 
 class StagedResultProposal(ContractModel):
-    """Private submission proposal, separate from CollectionResult and any queue."""
+    """Adopted private submission, retaining the original proposal wire version."""
 
     schema_version: Literal["w2.private.staged-result.proposal.v1"]
     message_id: UUID
@@ -148,7 +148,7 @@ class StagedResultProposal(ContractModel):
 
 
 class CommitGateAckProposal(_GateBinding):
-    """Unadopted outcome proposal; never converted to a W1 normalized success ACK."""
+    """Adopted explicit outcome; never converted to a W1 normalized success ACK."""
 
     schema_version: Literal["w2.private.commit-gate-ack.proposal.v1"]
     message_id: UUID

@@ -1010,7 +1010,7 @@ def test_import_persists_original_sections_evidence_and_request_deduplication(
         assert attempt.failures == []
 
 
-def test_retry_resumes_persisted_failed_stage_and_replays_retry_key(
+def test_w1_issued_retry_resumes_persisted_failed_stage_without_w2_retry_route(
     session_factory: sessionmaker[Session],
 ) -> None:
     assembly = _PostingAssembly(
@@ -1029,31 +1029,36 @@ def test_retry_resumes_persisted_failed_stage_and_replays_retry_key(
     assert failed.payload()["failure"] == {"stage": "fetch", "code": "RATE_LIMITED"}
     assert failed.payload()["resume_stage"] == "fetch"
 
-    retry_body = {
-        "job_id": accepted["job_id"],
-        "expected_input_version": failed.payload()["input_version"],
-        "expected_result_version": failed.payload()["result_version"],
-    }
-    retry_path = f"/api/v1/job-postings/{posting_id}/retry"
-    retry_headers = _headers("posting-retry-rate-limited")
-    first_retry = _request(
+    # W2 must not accept user retry actions or dispatch from its old posting route.
+    rejected_retry = _request(
         app,
         "POST",
-        retry_path,
-        headers=retry_headers,
-        body=retry_body,
+        f"/api/v1/job-postings/{posting_id}/retry",
+        headers=_headers("posting-retry-rate-limited"),
+        body={
+            "job_id": accepted["job_id"],
+            "expected_input_version": failed.payload()["input_version"],
+            "expected_result_version": failed.payload()["result_version"],
+        },
     )
-    replay = _request(
-        app,
-        "POST",
-        retry_path,
-        headers=retry_headers,
-        body=retry_body,
-    )
+    assert rejected_retry.status_code == 404
+    assert assembly.dispatches == 1
+    assert len(assembly.collector.requests) == 1
+    with session_factory() as session:
+        assert _count(session, CollectionAttempt) == 1
+        assert _count(session, RequestDeduplication) == 1
 
-    assert first_retry.status_code == replay.status_code == 202
-    assert replay.payload() == first_retry.payload()
-    assert first_retry.payload()["resume_stage"] == "fetch"
+    # This test-local W1 owner supplies the resumed command directly. It does not
+    # implement or verify W1's public Job action API, slot policy or real dispatch.
+    for _ in range(2):
+        assembly.retry_job_posting(
+            owner_user_id=OWNER_ID,
+            job_posting_id=posting_id,
+            job_id=UUID(accepted["job_id"]),
+            expected_input_version=failed.payload()["input_version"],
+            expected_result_version=failed.payload()["result_version"],
+            idempotency_key="posting-retry-rate-limited",
+        )
     assert assembly.dispatches == 2
     assert len(assembly.collector.requests) == 2
     assert assembly.stage_histories[1][0] is CollectionStage.FETCH

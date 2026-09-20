@@ -883,6 +883,28 @@ def test_refresh_requires_idempotency_key_and_schema_conforming_body_before_serv
     assert service.fetch_spy.calls == network_calls == []
 
 
+def test_source_retry_is_not_registered_in_w2(
+    app: FastAPI,
+    service: _FakeVersionEvidenceService,
+    network_calls: list[str],
+) -> None:
+    response = _request(
+        app,
+        "POST",
+        f"/api/v1/sources/{_SOURCE_ID}/retry",
+        headers=_owner_headers(**{"Idempotency-Key": "must-be-owned-by-w1"}),
+        body={
+            "job_id": str(_COMPLETED_JOB_ID),
+            "expected_input_version": 1,
+            "expected_result_version": 1,
+        },
+    )
+
+    assert response.status_code == 404
+    assert service.calls == []
+    assert service.fetch_spy.calls == network_calls == []
+
+
 def test_refresh_hides_non_owned_and_unknown_sources_without_creating_private_work(
     app: FastAPI,
     service: _FakeVersionEvidenceService,

@@ -22,8 +22,23 @@ def test_alembic_uses_the_project_migration_directory_without_a_stored_url() -> 
 
 def test_source_collection_migration_is_the_only_head() -> None:
     scripts = ScriptDirectory.from_config(_alembic_config())
+    head = scripts.get_current_head()
 
-    assert scripts.get_heads() == ["0004_private_commit_gate"]
+    assert head is not None
+    assert len(head) <= 32
+    assert scripts.get_heads() == ["0008_collection_runtime"]
+    assert scripts.get_revision("0008_collection_runtime").down_revision == (
+        "0007_restriction_receipt"
+    )
+    assert scripts.get_revision("0007_restriction_receipt").down_revision == (
+        "0006_source_restriction"
+    )
+    assert scripts.get_revision("0006_source_restriction").down_revision == (
+        "0005_private_gate_delivery"
+    )
+    assert scripts.get_revision("0005_private_gate_delivery").down_revision == (
+        "0004_private_commit_gate"
+    )
     assert scripts.get_revision("0004_private_commit_gate").down_revision == (
         "0003_source_retention_origin"
     )
@@ -77,3 +92,24 @@ def test_retention_origin_migration_downgrade_is_unsupported() -> None:
 
     with pytest.raises(RuntimeError, match="Destructive downgrade"):
         scripts.get_revision("0003_source_retention_origin").module.downgrade()
+
+
+def test_source_restriction_migration_downgrade_is_unsupported() -> None:
+    scripts = ScriptDirectory.from_config(_alembic_config())
+
+    with pytest.raises(RuntimeError, match="Destructive downgrade"):
+        scripts.get_revision("0006_source_restriction").module.downgrade()
+
+
+def test_restriction_mutation_receipt_migration_downgrade_is_unsupported() -> None:
+    scripts = ScriptDirectory.from_config(_alembic_config())
+
+    with pytest.raises(RuntimeError, match="Destructive downgrade"):
+        scripts.get_revision("0007_restriction_receipt").module.downgrade()
+
+
+def test_collection_runtime_migration_downgrade_is_unsupported() -> None:
+    scripts = ScriptDirectory.from_config(_alembic_config())
+
+    with pytest.raises(RuntimeError, match="Destructive downgrade"):
+        scripts.get_revision("0008_collection_runtime").module.downgrade()

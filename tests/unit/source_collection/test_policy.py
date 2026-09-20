@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import FrozenInstanceError
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import FrozenInstanceError, replace
 
 import httpx
 import pytest
 
+from epick_engine.source_collection.contracts import AccessClass, OfficialStatus, Permission
 from epick_engine.source_collection.policy import (
-    AccessClass,
     ExecutionPolicyUnconfigured,
-    OfficialStatus,
-    Permission,
     PolicyBlocked,
     PolicyOperation,
     PolicySnapshot,
@@ -30,7 +28,7 @@ from epick_engine.source_collection.policy import (
 PUBLIC_IP = "8.8.8.8"
 
 
-def _resolver(*addresses: str):
+def _resolver(*addresses: str) -> Callable[[str], Iterable[str]]:
     def resolve(_hostname: str) -> Iterable[str]:
         return addresses
 
@@ -38,17 +36,16 @@ def _resolver(*addresses: str):
 
 
 def _allowed_policy(**overrides: object) -> PolicySnapshot:
-    values: dict[str, object] = {
-        "official_status": OfficialStatus.VERIFIED,
-        "access_class": AccessClass.PUBLIC,
-        "collection_permission": Permission.ALLOWED,
-        "excerpt_storage_permission": Permission.ALLOWED,
-        "body_storage_permission": Permission.ALLOWED,
-        "redistribution_permission": Permission.ALLOWED,
-        "revision": 1,
-    }
-    values.update(overrides)
-    return PolicySnapshot(**values)
+    policy = PolicySnapshot(
+        official_status=OfficialStatus.VERIFIED,
+        access_class=AccessClass.PUBLIC,
+        collection_permission=Permission.ALLOWED,
+        excerpt_storage_permission=Permission.ALLOWED,
+        body_storage_permission=Permission.ALLOWED,
+        redistribution_permission=Permission.ALLOWED,
+        revision=1,
+    )
+    return replace(policy, **overrides)  # type: ignore[arg-type]
 
 
 def _limits() -> dict[str, int | float]:
@@ -144,11 +141,11 @@ def test_policy_revision_is_required_and_immutable() -> None:
     }
 
     with pytest.raises(TypeError):
-        PolicySnapshot(**values)
+        PolicySnapshot(**values)  # type: ignore[arg-type]
 
     policy = _allowed_policy()
     with pytest.raises(FrozenInstanceError):
-        policy.revision = 2
+        policy.revision = 2  # type: ignore[misc]
 
 
 def test_public_https_url_resolves_to_a_validated_target() -> None:
@@ -283,6 +280,44 @@ def test_execution_limits_reject_unknown_and_unbounded_values() -> None:
         parse_execution_limits(values)
 
 
+def test_general_retry_limit_alone_accepts_zero() -> None:
+    values = _limits()
+    values["general_retry_limit"] = 0
+
+    assert parse_execution_limits(values).general_retry_limit == 0
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5])
+def test_general_retry_limit_rejects_negative_bool_and_fractional_values(value: object) -> None:
+    values: dict[str, object] = dict(_limits())
+    values["general_retry_limit"] = value
+
+    with pytest.raises(ExecutionPolicyUnconfigured, match="general_retry_limit"):
+        parse_execution_limits(values)
+
+
+@pytest.mark.parametrize("field", [field for field in _limits() if field != "general_retry_limit"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_every_other_execution_limit_remains_strictly_positive(
+    field: str,
+    value: int,
+) -> None:
+    values = _limits()
+    values[field] = value
+
+    with pytest.raises(ExecutionPolicyUnconfigured, match=field):
+        parse_execution_limits(values)
+
+
+@pytest.mark.parametrize("field", list(_limits()))
+def test_every_numeric_execution_limit_rejects_bool(field: str) -> None:
+    values = _limits()
+    values[field] = True
+
+    with pytest.raises(ExecutionPolicyUnconfigured, match=field):
+        parse_execution_limits(values)
+
+
 @pytest.mark.parametrize(
     ("url", "content_type"),
     [
@@ -305,7 +340,7 @@ def test_supported_html_and_json_representations_are_distinct() -> None:
 
 
 def test_synthetic_transport_does_not_relax_production_loopback_policy(
-    synthetic_transport,
+    synthetic_transport: Callable[[Mapping[str, httpx.Response]], httpx.MockTransport],
 ) -> None:
     transport = synthetic_transport(
         {"https://fixture.example.test/jobs": httpx.Response(200, text="synthetic")}

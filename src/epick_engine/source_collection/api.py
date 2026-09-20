@@ -1400,12 +1400,6 @@ class _JobPostingSelectionParameters(_ApiModel):
     extraction_revision_id: UUID | None = None
 
 
-class _JobPostingRetryBody(_ApiModel):
-    job_id: UUID
-    expected_input_version: int = Field(gt=0, strict=True)
-    expected_result_version: int = Field(gt=0, strict=True)
-
-
 class _JobPostingImportResponse(_ApiModel):
     job_posting_id: str = Field(min_length=1)
     source_id: str = Field(min_length=1)
@@ -1470,32 +1464,6 @@ class _JobPostingDetailResponse(_ApiModel):
     job_posting: _JobPostingResponse
 
 
-class _JobPostingW3HandoffResponse(_ApiModel):
-    owner: Literal["W3"]
-    status: str = Field(min_length=1)
-    code: str = Field(min_length=1)
-    handoff_ref: str = Field(min_length=1)
-
-
-class _JobPostingRetryResponse(_ApiModel):
-    job_posting_id: str = Field(min_length=1)
-    job_id: str = Field(min_length=1)
-    status_url: str = Field(min_length=1)
-    resume_stage: str | None
-    w3_handoff: _JobPostingW3HandoffResponse | None = None
-
-    @field_validator("job_posting_id", "job_id")
-    @classmethod
-    def _validate_identifiers(cls, value: str) -> str:
-        return _canonical_uuid_text(value)
-
-    @model_validator(mode="after")
-    def _validate_status_url(self) -> _JobPostingRetryResponse:
-        if self.status_url != f"{_API_ROUTE_PREFIX}/jobs/{self.job_id}":
-            raise ValueError("status URL must identify the accepted job")
-        return self
-
-
 class _JobPostingApiService(Protocol):
     def import_job_posting(
         self,
@@ -1514,17 +1482,6 @@ class _JobPostingApiService(Protocol):
         job_posting_id: UUID,
         source_version_id: UUID | None,
         extraction_revision_id: UUID | None,
-    ) -> object: ...
-
-    def retry_job_posting(
-        self,
-        *,
-        owner_user_id: UUID,
-        job_posting_id: UUID,
-        job_id: UUID,
-        expected_input_version: int,
-        expected_result_version: int,
-        idempotency_key: str,
     ) -> object: ...
 
 
@@ -1665,15 +1622,6 @@ def _public_job_posting_detail(payload: object) -> dict[str, object]:
     return {"job_posting": posting}
 
 
-def _public_w3_handoff(payload: object) -> dict[str, object]:
-    return {
-        "owner": _service_field(payload, "owner"),
-        "status": _service_field(payload, "status"),
-        "code": _service_field(payload, "code"),
-        "handoff_ref": _service_field(payload, "handoff_ref"),
-    }
-
-
 def create_job_posting_api(
     *,
     service: _JobPostingApiService | None,
@@ -1767,52 +1715,6 @@ def create_job_posting_api(
         if result.job_posting.job_posting_id != str(job_posting_id):
             raise ApiProblem(ApiErrorCode.DEPENDENCY_UNAVAILABLE)
         return cast(dict[str, object], result.model_dump(mode="json"))
-
-    @app.post("/api/v1/job-postings/{job_posting_id}/retry", status_code=202)
-    def retry_job_posting(
-        job_posting_id: UUID,
-        body: _JobPostingRetryBody,
-        principal: AuthenticatedPrincipal = principal_dependency,
-        idempotency_key: str = idempotency_key_dependency,
-        configured_service: _JobPostingApiService = service_dependency,
-    ) -> dict[str, object]:
-        try:
-            raw_result = configured_service.retry_job_posting(
-                owner_user_id=principal.user_id,
-                job_posting_id=job_posting_id,
-                job_id=body.job_id,
-                expected_input_version=body.expected_input_version,
-                expected_result_version=body.expected_result_version,
-                idempotency_key=idempotency_key,
-            )
-        except JobPostingNotFound as exc:
-            raise ApiProblem(ApiErrorCode.RESOURCE_NOT_FOUND) from exc
-        except JobPostingSelectionInvalid as exc:
-            raise ApiProblem(ApiErrorCode.INVALID_INPUT) from exc
-        except JobPostingContentUnavailable as exc:
-            raise ApiProblem(ApiErrorCode.DEPENDENCY_UNAVAILABLE) from exc
-        except StarletteHTTPException as exc:
-            raise ApiProblem(ApiErrorCode.DEPENDENCY_UNAVAILABLE) from exc
-        job_id = _service_uuid_text(raw_result, "job_id")
-        w3_handoff = _optional_service_field(raw_result, "w3_handoff")
-        public_payload: dict[str, object] = {
-            "job_posting_id": _service_uuid_text(raw_result, "job_posting_id"),
-            "job_id": job_id,
-            "status_url": f"{_API_ROUTE_PREFIX}/jobs/{job_id}",
-            "resume_stage": _service_field(raw_result, "resume_stage"),
-        }
-        if w3_handoff is not None:
-            public_payload["w3_handoff"] = _public_w3_handoff(w3_handoff)
-        result = _validated_job_posting_response(
-            _JobPostingRetryResponse,
-            public_payload,
-        )
-        if result.job_posting_id != str(job_posting_id):
-            raise ApiProblem(ApiErrorCode.DEPENDENCY_UNAVAILABLE)
-        response = result.model_dump(mode="json")
-        if result.w3_handoff is None:
-            response.pop("w3_handoff", None)
-        return cast(dict[str, object], response)
 
     return app
 

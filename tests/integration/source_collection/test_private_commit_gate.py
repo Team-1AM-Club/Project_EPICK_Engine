@@ -20,7 +20,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, create_engine, event, text
+from sqlalchemy import Engine, create_engine, event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from tests.support.commit_gate_inspection import inspect_private_gate
 
@@ -31,6 +31,9 @@ from epick_engine.source_collection.commit_gate_contracts import (
 )
 from epick_engine.source_collection.commit_gate_store import (
     CommitGateRejected,
+    PrivateCommitStage,
+    PrivateStagedOutbox,
+    _hash,
     apply_commit_gate,
     read_finalized_result,
     stage_private_result,
@@ -38,10 +41,12 @@ from epick_engine.source_collection.commit_gate_store import (
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
 from epick_engine.source_collection.persistence import (
     Base,
+    CollectionRuntimeAttempt,
     Company,
     Evidence,
     OutboxEvent,
     Source,
+    SourceObservation,
     SourcePolicyDecision,
     SourceVersion,
 )
@@ -164,6 +169,23 @@ def test_stage_prepare_are_invisible_and_finalize_is_owner_only(session_factory)
         )
 
 
+def test_stage_kind_defaults_private_only_and_is_immutable_on_replay(session_factory) -> None:
+    command, result = _pair()
+    with session_factory.begin() as session:
+        stage_private_result(session, command, result, message_id=uuid4(), occurred_at=NOW)
+        assert session.get(PrivateCommitStage, command.command_id).stage_kind == "PRIVATE_ONLY"
+        with pytest.raises(CommitGateRejected, match="binding mismatch"):
+            stage_private_result(
+                session,
+                command,
+                result,
+                message_id=uuid4(),
+                occurred_at=NOW,
+                stage_kind="COLLECTION",
+            )
+        assert session.get(PrivateCommitStage, command.command_id).stage_kind == "PRIVATE_ONLY"
+
+
 def _stage(session: Session, command: CollectionCommand, result: CollectionResult):
     return stage_private_result(session, command, result, message_id=uuid4(), occurred_at=NOW)
 
@@ -215,6 +237,19 @@ def test_terminal_before_stage_leaves_tombstone_and_rejects_resurrection(session
         assert _state(session, command) == before
         assert before["stage_payloads"] == []
         assert before["result_payload"] is None
+
+
+def test_terminal_before_stage_can_bind_collection_stage_kind(session_factory) -> None:
+    command, result = _pair()
+    with session_factory.begin() as session:
+        apply_commit_gate(
+            session,
+            _gate(command, result, "ABORT", operation_id=uuid4(), revision=1),
+            ack_message_id=uuid4(),
+            occurred_at=NOW,
+            missing_stage_kind="COLLECTION",
+        )
+        assert session.get(PrivateCommitStage, command.command_id).stage_kind == "COLLECTION"
 
 
 @pytest.mark.parametrize("terminal", ["ABORT", "PURGE"])
@@ -364,6 +399,379 @@ def test_caller_rollback_removes_stage_and_gate_ack_without_internal_commit(sess
         session.rollback()
     with session_factory() as session:
         assert _state(session, command) is None
+
+
+def test_collection_finalize_invariant_uses_one_savepoint_for_private_gate_and_candidate(
+    session_factory,
+) -> None:
+    """A rejected collection FINALIZE must not leave a private ACK after caller commit."""
+
+    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
+
+    command, result = _pair()
+    operation = uuid4()
+    with session_factory.begin() as session:
+        stage_private_result(
+            session,
+            command,
+            result,
+            message_id=uuid4(),
+            occurred_at=NOW,
+            stage_kind="COLLECTION",
+        )
+        _apply(session, _gate(command, result, "PREPARE", operation_id=operation, revision=1))
+
+    with session_factory() as session:
+        before = _state(session, command)
+        with pytest.raises((CommitGateRejected, RuntimeError), match="candidate"):
+            apply_collection_commit_gate(
+                session,
+                _gate(command, result, "FINALIZE", operation_id=operation, revision=2),
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+            )
+        # This deliberately commits the caller-owned outer transaction.  The
+        # rejected FINALIZE must still have rolled back its private gate state.
+        session.commit()
+
+    with session_factory() as session:
+        assert _state(session, command) == before
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "authenticated_owner_ref",
+        "job_id",
+        "execution_fence",
+        "owner_deletion_epoch",
+        "result_digest",
+    ],
+)
+def test_collection_finalize_rejects_each_gate_to_stage_binding_mismatch_without_ack(
+    session_factory,
+    field: str,
+) -> None:
+    """The collection wrapper must preserve every private gate/stage binding check."""
+
+    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
+
+    command, result = _pair()
+    operation = uuid4()
+    with session_factory.begin() as session:
+        stage_private_result(
+            session,
+            command,
+            result,
+            message_id=uuid4(),
+            occurred_at=NOW,
+            stage_kind="COLLECTION",
+        )
+        _apply(session, _gate(command, result, "PREPARE", operation_id=operation, revision=1))
+
+    values = {
+        "authenticated_owner_ref": uuid4(),
+        "job_id": uuid4(),
+        "execution_fence": int(command.execution_fence) + 1,
+        "owner_deletion_epoch": command.owner_deletion_epoch + 1,
+        "result_digest": "sha256:" + "f" * 64,
+    }
+    with session_factory() as session:
+        before = _state(session, command)
+        gate = _gate(command, result, "FINALIZE", operation_id=operation, revision=2).model_copy(
+            update={field: values[field]}
+        )
+        with pytest.raises(CommitGateRejected, match="binding mismatch"):
+            apply_collection_commit_gate(
+                session,
+                gate,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+            )
+        session.commit()
+
+    with session_factory() as session:
+        assert _state(session, command) == before
+
+
+def _persisted_collection_stage(session_factory):
+    """Create a real Task 4 candidate/public stage for FINALIZE-only checks."""
+
+    from tests.integration.source_collection.test_collection_runtime_storage import (
+        _claimed_candidate_inputs,
+    )
+
+    from epick_engine.source_collection.persistence import commit_collection_candidate
+
+    dispatch, effective_command, prepared, claim_token = _claimed_candidate_inputs(session_factory)
+    proposal = commit_collection_candidate(
+        session_factory,
+        dispatch,
+        effective_command,
+        prepared,
+        claim_token=claim_token,
+        staged_message_id=uuid4(),
+        occurred_at=NOW,
+    )
+    command = dispatch.payload
+    operation = uuid4()
+    with session_factory.begin() as session:
+        _apply(
+            session, _gate(command, proposal.result, "PREPARE", operation_id=operation, revision=1)
+        )
+    return command, proposal.result, operation
+
+
+def _mutate_collection_stage_proposal(
+    session: Session,
+    command: CollectionCommand,
+    result: CollectionResult,
+    operation: UUID,
+    *,
+    field: str,
+) -> CommitGateCommand:
+    stage = session.get(PrivateCommitStage, command.command_id)
+    outbox = session.scalar(
+        select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
+    )
+    assert stage is not None and outbox is not None and outbox.payload is not None
+    raw = json.loads(json.dumps(outbox.payload))
+    replacement = uuid4()
+    if field == "command_id":
+        raw["command"]["command_id"] = str(replacement)
+        raw["result"]["command_id"] = str(replacement)
+    elif field == "owner":
+        raw["command"]["authenticated_owner_ref"] = str(replacement)
+    elif field == "job":
+        raw["command"]["job_id"] = str(replacement)
+        raw["result"]["job_id"] = str(replacement)
+    elif field == "source":
+        raw["command"]["source_id"] = str(replacement)
+        raw["result"]["source_id"] = str(replacement)
+        for source_ref in raw["result"].get("successful_source_refs", []):
+            source_ref["source_id"] = str(replacement)
+    elif field == "company":
+        raw["command"]["company_id"] = str(replacement)
+    else:  # pragma: no cover - parametrization is the contract surface.
+        raise AssertionError(f"unexpected binding field: {field}")
+
+    proposal_command = CollectionCommand.model_validate(raw["command"])
+    proposal_result = CollectionResult.model_validate(raw["result"])
+    digest = staged_result_digest(proposal_command, proposal_result)
+    raw["result_digest"] = digest
+    outbox.payload = raw
+    outbox.wire_hash = _hash(raw)
+    stage.result_payload = proposal_result.model_dump(mode="json")
+    stage.result_digest = digest
+    stage.owner_ref = proposal_command.authenticated_owner_ref
+    stage.job_id = proposal_command.job_id
+    stage.execution_fence = proposal_command.execution_fence
+    stage.owner_deletion_epoch = str(proposal_command.owner_deletion_epoch)
+    return _gate(command, result, "FINALIZE", operation_id=operation, revision=2).model_copy(
+        update={
+            "authenticated_owner_ref": proposal_command.authenticated_owner_ref,
+            "job_id": proposal_command.job_id,
+            "result_digest": digest,
+        }
+    )
+
+
+@pytest.mark.parametrize("field", ["command_id", "owner", "job", "source", "company"])
+def test_collection_finalize_rejects_every_proposal_to_candidate_identity_mismatch(
+    session_factory,
+    field: str,
+) -> None:
+    """A syntactically valid stage proposal may not bind to another candidate identity."""
+
+    command, result, operation = _persisted_collection_stage(session_factory)
+    with session_factory.begin() as session:
+        gate = _mutate_collection_stage_proposal(
+            session,
+            command,
+            result,
+            operation,
+            field=field,
+        )
+
+    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
+
+    with session_factory() as session:
+        with pytest.raises(CommitGateRejected, match="proposal candidate binding"):
+            apply_collection_commit_gate(
+                session,
+                gate,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+            )
+        session.commit()
+
+    with session_factory() as session:
+        state = inspect_private_gate(
+            session,
+            owner_ref=gate.authenticated_owner_ref,
+            command_id=command.command_id,
+        )
+        assert state["state"] == "PREPARED"
+        assert state["ack_count"] == 1
+
+
+def test_collection_finalize_rejects_corrupt_staged_proposal_without_ack(session_factory) -> None:
+    """A malformed durable COLLECTION proposal cannot be finalized by trusting JSONB."""
+
+    command, result, operation = _persisted_collection_stage(session_factory)
+    with session_factory.begin() as session:
+        outbox = session.scalar(
+            select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
+        )
+        assert outbox is not None
+        outbox.payload = {"schema_version": "w2.private.staged-result.proposal.v1"}
+
+    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
+
+    with session_factory() as session:
+        with pytest.raises((CommitGateRejected, RuntimeError), match="staged|proposal|payload"):
+            apply_collection_commit_gate(
+                session,
+                _gate(command, result, "FINALIZE", operation_id=operation, revision=2),
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+            )
+        session.commit()
+
+    with session_factory() as session:
+        state = _state(session, command)
+        assert state["state"] == "PREPARED"
+        assert state["ack_count"] == 1
+
+
+def _copy_source_version(version: SourceVersion, *, policy_decision_id: UUID) -> SourceVersion:
+    return SourceVersion(
+        source_version_id=uuid4(),
+        source_id=version.source_id,
+        company_id=version.company_id,
+        title=version.title,
+        source_type=version.source_type,
+        canonical_url=version.canonical_url,
+        content_hash="f" * 64,
+        hash_profile_version=version.hash_profile_version,
+        representation=version.representation,
+        first_parser_version=version.first_parser_version,
+        collected_at=version.collected_at,
+        published_at=version.published_at,
+        valid_from=version.valid_from,
+        valid_to=version.valid_to,
+        language=version.language,
+        policy_decision_id=policy_decision_id,
+    )
+
+
+def _next_policy(source_id: UUID, revision: int) -> SourcePolicyDecision:
+    return SourcePolicyDecision(
+        policy_decision_id=uuid4(),
+        source_id=source_id,
+        revision=revision,
+        official_status="verified",
+        access_class="public",
+        collection_permission="allowed",
+        excerpt_storage_permission="allowed",
+        body_storage_permission="denied",
+        redistribution_permission="unknown",
+        evidence_refs=[f"synthetic:policy:{revision}"],
+        checked_at=NOW,
+        policy_version=f"policy-{revision}",
+    )
+
+
+@pytest.mark.parametrize("mismatch", ["observation_version", "result_version", "version_policy"])
+def test_collection_finalize_rejects_candidate_result_fk_or_policy_mismatch(
+    session_factory,
+    mismatch: str,
+) -> None:
+    """FINALIZE never promotes a candidate whose public result identity/policy changed."""
+
+    command, result, operation = _persisted_collection_stage(session_factory)
+    with session_factory.begin() as session:
+        attempt = session.get(CollectionRuntimeAttempt, command.command_id)
+        assert attempt is not None
+        observation = session.get(SourceObservation, attempt.observation_id)
+        version = session.get(SourceVersion, attempt.source_version_id)
+        assert observation is not None and version is not None
+        gate = _gate(command, result, "FINALIZE", operation_id=operation, revision=2)
+
+        if mismatch == "observation_version":
+            replacement_observation_id = uuid4()
+            session.add(
+                SourceObservation(
+                    observation_id=replacement_observation_id,
+                    source_id=observation.source_id,
+                    source_version_id=None,
+                    policy_decision_id=observation.policy_decision_id,
+                    observed_at=observation.observed_at,
+                    access_class=observation.access_class,
+                    acquisition_status=observation.acquisition_status,
+                    http_status=observation.http_status,
+                    checked_url=observation.checked_url,
+                    retrieval_validator=observation.retrieval_validator,
+                    error_code=observation.error_code,
+                    representation=observation.representation,
+                )
+            )
+            session.flush()
+            attempt.observation_id = replacement_observation_id
+        elif mismatch == "result_version":
+            replacement = _copy_source_version(
+                version,
+                policy_decision_id=version.policy_decision_id,
+            )
+            session.add(replacement)
+            session.flush()
+            stage = session.get(PrivateCommitStage, command.command_id)
+            outbox = session.scalar(
+                select(PrivateStagedOutbox).where(
+                    PrivateStagedOutbox.command_id == command.command_id
+                )
+            )
+            assert stage is not None and outbox is not None and outbox.payload is not None
+            raw = json.loads(json.dumps(outbox.payload))
+            raw["result"]["successful_source_refs"][0]["source_version_id"] = str(
+                replacement.source_version_id
+            )
+            proposal_command = CollectionCommand.model_validate(raw["command"])
+            proposal_result = CollectionResult.model_validate(raw["result"])
+            digest = staged_result_digest(proposal_command, proposal_result)
+            raw["result_digest"] = digest
+            outbox.payload = raw
+            outbox.wire_hash = _hash(raw)
+            stage.result_payload = proposal_result.model_dump(mode="json")
+            stage.result_digest = digest
+            gate = gate.model_copy(update={"result_digest": digest})
+        elif mismatch == "version_policy":
+            policy = _next_policy(command.source_id, revision=4)
+            session.add(policy)
+            session.flush()
+            version.policy_decision_id = policy.policy_decision_id
+        else:  # pragma: no cover - parametrization is the contract surface.
+            raise AssertionError(f"unexpected mismatch: {mismatch}")
+
+    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
+
+    with session_factory() as session:
+        with pytest.raises(
+            CommitGateRejected,
+            match="observation|version|policy binding|successful version binding",
+        ):
+            apply_collection_commit_gate(
+                session,
+                gate,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+            )
+        session.commit()
+
+    with session_factory() as session:
+        state = _state(session, command)
+        assert state["state"] == "PREPARED"
+        assert state["ack_count"] == 1
 
 
 def test_fault_after_state_change_before_ack_flush_rolls_back_everything(session_factory):
@@ -787,7 +1195,7 @@ def test_postgres_statement_rejection_hides_private_data_and_preserves_caller_tr
 def test_migration_upgrade_matches_private_metadata_in_isolated_postgres(approved_postgres_url):
     root = Path(__file__).resolve().parents[3]
     scripts = ScriptDirectory.from_config(Config(root / "alembic.ini"))
-    assert scripts.get_heads() == ["0004_private_commit_gate"]
+    assert scripts.get_heads() == ["0008_collection_runtime"]
     admin = create_engine(approved_postgres_url)
     schema = f"epick_w2_gate_migration_{uuid4().hex}"
     with admin.begin() as connection:
@@ -800,7 +1208,7 @@ def test_migration_upgrade_matches_private_metadata_in_isolated_postgres(approve
             **os.environ,
             "EPICK_DATABASE_URL": scoped_url.render_as_string(hide_password=False),
         }
-        for target in ["0003_source_retention_origin", "head"]:
+        for target in ["0005_private_gate_delivery", "head"]:
             completed = subprocess.run(
                 [sys.executable, "-m", "alembic", "upgrade", target],
                 cwd=root,
@@ -815,7 +1223,7 @@ def test_migration_upgrade_matches_private_metadata_in_isolated_postgres(approve
             connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("0004_private_commit_gate")
+            ).scalar_one() == ("0008_collection_runtime")
             private_names = {name for name in Base.metadata.tables if name.startswith("private_")}
 
             def include_object(obj, name, type_, reflected, compare_to):

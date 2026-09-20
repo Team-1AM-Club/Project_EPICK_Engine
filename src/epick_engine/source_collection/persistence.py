@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     Engine,
@@ -36,7 +37,12 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+from epick_engine.source_collection.commit_gate_contracts import (
+    CommitGateAckProposal,
+    StagedResultProposal,
+)
 from epick_engine.source_collection.contracts import (
+    AccuracyStatus,
     CollectionCommand,
     CollectionResult,
     CollectionStage,
@@ -44,15 +50,18 @@ from epick_engine.source_collection.contracts import (
     ExtractionStatus,
     Locator,
     Representation,
+    RestrictionStatus,
     RetentionScope,
     SourceEnvelope,
     SourceEvent,
     SourceObservationSnapshot,
+    SourceRestrictionSnapshot,
     SourceType,
 )
 from epick_engine.source_collection.contracts import (
     PostingSection as PostingSectionValue,
 )
+from epick_engine.source_collection.w1_transport import W1Dispatch
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -129,6 +138,15 @@ class Source(Base):
             name="fk_sources_current_version_same_source",
             use_alter=True,
         ),
+        CheckConstraint(
+            "pointer_update_mode IN ('LEGACY_SAME_DB', 'FINALIZE_GATE')",
+            name="valid_pointer_update_mode",
+        ),
+        CheckConstraint(
+            "0 <= last_promoted_observation_order "
+            "AND last_promoted_observation_order <= next_observation_order",
+            name="valid_observation_order_counters",
+        ),
         Index("ix_sources_company_id_source_id", "company_id", "source_id"),
     )
 
@@ -156,6 +174,24 @@ class Source(Base):
     last_collected_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+    pointer_update_mode: Mapped[str] = mapped_column(
+        String(32),
+        default="LEGACY_SAME_DB",
+        server_default=text("'LEGACY_SAME_DB'"),
+        nullable=False,
+    )
+    next_observation_order: Mapped[int] = mapped_column(
+        BigInteger,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+    last_promoted_observation_order: Mapped[int] = mapped_column(
+        BigInteger,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
     )
 
 
@@ -300,6 +336,124 @@ class SourceVersion(Base):
     valid_to: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     language: Mapped[str | None] = mapped_column(String(32), nullable=True)
     policy_decision_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+
+
+class SourceRestrictionIdentity(Base):
+    """Stable Source/Version scope for one internal restriction identity."""
+
+    __tablename__ = "source_restriction_identities"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_version_id", "source_id"],
+            ["source_versions.source_version_id", "source_versions.source_id"],
+            name="fk_source_restriction_identities_version_same_source",
+        ),
+        UniqueConstraint(
+            "restriction_id",
+            "source_id",
+            name="uq_source_restriction_identities_id_source",
+        ),
+        Index(
+            "ix_source_restriction_identities_source_id_restriction_id",
+            "source_id",
+            "restriction_id",
+        ),
+    )
+
+    restriction_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+    )
+    source_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("sources.source_id", name="fk_source_restriction_identities_source_id"),
+        nullable=False,
+    )
+    source_version_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=True,
+    )
+
+
+class SourceRestriction(Base):
+    """One immutable revision in a stable restriction identity's history."""
+
+    __tablename__ = "source_restrictions"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["restriction_id", "source_id"],
+            [
+                "source_restriction_identities.restriction_id",
+                "source_restriction_identities.source_id",
+            ],
+            name="fk_source_restrictions_identity_same_source",
+        ),
+        UniqueConstraint(
+            "source_id",
+            "restriction_revision",
+            name="uq_source_restrictions_source_revision",
+        ),
+        CheckConstraint("restriction_revision > 0", name="positive_restriction_revision"),
+        CheckConstraint(
+            "restriction_status IN ('active', 'cleared')",
+            name="valid_restriction_status",
+        ),
+        CheckConstraint(
+            "accuracy_status IN "
+            "('unverified', 'verified_in_scope', 'error_confirmed', 'superseded')",
+            name="valid_accuracy_status",
+        ),
+        CheckConstraint("length(btrim(reason_code)) > 0", name="nonempty_reason_code"),
+    )
+
+    restriction_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+    )
+    restriction_revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    restriction_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    accuracy_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_code: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_refs: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    replacement_ref: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("sources.source_id", name="fk_source_restrictions_replacement_ref"),
+        nullable=True,
+    )
+
+
+class RestrictionMutationReceipt(Base):
+    """Private idempotency receipt bound to one immutable restriction revision."""
+
+    __tablename__ = "restriction_mutation_receipts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["restriction_id", "restriction_revision"],
+            ["source_restrictions.restriction_id", "source_restrictions.restriction_revision"],
+            name="fk_restriction_mutation_receipts_restriction_history",
+        ),
+        CheckConstraint("btrim(authority_ref) <> ''", name="nonempty_authority_ref"),
+        CheckConstraint(
+            "request_hash ~ '^[0-9a-f]{64}$'",
+            name="valid_request_hash",
+        ),
+        CheckConstraint("restriction_revision > 0", name="positive_restriction_revision"),
+    )
+
+    authority_ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+    )
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    restriction_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+    )
+    restriction_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class RetainedBody(Base):
@@ -835,6 +989,85 @@ class CollectionAttempt(Base):
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class CollectionRuntimeAttempt(Base):
+    __tablename__ = "collection_runtime_attempts"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", name="uq_collection_runtime_attempts_attempt_id"),
+        UniqueConstraint(
+            "source_id",
+            "observation_order",
+            name="uq_collection_runtime_attempts_source_observation_order",
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "company_id"],
+            ["sources.source_id", "sources.company_id"],
+            name="fk_collection_runtime_attempts_source_company",
+        ),
+        ForeignKeyConstraint(
+            ["observation_id", "source_id"],
+            ["source_observations.observation_id", "source_observations.source_id"],
+            name="fk_collection_runtime_attempts_observation_same_source",
+        ),
+        ForeignKeyConstraint(
+            ["source_version_id", "source_id"],
+            ["source_versions.source_version_id", "source_versions.source_id"],
+            name="fk_collection_runtime_attempts_version_same_source",
+        ),
+        CheckConstraint("observation_order > 0", name="positive_observation_order"),
+        CheckConstraint(
+            "effective_policy_revision > 0",
+            name="positive_policy_revision",
+        ),
+        CheckConstraint(
+            "dispatch_digest ~ '^[0-9a-f]{64}$'",
+            name="valid_dispatch_digest",
+        ),
+        CheckConstraint(
+            "state IN ('RESERVED', 'PERSISTED', 'FINALIZED', 'INVALIDATED')",
+            name="valid_state",
+        ),
+        CheckConstraint(
+            "(claim_token IS NULL) = (claim_expires_at IS NULL)",
+            name="claim_fields_together",
+        ),
+        CheckConstraint(
+            "state = 'RESERVED' OR (claim_token IS NULL AND claim_expires_at IS NULL)",
+            name="claim_fields_reserved_only",
+        ),
+        Index("ix_collection_runtime_attempts_owner_ref", "owner_ref"),
+        Index("ix_collection_runtime_attempts_job_id", "job_id"),
+    )
+
+    command_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    attempt_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    dispatch_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_ref: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    job_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    source_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    company_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    observation_order: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    effective_policy_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    claim_token: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=True,
+    )
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    observation_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=True,
+    )
+    source_version_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class RequestDeduplication(Base):
     __tablename__ = "request_deduplications"
     __table_args__ = (
@@ -1036,6 +1269,12 @@ class PreparedCollectionCommit:
     events: tuple[SourceEvent, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class CanonicalPublicCommit:
+    source: Source
+    prepared: PreparedCollectionCommit
+
+
 def assert_current_attempt(
     session: Session,
     *,
@@ -1210,6 +1449,294 @@ def get_source_version(
             SourceVersion.source_version_id == source_version_id,
         )
     )
+
+
+def lock_source_policy_scope(session: Session, source_id: UUID) -> Source:
+    source = session.scalar(
+        select(Source)
+        .where(Source.source_id == source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if source is None:
+        raise PersistenceConflict("source policy scope is not registered")
+    return source
+
+
+def append_source_policy_decision(
+    session: Session,
+    decision: SourcePolicyDecision,
+) -> SourcePolicyDecision:
+    lock_source_policy_scope(session, decision.source_id)
+    session.add(decision)
+    session.flush()
+    return decision
+
+
+def _restriction_snapshot(
+    row: SourceRestriction,
+    identity: SourceRestrictionIdentity,
+) -> SourceRestrictionSnapshot:
+    return SourceRestrictionSnapshot(
+        restriction_id=row.restriction_id,
+        source_id=row.source_id,
+        source_version_id=identity.source_version_id,
+        restriction_revision=row.restriction_revision,
+        restriction_status=RestrictionStatus(row.restriction_status),
+        accuracy_status=AccuracyStatus(row.accuracy_status),
+        reason_code=row.reason_code,
+        changed_at=row.changed_at,
+        replacement_ref=row.replacement_ref,
+    )
+
+
+def _assert_restriction_replay(
+    row: SourceRestriction,
+    snapshot: SourceRestrictionSnapshot,
+    evidence_refs: Sequence[str],
+) -> None:
+    expected = {
+        "restriction_id": snapshot.restriction_id,
+        "source_id": snapshot.source_id,
+        "restriction_revision": snapshot.restriction_revision,
+        "restriction_status": snapshot.restriction_status.value,
+        "accuracy_status": snapshot.accuracy_status.value,
+        "reason_code": snapshot.reason_code,
+        "evidence_refs": list(evidence_refs),
+        "changed_at": snapshot.changed_at,
+        "replacement_ref": snapshot.replacement_ref,
+    }
+    if any(getattr(row, field) != value for field, value in expected.items()):
+        raise PersistenceConflict("restriction replay payload changed")
+
+
+def lock_source_restriction_revision(session: Session, *, source_id: UUID) -> int:
+    """Lock a registered Source and return its next restriction revision."""
+
+    source = session.scalar(select(Source).where(Source.source_id == source_id).with_for_update())
+    if source is None:
+        raise PersistenceConflict("restriction source is not registered")
+    latest_revision = session.scalar(
+        select(func.coalesce(func.max(SourceRestriction.restriction_revision), 0)).where(
+            SourceRestriction.source_id == source_id
+        )
+    )
+    return int(latest_revision or 0) + 1
+
+
+def get_source_restriction_revision(
+    session: Session,
+    *,
+    restriction_id: UUID,
+    restriction_revision: int,
+) -> SourceRestrictionSnapshot | None:
+    """Return exactly one immutable restriction history revision."""
+
+    result = session.execute(
+        select(SourceRestriction, SourceRestrictionIdentity)
+        .join(
+            SourceRestrictionIdentity,
+            and_(
+                SourceRestrictionIdentity.restriction_id == SourceRestriction.restriction_id,
+                SourceRestrictionIdentity.source_id == SourceRestriction.source_id,
+            ),
+        )
+        .where(
+            SourceRestriction.restriction_id == restriction_id,
+            SourceRestriction.restriction_revision == restriction_revision,
+        )
+    ).one_or_none()
+    if result is None:
+        return None
+    row, identity = result
+    return _restriction_snapshot(row, identity)
+
+
+def record_source_restriction(
+    session: Session,
+    *,
+    snapshot: SourceRestrictionSnapshot,
+    evidence_refs: Sequence[str] = (),
+) -> SourceRestrictionSnapshot:
+    """Persist one storage-only revision in the caller-owned transaction."""
+
+    _require_aware(snapshot.changed_at, field="restriction changed_at")
+    source = session.scalar(
+        select(Source).where(Source.source_id == snapshot.source_id).with_for_update()
+    )
+    if source is None:
+        raise PersistenceConflict("restriction source is not registered")
+
+    identity = session.get(SourceRestrictionIdentity, snapshot.restriction_id)
+    if identity is not None and (
+        identity.source_id != snapshot.source_id
+        or identity.source_version_id != snapshot.source_version_id
+    ):
+        raise PersistenceConflict("restriction identity scope changed")
+    if (
+        snapshot.source_version_id is not None
+        and get_source_version(
+            session,
+            source_id=snapshot.source_id,
+            source_version_id=snapshot.source_version_id,
+        )
+        is None
+    ):
+        raise PersistenceConflict("restriction version does not belong to the source")
+    if (
+        snapshot.replacement_ref is not None
+        and session.get(Source, snapshot.replacement_ref) is None
+    ):
+        raise PersistenceConflict("restriction replacement source is not registered")
+
+    source_revision = session.scalar(
+        select(SourceRestriction).where(
+            SourceRestriction.source_id == snapshot.source_id,
+            SourceRestriction.restriction_revision == snapshot.restriction_revision,
+        )
+    )
+    if source_revision is not None:
+        if source_revision.restriction_id != snapshot.restriction_id:
+            raise PersistenceConflict("restriction revision is already used by another identity")
+        if identity is None:
+            raise RuntimeError("restriction history has no identity")
+        _assert_restriction_replay(source_revision, snapshot, evidence_refs)
+        return _restriction_snapshot(source_revision, identity)
+
+    latest_revision = int(
+        session.scalar(
+            select(func.coalesce(func.max(SourceRestriction.restriction_revision), 0)).where(
+                SourceRestriction.source_id == snapshot.source_id
+            )
+        )
+        or 0
+    )
+    if snapshot.restriction_revision != latest_revision + 1:
+        raise PersistenceConflict("next restriction revision must be source-wide and gap-free")
+
+    if identity is None:
+        inserted_id = session.scalar(
+            postgresql_insert(SourceRestrictionIdentity)
+            .values(
+                restriction_id=snapshot.restriction_id,
+                source_id=snapshot.source_id,
+                source_version_id=snapshot.source_version_id,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[SourceRestrictionIdentity.restriction_id],
+            )
+            .returning(SourceRestrictionIdentity.restriction_id)
+        )
+        identity = session.get(SourceRestrictionIdentity, snapshot.restriction_id)
+        if identity is None:
+            raise RuntimeError("restriction identity conflict row was not found")
+        if inserted_id is None and (
+            identity.source_id != snapshot.source_id
+            or identity.source_version_id != snapshot.source_version_id
+        ):
+            raise PersistenceConflict("restriction identity scope changed")
+
+    created = SourceRestriction(
+        restriction_id=snapshot.restriction_id,
+        source_id=snapshot.source_id,
+        restriction_revision=snapshot.restriction_revision,
+        restriction_status=snapshot.restriction_status.value,
+        accuracy_status=snapshot.accuracy_status.value,
+        reason_code=snapshot.reason_code,
+        evidence_refs=list(evidence_refs),
+        changed_at=snapshot.changed_at,
+        replacement_ref=snapshot.replacement_ref,
+    )
+    session.add(created)
+    session.flush()
+    return _restriction_snapshot(created, identity)
+
+
+def get_current_source_restriction(
+    session: Session,
+    *,
+    source_id: UUID,
+    restriction_id: UUID,
+) -> SourceRestrictionSnapshot | None:
+    """Return the highest stored revision for one stable restriction identity."""
+
+    row = session.scalar(
+        select(SourceRestriction)
+        .where(
+            SourceRestriction.source_id == source_id,
+            SourceRestriction.restriction_id == restriction_id,
+        )
+        .order_by(SourceRestriction.restriction_revision.desc())
+        .limit(1)
+    )
+    if row is None:
+        return None
+    identity = session.get(SourceRestrictionIdentity, restriction_id)
+    if identity is None:
+        raise RuntimeError("restriction history has no identity")
+    return _restriction_snapshot(row, identity)
+
+
+def list_source_restrictions(
+    session: Session,
+    *,
+    source_id: UUID,
+    restriction_id: UUID | None = None,
+) -> tuple[SourceRestrictionSnapshot, ...]:
+    """Return immutable restriction history ordered by Source-wide revision."""
+
+    statement = select(SourceRestriction).where(SourceRestriction.source_id == source_id)
+    if restriction_id is not None:
+        statement = statement.where(SourceRestriction.restriction_id == restriction_id)
+    rows = session.scalars(statement.order_by(SourceRestriction.restriction_revision)).all()
+    identities = {
+        identity.restriction_id: identity
+        for identity in session.scalars(
+            select(SourceRestrictionIdentity).where(
+                SourceRestrictionIdentity.source_id == source_id
+            )
+        )
+    }
+    return tuple(_restriction_snapshot(row, identities[row.restriction_id]) for row in rows)
+
+
+def list_current_source_restrictions(
+    session: Session,
+    *,
+    source_id: UUID,
+) -> tuple[SourceRestrictionSnapshot, ...]:
+    """Return each restriction identity's latest revision without deciding effective use."""
+
+    latest = (
+        select(
+            SourceRestriction.restriction_id,
+            func.max(SourceRestriction.restriction_revision).label("latest_revision"),
+        )
+        .where(SourceRestriction.source_id == source_id)
+        .group_by(SourceRestriction.restriction_id)
+        .subquery()
+    )
+    rows = session.scalars(
+        select(SourceRestriction)
+        .join(
+            latest,
+            and_(
+                SourceRestriction.restriction_id == latest.c.restriction_id,
+                SourceRestriction.restriction_revision == latest.c.latest_revision,
+            ),
+        )
+        .where(SourceRestriction.source_id == source_id)
+        .order_by(SourceRestriction.restriction_revision)
+    ).all()
+    identities = {
+        identity.restriction_id: identity
+        for identity in session.scalars(
+            select(SourceRestrictionIdentity).where(
+                SourceRestrictionIdentity.source_id == source_id
+            )
+        )
+    }
+    return tuple(_restriction_snapshot(row, identities[row.restriction_id]) for row in rows)
 
 
 def get_retained_body_for_reextraction(
@@ -2615,6 +3142,109 @@ def _persist_canonical_entities(
     )
 
 
+def _lock_public_source(session: Session, command: CollectionCommand) -> Source:
+    source = session.scalar(
+        select(Source)
+        .where(Source.source_id == command.source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if source is None or source.company_id != command.company_id:
+        raise InvalidPreparedCollection("source does not belong to the command company")
+    return source
+
+
+def persist_canonical_public_commit(
+    session: Session,
+    *,
+    command: CollectionCommand,
+    prepared: PreparedCollectionCommit,
+) -> CanonicalPublicCommit:
+    """Persist canonical public rows and authoritative Source event revisions."""
+
+    source = _lock_public_source(session, command)
+    _validate_prepared_collection(command, prepared)
+
+    source_version_policy: SourcePolicyDecision | None = None
+    if prepared.source_version is not None:
+        if (
+            source.source_type != prepared.source_version.source_type.value
+            or source.canonical_url != prepared.source_version.canonical_url
+        ):
+            raise InvalidPreparedCollection(
+                "prepared source version does not match source identity"
+            )
+        source_version_policy = _assert_policy_decision(
+            session,
+            policy_decision_id=prepared.source_version.policy_decision_id,
+            command=command,
+        )
+        _assert_source_envelope_event_policy(prepared, source_version_policy)
+    if prepared.observation is not None:
+        policy_decision_id = prepared.observation.snapshot.policy_decision_id
+        if policy_decision_id is not None:
+            _assert_policy_decision(
+                session,
+                policy_decision_id=policy_decision_id,
+                command=command,
+            )
+    if prepared.retained_body is not None:
+        if source_version_policy is None:
+            raise InvalidPreparedCollection(
+                "retained body requires a prepared source version policy"
+            )
+        _assert_retained_body_policy(source_version_policy)
+
+    origin_source_ids = sorted(
+        {
+            origin.origin_source_id
+            for origin in prepared.source_origins
+            if origin.origin_source_id is not None
+        },
+        key=str,
+    )
+    for origin_source_id in origin_source_ids:
+        origin_source = session.scalar(
+            select(Source)
+            .where(Source.source_id == origin_source_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if origin_source is None:
+            raise InvalidPreparedCollection("source origin target source does not exist")
+
+    canonical = _persist_canonical_entities(session, prepared)
+    next_revision = (
+        session.scalar(
+            select(func.max(OutboxEvent.aggregate_revision)).where(
+                OutboxEvent.aggregate_id == command.source_id
+            )
+        )
+        or 0
+    )
+    canonical_events: list[SourceEvent] = []
+    for event in canonical.events:
+        existing_event = session.get(OutboxEvent, event.event_id, populate_existing=True)
+        if existing_event is not None:
+            authoritative_revision = existing_event.aggregate_revision
+        else:
+            next_revision += 1
+            authoritative_revision = next_revision
+        authoritative_event = event.model_copy(
+            update={"aggregate_revision": authoritative_revision}
+        )
+        _resolve_outbox_event(
+            session,
+            authoritative_event,
+            aggregate_revision=authoritative_revision,
+        )
+        canonical_events.append(authoritative_event)
+
+    canonical = replace(canonical, events=tuple(canonical_events))
+    session.flush()
+    return CanonicalPublicCommit(source=source, prepared=canonical)
+
+
 def resolve_request_deduplication(
     session: Session,
     *,
@@ -2749,6 +3379,289 @@ def replay_committed_collection(
             )
 
 
+def _validate_effective_collection_command(
+    original: CollectionCommand,
+    effective: CollectionCommand,
+    *,
+    effective_policy_revision: int,
+) -> None:
+    if not isinstance(effective, CollectionCommand):
+        raise InvalidPreparedCollection("effective collection command is invalid")
+    expected = original.model_copy(update={"policy_revision": effective_policy_revision})
+    persist_expected = expected.model_copy(update={"resume_stage": CollectionStage.PERSIST})
+    if effective not in (expected, persist_expected):
+        raise InvalidPreparedCollection(
+            "effective collection command does not match the reserved dispatch"
+        )
+
+
+def stage_private_result(
+    session: Session,
+    command: CollectionCommand,
+    result: CollectionResult,
+    *,
+    message_id: UUID,
+    occurred_at: datetime,
+    stage_kind: Literal["PRIVATE_ONLY", "COLLECTION"] = "PRIVATE_ONLY",
+) -> StagedResultProposal:
+    """Lazy compatibility seam for the circular private-store dependency."""
+
+    from epick_engine.source_collection.commit_gate_store import (
+        stage_private_result as store_private_result,
+    )
+
+    return store_private_result(
+        session,
+        command,
+        result,
+        message_id=message_id,
+        occurred_at=occurred_at,
+        stage_kind=stage_kind,
+    )
+
+
+def commit_collection_candidate(
+    session_factory: Callable[[], Session],
+    dispatch: W1Dispatch,
+    effective_command: CollectionCommand,
+    prepared: PreparedCollectionCommit,
+    *,
+    claim_token: UUID,
+    staged_message_id: UUID,
+    occurred_at: datetime,
+) -> StagedResultProposal:
+    """Persist public evidence and its private COLLECTION stage atomically."""
+
+    from epick_engine.source_collection.commit_gate_store import lock_private_command
+    from epick_engine.source_collection.source_runtime_store import (
+        CollectionRuntimeConflict,
+        _assert_bound_attempt,
+        _validated_dispatch,
+        dispatch_digest,
+    )
+
+    validated_dispatch = _validated_dispatch(dispatch)
+    original_command = validated_dispatch.payload
+    digest = dispatch_digest(validated_dispatch)
+    try:
+        with session_scope(session_factory) as session:
+            with session.begin():
+                lock_private_command(session, original_command.command_id)
+                attempt = session.scalar(
+                    select(CollectionRuntimeAttempt)
+                    .where(CollectionRuntimeAttempt.command_id == original_command.command_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if attempt is None:
+                    raise CollectionRuntimeConflict("collection runtime attempt is unavailable")
+                _assert_bound_attempt(attempt, validated_dispatch, digest)
+                if attempt.state != "RESERVED":
+                    raise CollectionRuntimeConflict("collection runtime attempt is not reserved")
+                if attempt.attempt_id != prepared.attempt_id:
+                    raise CollectionRuntimeConflict("collection runtime attempt identity conflict")
+                _validate_effective_collection_command(
+                    original_command,
+                    effective_command,
+                    effective_policy_revision=attempt.effective_policy_revision,
+                )
+
+                database_now = session.scalar(select(func.clock_timestamp()))
+                if not isinstance(database_now, datetime):
+                    raise CollectionRuntimeConflict("collection runtime database clock unavailable")
+                if (
+                    attempt.claim_token != claim_token
+                    or attempt.claim_expires_at is None
+                    or attempt.claim_expires_at <= database_now
+                ):
+                    raise CollectionRuntimeConflict("collection runtime claim token is not active")
+
+                source = _lock_public_source(session, effective_command)
+                if source.pointer_update_mode != "FINALIZE_GATE":
+                    raise CollectionRuntimeConflict(
+                        "collection candidate commit requires FINALIZE_GATE mode"
+                    )
+
+                public = persist_canonical_public_commit(
+                    session,
+                    command=effective_command,
+                    prepared=prepared,
+                )
+                canonical = public.prepared
+                attempt.observation_id = (
+                    canonical.observation.snapshot.observation_id
+                    if canonical.observation is not None
+                    else None
+                )
+                attempt.source_version_id = (
+                    canonical.source_version.source_version_id
+                    if canonical.source_version is not None
+                    else None
+                )
+                attempt.claim_token = None
+                attempt.claim_expires_at = None
+                attempt.state = "PERSISTED"
+                attempt.updated_at = database_now
+
+                proposal = stage_private_result(
+                    session,
+                    original_command,
+                    canonical.result,
+                    message_id=staged_message_id,
+                    occurred_at=occurred_at,
+                    stage_kind="COLLECTION",
+                )
+                session.flush()
+                return proposal
+    except IntegrityError as error:
+        raise PersistenceConflict("atomic collection candidate commit conflicted") from error
+
+
+def replay_staged_collection(
+    session_factory: Callable[[], Session],
+    dispatch: W1Dispatch,
+) -> StagedResultProposal:
+    """Re-arm and return the exact durable private proposal under the command lock."""
+
+    from epick_engine.source_collection.commit_gate_store import (
+        CommitGateRejected,
+        PrivateCommitGateAck,
+        PrivateCommitGateReceipt,
+        PrivateCommitStage,
+        PrivateStagedOutbox,
+        _bound_row,
+        _hash,
+        lock_private_command,
+    )
+    from epick_engine.source_collection.source_runtime_store import (
+        CollectionRuntimeConflict,
+        _assert_bound_attempt,
+        _validated_dispatch,
+        dispatch_digest,
+    )
+
+    validated_dispatch = _validated_dispatch(dispatch)
+    command = validated_dispatch.payload
+    digest = dispatch_digest(validated_dispatch)
+    with session_scope(session_factory) as session:
+        with session.begin():
+            lock_private_command(session, command.command_id)
+            attempt = session.scalar(
+                select(CollectionRuntimeAttempt)
+                .where(CollectionRuntimeAttempt.command_id == command.command_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if attempt is None:
+                raise CollectionRuntimeConflict("collection runtime attempt is unavailable")
+            _assert_bound_attempt(attempt, validated_dispatch, digest)
+            if attempt.state not in {"PERSISTED", "FINALIZED"}:
+                raise CollectionRuntimeConflict("collection runtime attempt is not replayable")
+            if attempt.claim_token is not None or attempt.claim_expires_at is not None:
+                raise CollectionRuntimeConflict(
+                    "collection runtime persisted claim is inconsistent"
+                )
+
+            stage = session.scalar(
+                select(PrivateCommitStage)
+                .where(PrivateCommitStage.command_id == command.command_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if stage is None:
+                raise CommitGateRejected("private staged-result command is unavailable")
+            if stage.state not in {"STAGED", "PREPARED", "FINALIZED"}:
+                raise CollectionRuntimeConflict("collection runtime command is terminal")
+
+            receipt_rows = session.scalars(
+                select(PrivateCommitGateReceipt)
+                .where(PrivateCommitGateReceipt.command_id == command.command_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).all()
+            receipts: list[CommitGateAckProposal] = []
+            for receipt in receipt_rows:
+                ack_row = session.scalar(
+                    select(PrivateCommitGateAck)
+                    .where(PrivateCommitGateAck.message_id == receipt.ack_message_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if ack_row is None:
+                    raise CommitGateRejected("private commit-gate receipt ACK is unavailable")
+                try:
+                    ack = CommitGateAckProposal.model_validate(ack_row.payload)
+                except ValueError:
+                    raise CommitGateRejected("invalid persisted private commit-gate ACK") from None
+                if (
+                    ack.message_id != ack_row.message_id
+                    or ack.command_id != command.command_id
+                    or ack.authenticated_owner_ref != command.authenticated_owner_ref
+                    or ack.job_id != command.job_id
+                    or str(ack.execution_fence) != command.execution_fence
+                    or ack.owner_deletion_epoch != command.owner_deletion_epoch
+                    or ack.result_digest != stage.result_digest
+                    or ack.operation_id != receipt.operation_id
+                    or str(ack.operation_revision) != receipt.operation_revision
+                    or ack.outcome != "APPLIED"
+                ):
+                    raise CommitGateRejected("private commit-gate receipt is inconsistent")
+                receipts.append(ack)
+            if any(ack.action in {"ABORT", "PURGE"} for ack in receipts):
+                raise CollectionRuntimeConflict("collection runtime command is terminal")
+            if stage.state == "STAGED":
+                if receipts or stage.operation_id is not None or stage.operation_revision != "0":
+                    raise CommitGateRejected("private staged-result operation is inconsistent")
+            else:
+                if not receipts:
+                    raise CommitGateRejected("private commit-gate receipt is unavailable")
+                latest = max(receipts, key=lambda ack: ack.operation_revision)
+                expected_action = "PREPARE" if stage.state == "PREPARED" else "FINALIZE"
+                if (
+                    latest.action != expected_action
+                    or stage.operation_id != latest.operation_id
+                    or stage.operation_revision != str(latest.operation_revision)
+                ):
+                    raise CommitGateRejected("private commit-gate stage is inconsistent")
+
+            delivery = session.scalar(
+                select(PrivateStagedOutbox)
+                .where(PrivateStagedOutbox.command_id == command.command_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if delivery is None or delivery.payload is None:
+                raise CommitGateRejected("private staged-result submission unavailable")
+            try:
+                proposal = StagedResultProposal.model_validate(delivery.payload)
+            except ValueError:
+                raise CommitGateRejected("invalid persisted private staged-result") from None
+            raw = proposal.model_dump(mode="json")
+            if (
+                raw != delivery.payload
+                or proposal.message_id != delivery.message_id
+                or delivery.command_id != command.command_id
+                or delivery.wire_hash != _hash(raw)
+                or proposal.command != command
+            ):
+                raise CommitGateRejected("private staged-result submission is inconsistent")
+            _bound_row(
+                stage,
+                owner=command.authenticated_owner_ref,
+                job=command.job_id,
+                fence=command.execution_fence,
+                epoch=command.owner_deletion_epoch,
+                digest=proposal.result_digest,
+                stage_kind="COLLECTION",
+            )
+            if stage.result_payload != proposal.result.model_dump(mode="json"):
+                raise CommitGateRejected("private staged-result payload is inconsistent")
+
+            delivery.delivered_at = None
+            session.flush()
+            return proposal
+
+
 def commit_prepared_collection(
     session_factory: Callable[[], Session],
     *,
@@ -2781,12 +3694,12 @@ def commit_prepared_collection(
                 if replay is not None:
                     return replay
 
-                _validate_prepared_collection(command, prepared)
-                source = session.scalar(
-                    select(Source).where(Source.source_id == command.source_id).with_for_update()
-                )
-                if source is None or source.company_id != command.company_id:
-                    raise InvalidPreparedCollection("source does not belong to the command company")
+                source = _lock_public_source(session, command)
+                if source.pointer_update_mode != "LEGACY_SAME_DB":
+                    raise InvalidPreparedCollection(
+                        "legacy collection commit requires LEGACY_SAME_DB mode"
+                    )
+
                 replay = _replay_attempt(
                     session,
                     command=command,
@@ -2795,45 +3708,13 @@ def commit_prepared_collection(
                 if replay is not None:
                     return replay
 
-                source_version_policy: SourcePolicyDecision | None = None
-                if prepared.source_version is not None:
-                    if (
-                        source.source_type != prepared.source_version.source_type.value
-                        or source.canonical_url != prepared.source_version.canonical_url
-                    ):
-                        raise InvalidPreparedCollection(
-                            "prepared source version does not match source identity"
-                        )
-                    source_version_policy = _assert_policy_decision(
-                        session,
-                        policy_decision_id=(prepared.source_version.policy_decision_id),
-                        command=command,
-                    )
-                    _assert_source_envelope_event_policy(prepared, source_version_policy)
-                if prepared.observation is not None:
-                    policy_decision_id = prepared.observation.snapshot.policy_decision_id
-                    if policy_decision_id is not None:
-                        _assert_policy_decision(
-                            session,
-                            policy_decision_id=policy_decision_id,
-                            command=command,
-                        )
-                if prepared.retained_body is not None:
-                    if source_version_policy is None:
-                        raise InvalidPreparedCollection(
-                            "retained body requires a prepared source version policy"
-                        )
-                    _assert_retained_body_policy(source_version_policy)
-                for origin in prepared.source_origins:
-                    if (
-                        origin.origin_source_id is not None
-                        and session.get(Source, origin.origin_source_id) is None
-                    ):
-                        raise InvalidPreparedCollection(
-                            "source origin target source does not exist"
-                        )
-
-                canonical = _persist_canonical_entities(session, prepared)
+                public = persist_canonical_public_commit(
+                    session,
+                    command=command,
+                    prepared=prepared,
+                )
+                source = public.source
+                canonical = public.prepared
                 committed_result = canonical.result
                 observation = (
                     canonical.observation.snapshot if canonical.observation is not None else None
@@ -2854,30 +3735,6 @@ def commit_prepared_collection(
                     command=command,
                     prepared=canonical,
                 )
-                next_revision = (
-                    session.scalar(
-                        select(OutboxEvent.aggregate_revision)
-                        .where(OutboxEvent.aggregate_id == command.source_id)
-                        .order_by(OutboxEvent.aggregate_revision.desc())
-                        .limit(1)
-                    )
-                    or 0
-                )
-                for event in canonical.events:
-                    existing_event = session.get(OutboxEvent, event.event_id)
-                    if existing_event is not None:
-                        _resolve_outbox_event(
-                            session,
-                            event,
-                            aggregate_revision=existing_event.aggregate_revision,
-                        )
-                        continue
-                    next_revision += 1
-                    _resolve_outbox_event(
-                        session,
-                        event,
-                        aggregate_revision=next_revision,
-                    )
                 session.flush()
         return committed_result
     except IntegrityError as error:

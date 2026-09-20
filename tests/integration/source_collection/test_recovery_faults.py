@@ -21,6 +21,7 @@ from tests.integration.source_collection.test_atomic_persistence import (
     _command,
     _complete_prepared,
     _counts,
+    _failure_prepared,
     _locker,
     _seed_source,
 )
@@ -35,7 +36,11 @@ from tests.integration.source_collection.w1_failure_fake import W1FailureFake, W
 from tests.unit.source_collection.test_worker import _Control, _Execution, _Factory, _permit
 
 from epick_engine.source_collection.contracts import CollectionStage, SourceEvent
-from epick_engine.source_collection.persistence import Base, commit_prepared_collection
+from epick_engine.source_collection.persistence import (
+    Base,
+    StaleExecution,
+    commit_prepared_collection,
+)
 from epick_engine.source_collection.worker import OutboxDeliveryError, SourceCollectionWorker
 
 
@@ -73,6 +78,7 @@ def _source_worker(
     finalize_error: Exception | None = None,
     stage_callback: Callable | None = None,
     committer: Callable = commit_prepared_collection,
+    lock_authority: Callable | None = None,
 ) -> tuple[SourceCollectionWorker, _Control, _Execution]:
     events: list[str] = []
     control = _Control(
@@ -87,7 +93,7 @@ def _source_worker(
             control=control,
             execution_factory=_Factory(events, execution),
             session_factory=session_factory,
-            lock_authority=_locker(command, pointer_eligible=True),
+            lock_authority=lock_authority or _locker(command, pointer_eligible=True),
             committer=committer,
             clock=lambda: NOW,
         ),
@@ -261,6 +267,141 @@ def test_w2_post_commit_crash_redelivery_reuses_stored_result_without_new_rows(
     assert replay_control.finalized == [(redelivery_permit, initial.result)]
     with recovery_session_factory() as session:
         assert _counts(session) == counts_after_commit
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    ("field", "advanced_value"),
+    [
+        ("execution_fence", "advanced-recovery-fence"),
+        ("owner_deletion_epoch", 1),
+    ],
+)
+def test_w2_committed_redelivery_rechecks_advanced_authority_before_private_result_redelivery(
+    recovery_session_factory: sessionmaker[Session],
+    field: str,
+    advanced_value: str | int,
+) -> None:
+    """A committed private result must not bypass the current W1 authority lock."""
+
+    _, source, policy = _seed_source(recovery_session_factory)
+    command = _command(source)
+    permit = _permit(command)
+    prepared = _complete_prepared(
+        command,
+        source,
+        policy,
+        attempt_id=permit.attempt_id,
+        aggregate_revision=1,
+    )
+    commit_prepared_collection(
+        recovery_session_factory,
+        command=command,
+        prepared=prepared,
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+    with recovery_session_factory() as session:
+        counts_after_commit = _counts(session)
+
+    def advanced_locker(session: Session, *, command, attempt_id):
+        return replace(
+            _locker(command, pointer_eligible=True)(
+                session,
+                command=command,
+                attempt_id=attempt_id,
+            ),
+            **{field: advanced_value},
+        )
+
+    def must_not_run(_context):
+        raise AssertionError("stale committed redelivery must not run collection")
+
+    def must_not_commit(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("stale committed redelivery must not commit a result")
+
+    worker, control, execution = _source_worker(
+        command=command,
+        session_factory=recovery_session_factory,
+        permit=permit,
+        run=must_not_run,
+        committer=must_not_commit,
+        lock_authority=advanced_locker,
+    )
+
+    with pytest.raises(StaleExecution, match="execution authority"):
+        worker.handle(command.model_dump(mode="json"))
+
+    assert execution.run_count == 0
+    assert execution.close_count == 0
+    assert control.finalized == []
+    assert control.stopped == [(permit, False, "committed_result_replay_failed")]
+    with recovery_session_factory() as session:
+        assert _counts(session) == counts_after_commit
+
+
+@pytest.mark.approved_postgres
+def test_w2_new_retry_attempt_receives_durable_failure_checkpoint_without_result_reuse(
+    recovery_session_factory: sessionmaker[Session],
+) -> None:
+    """W1 may authorize a new retry attempt with the prior W2 checkpoint reference."""
+
+    _, source, policy = _seed_source(recovery_session_factory)
+    failed_command = _command(source)
+    failed_prepared = _failure_prepared(
+        failed_command,
+        source,
+        policy,
+        aggregate_revision=1,
+    )
+    commit_prepared_collection(
+        recovery_session_factory,
+        command=failed_command,
+        prepared=failed_prepared,
+        lock_authority=_locker(failed_command, pointer_eligible=True),
+    )
+
+    retry_command = failed_command.model_copy(
+        update={
+            "command_id": uuid4(),
+            "execution_fence": "retry-recovery-fence",
+        }
+    )
+    retry_permit = replace(
+        _permit(retry_command),
+        checkpoint_ref=failed_prepared.result.checkpoint_ref,
+    )
+    retry_prepared = _complete_prepared(
+        retry_command,
+        source,
+        policy,
+        attempt_id=retry_permit.attempt_id,
+        aggregate_revision=2,
+    )
+
+    def resume_from_checkpoint(context):
+        assert context.permit.checkpoint_ref == failed_prepared.result.checkpoint_ref
+        assert context.command.command_id == retry_command.command_id
+        context.enter_stage(
+            CollectionStage.PARSE,
+            policy_revision=context.command.policy_revision,
+        )
+        return retry_prepared
+
+    worker, control, execution = _source_worker(
+        command=retry_command,
+        session_factory=recovery_session_factory,
+        permit=retry_permit,
+        run=resume_from_checkpoint,
+    )
+
+    result = worker.handle(retry_command.model_dump(mode="json"))
+
+    assert result == retry_prepared.result
+    assert result.command_id != failed_prepared.result.command_id
+    assert execution.run_count == 1
+    assert control.finalized == [(retry_permit, retry_prepared.result)]
+    with recovery_session_factory() as session:
+        assert _counts(session) == (1, 1, 1, 1, 2, 2, 2)
 
 
 @pytest.mark.approved_postgres

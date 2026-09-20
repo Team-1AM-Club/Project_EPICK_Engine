@@ -152,7 +152,7 @@ def test_derived_dispatch_rejects_malformed_wire_or_identity_mismatch(
         codec.parse_w1_dispatch(derived)
 
 
-def test_question_scoped_pin_is_valid_but_dispatch_company_binding_fails_closed() -> None:
+def test_question_scoped_pin_accepts_uuid_command_company_without_binding_to_null_pin() -> None:
     derived = _load("private-w2-command-dispatch.json")
     derived["core_decision_pin"].update(
         decision_scope="QUESTION_MATCHING", company_id=None, question_version_id=OTHER_ID
@@ -164,10 +164,75 @@ def test_question_scoped_pin_is_valid_but_dispatch_company_binding_fails_closed(
     assert pin.company_id is None
     _assert_schema(derived, "private-w2-command-dispatch.schema.json")
     _assert_schema(derived["payload"], "source-collection.command.schema.json")
-    # The pinned W1 pure validator requires payload.company_id == pin.company_id,
-    # but CollectionCommand requires a UUID and QUESTION_MATCHING requires null.
+    dispatch = codec.parse_w1_dispatch(derived)
+    assert dispatch.payload.company_id == UUID("10000000-0000-4000-8000-000000000004")
+    assert dispatch.core_decision_pin == pin
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        ("payload.source_id", OTHER_ID),
+        ("payload.core_source_decision.decided_by", "W3"),
+        ("payload.core_source_decision.rationale", "DIFFERENT_REASON"),
+    ],
+)
+def test_question_scoped_dispatch_rejects_non_company_binding_mismatch(
+    path: str, replacement: object
+) -> None:
+    derived = _load("private-w2-command-dispatch.json")
+    derived["core_decision_pin"].update(
+        decision_scope="QUESTION_MATCHING", company_id=None, question_version_id=OTHER_ID
+    )
+    derived["payload"]["core_source_decision"]["decided_by"] = "W4"
+    _set(derived, path, replacement)
+    codec = _codec()
     with pytest.raises(codec.W1WireContractError):
         codec.parse_w1_dispatch(derived)
+
+
+def test_question_scoped_available_lookup_still_requires_same_command_company() -> None:
+    derived = _load("private-w2-command-dispatch.json")
+    derived["core_decision_pin"].update(
+        decision_scope="QUESTION_MATCHING", company_id=None, question_version_id=OTHER_ID
+    )
+    derived["payload"]["core_source_decision"]["decided_by"] = "W4"
+    codec = _codec()
+    dispatch = codec.parse_w1_dispatch(derived)
+    raw = _load("private-command-lookup-available.json")
+    raw.update(
+        command_id=str(dispatch.payload.command_id),
+        command=dispatch.payload.model_dump(mode="json"),
+    )
+    raw["command"]["company_id"] = OTHER_ID
+    response = codec.decode_lookup_response(raw, http_status=200, request=dispatch.lookup_request)
+    with pytest.raises(codec.W1WireContractError):
+        codec.validate_dispatch_lookup(dispatch, response)
+
+
+def test_question_scoped_forged_non_null_pin_company_is_rejected_on_revalidation() -> None:
+    derived = _load("private-w2-command-dispatch.json")
+    derived["core_decision_pin"].update(
+        decision_scope="QUESTION_MATCHING", company_id=None, question_version_id=OTHER_ID
+    )
+    derived["payload"]["core_source_decision"]["decided_by"] = "W4"
+    codec = _codec()
+    dispatch = codec.parse_w1_dispatch(derived)
+    forged = dispatch.model_copy(
+        update={
+            "core_decision_pin": dispatch.core_decision_pin.model_copy(
+                update={"company_id": dispatch.payload.company_id}
+            )
+        }
+    )
+    raw = _load("private-command-lookup-available.json")
+    raw.update(
+        command_id=str(dispatch.payload.command_id),
+        command=dispatch.payload.model_dump(mode="json"),
+    )
+    response = codec.decode_lookup_response(raw, http_status=200, request=dispatch.lookup_request)
+    with pytest.raises(codec.W1WireContractError):
+        codec.validate_dispatch_lookup(forged, response)
 
 
 def test_lookup_request_round_trip_keeps_integer_fence_and_zero_epoch() -> None:

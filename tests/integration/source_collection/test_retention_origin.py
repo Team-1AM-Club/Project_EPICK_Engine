@@ -61,7 +61,7 @@ from epick_engine.source_collection.persistence import (
 pytestmark = pytest.mark.approved_postgres
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_HEAD = "0004_private_commit_gate"
+MIGRATION_HEAD = "0007_restriction_receipt"
 
 
 @pytest.fixture

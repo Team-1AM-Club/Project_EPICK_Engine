@@ -8,7 +8,7 @@ assertions are intentionally RED until T064--T066 provide those seams.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -30,8 +30,6 @@ from tests.integration.source_collection.test_static_posting_slice import (
     _W1Harness,
 )
 
-import epick_engine.source_collection.persistence as persistence_module
-import epick_engine.source_collection.service as service_module
 from epick_engine.source_collection.collector import (
     StaticFetchFailureCode,
     StaticFetchRequest,
@@ -58,6 +56,13 @@ from epick_engine.source_collection.persistence import (
     Source,
     SourceVersion,
     commit_prepared_collection,
+    get_current_source_restriction,
+    list_source_restrictions,
+    record_source_restriction,
+)
+from epick_engine.source_collection.restriction_service import (
+    RestrictionMutation,
+    SourceRestrictionService,
 )
 from epick_engine.source_collection.service import (
     StaticCollectionExecution,
@@ -345,54 +350,78 @@ def _observe_authorized_http_failure(
     )
 
 
-def _restriction_event(
+class _FixtureRestrictionAuthority:
+    def authorize(self, *, request: RestrictionMutation) -> str:
+        del request
+        return "fixture:legacy-restriction"
+
+
+def _restriction_service(
+    session_factory: sessionmaker[Session],
+) -> SourceRestrictionService:
+    return SourceRestrictionService(
+        session_factory=session_factory,
+        authority=_FixtureRestrictionAuthority(),
+    )
+
+
+def _create_restriction_request(
     history: _HistoricalSource,
     *,
-    event_id: UUID,
-    aggregate_revision: int,
+    changed_at: datetime,
+    reason_code: str,
+    replacement_ref: UUID | None = None,
+) -> RestrictionMutation:
+    return RestrictionMutation(
+        request_id=uuid4(),
+        kind="create",
+        source_id=history.source_id,
+        source_version_id=history.source_version_id,
+        restriction_id=None,
+        accuracy_status=AccuracyStatus.ERROR_CONFIRMED,
+        reason_code=reason_code,
+        evidence_refs=(f"fixture:{reason_code.lower()}",),
+        changed_at=changed_at,
+        replacement_ref=replacement_ref,
+    )
+
+
+def _register_replacement_source(session_factory: sessionmaker[Session]) -> UUID:
+    replacement_source_id = uuid4()
+    with session_factory.begin() as session:
+        session.add(
+            Source(
+                source_id=replacement_source_id,
+                company_id=COMPANY_ID,
+                source_type=SourceType.JOB_POSTING.value,
+                canonical_url=f"https://replacement.example.test/{replacement_source_id}",
+                title="Registered replacement source",
+            )
+        )
+    return replacement_source_id
+
+
+def _restriction_snapshot(
+    history: _HistoricalSource,
+    *,
+    restriction_id: UUID,
     restriction_revision: int,
     restriction_status: RestrictionStatus,
     accuracy_status: AccuracyStatus,
-    occurred_at: datetime,
+    changed_at: datetime,
     replacement_ref: UUID | None = None,
-) -> SourceEvent:
-    return SourceEvent(
-        event_id=event_id,
-        event_type=SourceEventType.RESTRICTION_CHANGED,
-        schema_version="w2.source.v1",
-        aggregate_id=history.source_id,
-        aggregate_revision=aggregate_revision,
-        occurred_at=occurred_at,
-        payload=SourceRestrictionSnapshot(
-            restriction_id=uuid4(),
-            source_id=history.source_id,
-            source_version_id=history.source_version_id,
-            restriction_revision=restriction_revision,
-            restriction_status=restriction_status,
-            accuracy_status=accuracy_status,
-            reason_code="WRONG_COMPANY",
-            changed_at=occurred_at,
-            replacement_ref=replacement_ref,
-        ),
+) -> SourceRestrictionSnapshot:
+    return SourceRestrictionSnapshot(
+        restriction_id=restriction_id,
+        source_id=history.source_id,
+        source_version_id=history.source_version_id,
+        restriction_revision=restriction_revision,
+        restriction_status=restriction_status,
+        accuracy_status=accuracy_status,
+        reason_code="WRONG_COMPANY",
+        changed_at=changed_at,
+        replacement_ref=replacement_ref,
     )
-
-
-def _require_persistence_seam(name: str) -> Callable[..., object]:
-    seam = getattr(persistence_module, name, None)
-    assert callable(seam), f"T064/T066 requires persistence.{name}(...)"
-    return seam
-
-
-def _restriction_service(session_factory: sessionmaker[Session]) -> Any:
-    service_class = getattr(service_module, "SourceRestrictionService", None)
-    assert service_class is not None, "T065 requires service.SourceRestrictionService"
-    assert callable(getattr(service_class, "record_authorized_restriction", None)), (
-        "T065 requires SourceRestrictionService.record_authorized_restriction(...)"
-    )
-    assert callable(getattr(service_class, "current_restriction", None)), (
-        "T065/T068 requires SourceRestrictionService.current_restriction(...)"
-    )
-    return service_class(session_factory=session_factory)
 
 
 def test_authorized_404_preserves_historical_version_evidence_and_current_pointer(
@@ -413,7 +442,7 @@ def test_authorized_404_preserves_historical_version_evidence_and_current_pointe
     assert _history_snapshot(session_factory, history.source_id) == before
 
 
-def test_active_404_restriction_persists_separately_from_historical_snapshot(
+def test_explicit_active_restriction_persists_separately_from_historical_snapshot(
     session_factory: sessionmaker[Session],
 ) -> None:
     history = _collect_historical_source(session_factory)
@@ -426,32 +455,27 @@ def test_active_404_restriction_persists_separately_from_historical_snapshot(
     assert result.failures[0].code == StaticFetchFailureCode.NOT_FOUND.value
     assert _history_snapshot(session_factory, history.source_id) == before
 
-    restriction_model = getattr(persistence_module, "SourceRestriction", None)
-    assert restriction_model is not None, "T064 requires persistence.SourceRestriction"
-    record_restriction = _require_persistence_seam("record_source_restriction")
-    active_event = _restriction_event(
-        history,
-        event_id=uuid4(),
-        aggregate_revision=2,
-        restriction_revision=1,
-        restriction_status=RestrictionStatus.ACTIVE,
-        accuracy_status=AccuracyStatus.ERROR_CONFIRMED,
-        occurred_at=NOW,
+    active = _restriction_service(session_factory).apply(
+        _create_restriction_request(
+            history,
+            changed_at=NOW,
+            reason_code="HTTP_404_CORRECTION",
+        )
     )
-    with session_factory.begin() as session:
-        record_restriction(session, event=active_event, evidence_refs=("fixture:http-404",))
 
     assert _history_snapshot(session_factory, history.source_id) == before
     with session_factory() as session:
-        rows = session.scalars(
-            select(restriction_model).where(restriction_model.source_id == history.source_id)
-        ).all()
-    assert [(row.restriction_status, row.accuracy_status) for row in rows] == [
-        (RestrictionStatus.ACTIVE.value, AccuracyStatus.ERROR_CONFIRMED.value)
-    ]
+        current = get_current_source_restriction(
+            session,
+            source_id=history.source_id,
+            restriction_id=active.restriction_id,
+        )
+    assert active.restriction_status is RestrictionStatus.ACTIVE
+    assert active.accuracy_status is AccuracyStatus.ERROR_CONFIRMED
+    assert current == active
 
 
-def test_authorized_403_and_confirmed_error_clear_are_service_owned_and_monotonic(
+def test_explicit_403_correction_clear_and_reactivate_reuse_stable_identity(
     session_factory: sessionmaker[Session],
 ) -> None:
     history = _collect_historical_source(session_factory)
@@ -464,43 +488,63 @@ def test_authorized_403_and_confirmed_error_clear_are_service_owned_and_monotoni
     assert result.failures[0].code == StaticFetchFailureCode.ACCESS_DENIED.value
     assert _history_snapshot(session_factory, history.source_id) == before
 
+    replacement_source_id = _register_replacement_source(session_factory)
+    assert replacement_source_id != history.source_id
     service = _restriction_service(session_factory)
-    replacement_ref = uuid4()
-    active = service.record_authorized_restriction(
-        source_id=history.source_id,
-        source_version_id=history.source_version_id,
-        observed_http_status=403,
-        restriction_status=RestrictionStatus.ACTIVE,
-        accuracy_status=AccuracyStatus.ERROR_CONFIRMED,
-        reason_code=StaticFetchFailureCode.ACCESS_DENIED.value,
-        evidence_refs=("fixture:http-403",),
+    create_request = _create_restriction_request(
+        history,
         changed_at=NOW,
-        replacement_ref=replacement_ref,
+        reason_code=StaticFetchFailureCode.ACCESS_DENIED.value,
+        replacement_ref=replacement_source_id,
     )
-    cleared = service.record_authorized_restriction(
-        source_id=history.source_id,
-        source_version_id=history.source_version_id,
-        observed_http_status=None,
-        restriction_status=RestrictionStatus.CLEARED,
-        accuracy_status=AccuracyStatus.VERIFIED_IN_SCOPE,
-        reason_code="CORRECTION_CONFIRMED",
-        evidence_refs=("fixture:confirmed-correction",),
-        changed_at=NOW + timedelta(minutes=1),
-        replacement_ref=None,
+    active = service.apply(create_request)
+    cleared_request = create_request.model_copy(
+        update={
+            "request_id": uuid4(),
+            "kind": "clear",
+            "restriction_id": active.restriction_id,
+            "accuracy_status": AccuracyStatus.VERIFIED_IN_SCOPE,
+            "reason_code": "CORRECTION_CONFIRMED",
+            "evidence_refs": ("fixture:confirmed-correction",),
+            "changed_at": NOW + timedelta(minutes=1),
+            "replacement_ref": None,
+        }
     )
-    current = service.current_restriction(source_id=history.source_id)
+    cleared = service.apply(cleared_request)
+    reactivated_request = cleared_request.model_copy(
+        update={
+            "request_id": uuid4(),
+            "kind": "reactivate",
+            "restriction_id": active.restriction_id,
+            "accuracy_status": AccuracyStatus.ERROR_CONFIRMED,
+            "reason_code": "REACTIVATED_AFTER_REVIEW",
+            "evidence_refs": ("fixture:reactivated-after-review",),
+            "changed_at": NOW + timedelta(minutes=2),
+        }
+    )
+    reactivated = service.apply(reactivated_request)
+    with session_factory() as session:
+        current = get_current_source_restriction(
+            session,
+            source_id=history.source_id,
+            restriction_id=active.restriction_id,
+        )
 
     assert active.restriction_status == RestrictionStatus.ACTIVE
     assert active.accuracy_status == AccuracyStatus.ERROR_CONFIRMED
-    assert active.replacement_ref == replacement_ref
-    assert cleared.restriction_revision > active.restriction_revision
+    assert active.replacement_ref == replacement_source_id
+    assert cleared.restriction_id == active.restriction_id
+    assert cleared.restriction_revision == active.restriction_revision + 1
     assert cleared.restriction_status == RestrictionStatus.CLEARED
     assert cleared.accuracy_status == AccuracyStatus.VERIFIED_IN_SCOPE
-    assert current == cleared
+    assert reactivated.restriction_id == active.restriction_id
+    assert reactivated.restriction_revision == cleared.restriction_revision + 1
+    assert reactivated.restriction_status == RestrictionStatus.ACTIVE
+    assert current == reactivated
     assert _history_snapshot(session_factory, history.source_id) == before
 
 
-def test_authorized_non_http_failure_active_to_cleared_keeps_historical_snapshot(
+def test_explicit_non_http_correction_clear_keeps_historical_snapshot(
     session_factory: sessionmaker[Session],
 ) -> None:
     history = _collect_historical_source(session_factory)
@@ -515,35 +559,39 @@ def test_authorized_non_http_failure_active_to_cleared_keeps_historical_snapshot
     assert _history_snapshot(session_factory, history.source_id) == before
 
     service = _restriction_service(session_factory)
-    active = service.record_authorized_restriction(
-        source_id=history.source_id,
-        source_version_id=history.source_version_id,
-        observed_http_status=None,
-        restriction_status=RestrictionStatus.ACTIVE,
-        accuracy_status=AccuracyStatus.ERROR_CONFIRMED,
-        reason_code=StaticFetchFailureCode.FETCH_TIMEOUT.value,
-        evidence_refs=("fixture:fetch-timeout",),
+    create_request = _create_restriction_request(
+        history,
         changed_at=NOW,
-        replacement_ref=None,
+        reason_code=StaticFetchFailureCode.FETCH_TIMEOUT.value,
     )
-    cleared = service.record_authorized_restriction(
-        source_id=history.source_id,
-        source_version_id=history.source_version_id,
-        observed_http_status=None,
-        restriction_status=RestrictionStatus.CLEARED,
-        accuracy_status=AccuracyStatus.VERIFIED_IN_SCOPE,
-        reason_code="RETRY_CONFIRMED",
-        evidence_refs=("fixture:retry-confirmed",),
-        changed_at=NOW + timedelta(minutes=1),
-        replacement_ref=None,
+    active = service.apply(create_request)
+    cleared = service.apply(
+        create_request.model_copy(
+            update={
+                "request_id": uuid4(),
+                "kind": "clear",
+                "restriction_id": active.restriction_id,
+                "accuracy_status": AccuracyStatus.VERIFIED_IN_SCOPE,
+                "reason_code": "RETRY_CONFIRMED",
+                "evidence_refs": ("fixture:retry-confirmed",),
+                "changed_at": NOW + timedelta(minutes=1),
+            }
+        )
     )
+    with session_factory() as session:
+        current = get_current_source_restriction(
+            session,
+            source_id=history.source_id,
+            restriction_id=active.restriction_id,
+        )
 
     assert active.restriction_status == RestrictionStatus.ACTIVE
     assert active.accuracy_status == AccuracyStatus.ERROR_CONFIRMED
-    assert cleared.restriction_revision > active.restriction_revision
+    assert cleared.restriction_id == active.restriction_id
+    assert cleared.restriction_revision == active.restriction_revision + 1
     assert cleared.restriction_status == RestrictionStatus.CLEARED
     assert cleared.accuracy_status == AccuracyStatus.VERIFIED_IN_SCOPE
-    assert service.current_restriction(source_id=history.source_id) == cleared
+    assert current == cleared
     assert _history_snapshot(session_factory, history.source_id) == before
 
 
@@ -551,53 +599,87 @@ def test_restriction_events_are_immutable_public_snapshots_and_do_not_rewind_ove
     session_factory: sessionmaker[Session],
 ) -> None:
     history = _collect_historical_source(session_factory)
-    replacement_ref = uuid4()
-    revision_three = _restriction_event(
+    restriction_id = uuid4()
+    revision_one = _restriction_snapshot(
         history,
-        event_id=uuid4(),
-        aggregate_revision=3,
-        restriction_revision=3,
+        restriction_id=restriction_id,
+        restriction_revision=1,
         restriction_status=RestrictionStatus.ACTIVE,
         accuracy_status=AccuracyStatus.ERROR_CONFIRMED,
-        occurred_at=NOW,
-        replacement_ref=replacement_ref,
+        changed_at=NOW - timedelta(minutes=2),
     )
-    revision_two = _restriction_event(
+    revision_two = _restriction_snapshot(
         history,
-        event_id=uuid4(),
-        aggregate_revision=2,
+        restriction_id=restriction_id,
         restriction_revision=2,
         restriction_status=RestrictionStatus.CLEARED,
         accuracy_status=AccuracyStatus.VERIFIED_IN_SCOPE,
-        occurred_at=NOW - timedelta(minutes=1),
+        changed_at=NOW - timedelta(minutes=1),
     )
-    rendered = revision_three.model_dump(mode="json")
-    assert _RESTRICTION_EVENT_PRIVATE_FIELDS.isdisjoint(_deep_keys(rendered))
-    assert "evidence_refs" not in rendered["payload"]
+    revision_three = _restriction_snapshot(
+        history,
+        restriction_id=restriction_id,
+        restriction_revision=3,
+        restriction_status=RestrictionStatus.ACTIVE,
+        accuracy_status=AccuracyStatus.ERROR_CONFIRMED,
+        changed_at=NOW,
+    )
+    expected_public_records = [
+        (
+            SourceEventType.RESTRICTION_CHANGED.value,
+            history.source_id,
+            snapshot.restriction_revision,
+            "w2.source.v1",
+            snapshot.model_dump(mode="json"),
+        )
+        for snapshot in (revision_one, revision_two, revision_three)
+    ]
 
-    restriction_model = getattr(persistence_module, "SourceRestriction", None)
-    assert restriction_model is not None, "T064 requires persistence.SourceRestriction"
-    record_restriction = _require_persistence_seam("record_source_restriction")
-    current_restriction = _require_persistence_seam("get_current_source_restriction")
-    list_restrictions = _require_persistence_seam("list_source_restrictions")
     with session_factory.begin() as session:
-        record_restriction(session, event=revision_three, evidence_refs=("fixture:revision-3",))
-        record_restriction(session, event=revision_two, evidence_refs=("fixture:revision-2",))
-        record_restriction(session, event=revision_three, evidence_refs=("fixture:revision-3",))
+        record_source_restriction(
+            session,
+            snapshot=revision_one,
+            evidence_refs=("fixture:revision-1",),
+        )
+        record_source_restriction(
+            session,
+            snapshot=revision_two,
+            evidence_refs=("fixture:revision-2",),
+        )
+        record_source_restriction(
+            session,
+            snapshot=revision_three,
+            evidence_refs=("fixture:revision-3",),
+        )
 
     with session_factory() as session:
-        current = current_restriction(session, source_id=history.source_id)
-        history_rows = list_restrictions(session, source_id=history.source_id)
+        current = get_current_source_restriction(
+            session,
+            source_id=history.source_id,
+            restriction_id=restriction_id,
+        )
+        history_rows = list_source_restrictions(session, source_id=history.source_id)
         outbox_rows = session.scalars(
             select(OutboxEvent)
             .where(OutboxEvent.event_type == SourceEventType.RESTRICTION_CHANGED.value)
             .order_by(OutboxEvent.aggregate_revision, OutboxEvent.event_id)
         ).all()
-    assert current.restriction_revision == 3
-    assert current.restriction_status == RestrictionStatus.ACTIVE.value
-    assert current.replacement_ref == replacement_ref
-    assert [row.restriction_revision for row in history_rows] == [2, 3]
-    assert [row.event_id for row in outbox_rows] == [revision_two.event_id, revision_three.event_id]
+    assert current == revision_three
+    assert [row.restriction_revision for row in history_rows] == [1, 2, 3]
+    assert [
+        (
+            row.event_type,
+            row.aggregate_id,
+            row.aggregate_revision,
+            row.schema_version,
+            row.payload,
+        )
+        for row in outbox_rows
+    ] == expected_public_records
+    assert all(
+        _RESTRICTION_EVENT_PRIVATE_FIELDS.isdisjoint(_deep_keys(row.payload)) for row in outbox_rows
+    )
+    outbox_event_ids = [row.event_id for row in outbox_rows]
     assert (
         _history_snapshot(session_factory, history.source_id)[0]
         == history.current_source_version_id
@@ -608,12 +690,18 @@ def test_restriction_events_are_immutable_public_snapshots_and_do_not_rewind_ove
         publisher=publisher,
         store=SqlAlchemyOutboxDeliveryStore(session_factory=session_factory),
     )
-    assert worker.deliver_pending(limit=10) == 2
-    assert publisher.events == [revision_two, revision_three]
-    assert all(
-        _RESTRICTION_EVENT_PRIVATE_FIELDS.isdisjoint(_deep_keys(event.model_dump(mode="json")))
+    assert worker.deliver_pending(limit=10) == 3
+    assert [event.event_id for event in publisher.events] == outbox_event_ids
+    assert [
+        (
+            event.event_type.value,
+            event.aggregate_id,
+            event.aggregate_revision,
+            event.schema_version,
+            event.model_dump(mode="json")["payload"],
+        )
         for event in publisher.events
-    )
+    ] == expected_public_records
 
 
 def _deep_keys(value: object) -> set[str]:

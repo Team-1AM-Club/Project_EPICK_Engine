@@ -45,6 +45,7 @@ EVIDENCE_SECOND_ID = UUID("00000000-0000-4000-8000-000000000802")
 ORIGIN_RELATION_ID = UUID("00000000-0000-4000-8000-000000000901")
 COMPLETED_JOB_ID = UUID("00000000-0000-4000-8000-000000000a01")
 REFRESH_JOB_ID = UUID("00000000-0000-4000-8000-000000000a02")
+RETRY_JOB_ID = UUID("00000000-0000-4000-8000-000000000a03")
 NOW = datetime(2026, 9, 11, 12, tzinfo=UTC)
 UNKNOWN_DATE = DateValue(
     status=DateStatus.UNKNOWN,
@@ -190,7 +191,6 @@ class _RefreshJobs:
     completed_jobs: dict[UUID, str] = field(default_factory=lambda: {COMPLETED_JOB_ID: "SUCCEEDED"})
     calls: list[dict[str, object]] = field(default_factory=list)
     fetch_calls: int = 0
-    retry_calls: int = 0
 
     def accept_policy_refresh(
         self,
@@ -664,4 +664,10 @@ def test_refresh_accepts_queued_w1_result_without_retry_fetch_or_completed_histo
 
     assert result["job_id"] == REFRESH_JOB_ID
     assert jobs.completed_jobs == completed_before
-    assert jobs.fetch_calls == jobs.retry_calls == 0
+    assert jobs.fetch_calls == 0
+
+
+def test_version_service_does_not_expose_a_user_retry_boundary() -> None:
+    service, _, _, _, _ = _service()
+
+    assert not hasattr(service, "retry_source")

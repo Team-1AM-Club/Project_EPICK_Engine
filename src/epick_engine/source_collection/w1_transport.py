@@ -119,6 +119,7 @@ def _require_matching_identity(command: CollectionCommand, request: LookupReques
 def _require_matching_decision(
     command: CollectionCommand,
     *,
+    decision_scope: Literal["COMPANY_KNOWLEDGE", "QUESTION_MATCHING", "DIRECT_SOURCE_REGISTRATION"],
     company_id: UUID | None,
     source_id: UUID,
     decision_version: int,
@@ -128,7 +129,7 @@ def _require_matching_decision(
 ) -> None:
     decision = command.core_source_decision
     if (
-        command.company_id != company_id
+        (decision_scope != "QUESTION_MATCHING" and command.company_id != company_id)
         or command.source_id != source_id
         or command.input_version != decision_version
         or decision.decided_by != decision_owner
@@ -164,6 +165,7 @@ class W1CommandDispatch(ContractModel):
             raise ValueError("Core dispatch requires a Core decision")
         _require_matching_decision(
             self.payload,
+            decision_scope=pin.decision_scope,
             company_id=pin.company_id,
             source_id=pin.source_id,
             decision_version=pin.decision_version,
@@ -196,6 +198,7 @@ class W1DirectSourceRegistrationDispatch(ContractModel):
         pin = self.direct_source_registration_pin
         _require_matching_decision(
             self.payload,
+            decision_scope=pin.decision_scope,
             company_id=pin.company_id,
             source_id=pin.source_id,
             decision_version=pin.decision_version,

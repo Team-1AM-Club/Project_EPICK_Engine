@@ -3,13 +3,11 @@
 T029/T034 public factory contract, intentionally fixed here for TDD:
 
 ``create_job_posting_api(*, service, authenticator, settings)`` returns a
-``FastAPI`` application with the three routes exercised below. ``service``
-provides ``import_job_posting``, ``get_job_posting``, and
-``retry_job_posting``. The factory owns HTTP authentication, UUID/query and
-idempotency-key validation, safe error rendering, and public response
-projection. It delegates job creation, ownership decisions, SourceVersion /
-extraction-revision compatibility, W1 dispatch, and W3 failure semantics to
-the service owners.
+``FastAPI`` application with the two W2-owned routes exercised below.
+``service`` provides ``import_job_posting`` and ``get_job_posting``. The
+factory owns HTTP authentication, UUID/query and idempotency-key validation,
+safe error rendering, and public response projection. W1 owns every public
+Job retry action, so this factory must not expose a retry route.
 
 The fake service's deterministic idempotency, ownership, and selected-version
 branches are boundary-observation switches only. T033/T036 own their production
@@ -468,16 +466,6 @@ def app(service: _FakeJobPostingService) -> FastAPI:
             {"Idempotency-Key": "unauthenticated-import"},
         ),
         ("GET", f"/api/v1/job-postings/{_JOB_POSTING_ID}", None, {}),
-        (
-            "POST",
-            f"/api/v1/job-postings/{_JOB_POSTING_ID}/retry",
-            {
-                "job_id": str(_IMPORT_JOB_ID),
-                "expected_input_version": 1,
-                "expected_result_version": 1,
-            },
-            {"Idempotency-Key": "unauthenticated-retry"},
-        ),
     ],
 )
 def test_job_posting_routes_require_authentication_before_service(
@@ -503,14 +491,6 @@ def test_job_posting_routes_require_authentication_before_service(
         (
             "/api/v1/job-postings/import",
             {"company_id": str(_COMPANY_ID), "url": "https://synthetic.test/jobs/1"},
-        ),
-        (
-            f"/api/v1/job-postings/{_JOB_POSTING_ID}/retry",
-            {
-                "job_id": str(_IMPORT_JOB_ID),
-                "expected_input_version": 1,
-                "expected_result_version": 1,
-            },
         ),
     ],
 )
@@ -823,181 +803,24 @@ def test_job_posting_get_hides_non_owned_and_unknown_resources_equally(
     assert network_calls == []
 
 
-def test_job_posting_retry_returns_202_replays_idempotency_and_keeps_private_body_unfetched(
+def test_job_posting_retry_is_not_registered_in_w2(
     app: FastAPI,
     service: _FakeJobPostingService,
     network_calls: list[str],
 ) -> None:
-    headers = _owner_headers(**{"Idempotency-Key": "retry-posting-replay"})
-    body = {
-        "job_id": str(_IMPORT_JOB_ID),
-        "expected_input_version": 1,
-        "expected_result_version": 1,
-    }
-    first = _request(
+    response = _request(
         app,
         "POST",
         f"/api/v1/job-postings/{_JOB_POSTING_ID}/retry",
-        headers=headers,
-        body=body,
-    )
-    replay = _request(
-        app,
-        "POST",
-        f"/api/v1/job-postings/{_JOB_POSTING_ID}/retry",
-        headers=headers,
-        body=body,
-    )
-
-    assert first.status_code == replay.status_code == 202
-    assert replay.payload() == first.payload()
-    _assert_public_response(first.payload(), _RETRY_RESPONSE_KEYS)
-    assert first.payload()["status_url"] == f"/api/v1/jobs/{_RETRY_JOB_ID}"
-    assert "raw_body" not in json.dumps(first.payload())
-    assert "private_w1_command" not in json.dumps(first.payload())
-    assert service.retry_count == 1
-    assert network_calls == []
-
-
-def test_job_posting_retry_rejects_changed_payload_for_reused_idempotency_key(
-    app: FastAPI,
-    service: _FakeJobPostingService,
-    network_calls: list[str],
-) -> None:
-    headers = _owner_headers(**{"Idempotency-Key": "retry-posting-conflict"})
-    first = _request(
-        app,
-        "POST",
-        f"/api/v1/job-postings/{_JOB_POSTING_ID}/retry",
-        headers=headers,
+        headers=_owner_headers(**{"Idempotency-Key": "must-be-owned-by-w1"}),
         body={
             "job_id": str(_IMPORT_JOB_ID),
             "expected_input_version": 1,
             "expected_result_version": 1,
         },
     )
-    conflict = _request(
-        app,
-        "POST",
-        f"/api/v1/job-postings/{_JOB_POSTING_ID}/retry",
-        headers=headers,
-        body={
-            "job_id": str(_IMPORT_JOB_ID),
-            "expected_input_version": 1,
-            "expected_result_version": 2,
-        },
-    )
 
-    assert first.status_code == 202
-    _assert_public_response(first.payload(), _RETRY_RESPONSE_KEYS)
-    assert conflict.status_code == 409
-    assert _error_code(conflict) == ApiErrorCode.IDEMPOTENCY_CONFLICT
-    assert service.retry_count == 1
-    assert network_calls == []
-
-
-def test_job_posting_retry_preserves_safe_w3_failure_handoff_without_fetch(
-    app: FastAPI,
-    service: _FakeJobPostingService,
-    network_calls: list[str],
-) -> None:
-    service.delegate_w3_failure = True
-    response = _request(
-        app,
-        "POST",
-        f"/api/v1/job-postings/{_JOB_POSTING_ID}/retry",
-        headers=_owner_headers(**{"Idempotency-Key": "retry-w3-failure"}),
-        body={
-            "job_id": str(_IMPORT_JOB_ID),
-            "expected_input_version": 37,
-            "expected_result_version": 41,
-        },
-    )
-
-    assert response.status_code == 202
-    _assert_public_response(response.payload(), _W3_RETRY_RESPONSE_KEYS)
-    assert response.payload()["w3_handoff"] == {
-        "owner": "W3",
-        "status": "FAILED",
-        "code": "CLAIM_INDEX_REJECTED",
-        "handoff_ref": _W3_PUBLIC_SENTINEL,
-    }
-    assert service.retry_call_arguments == [
-        {
-            "owner_user_id": _OWNER_ID,
-            "job_posting_id": _JOB_POSTING_ID,
-            "job_id": _IMPORT_JOB_ID,
-            "expected_input_version": 37,
-            "expected_result_version": 41,
-            "idempotency_key": "retry-w3-failure",
-        }
-    ]
-    assert "private_w3_failure" not in json.dumps(response.payload())
-    assert "raw_body" not in json.dumps(response.payload())
-    assert network_calls == []
-
-
-def test_job_posting_retry_hides_non_owned_and_unknown_resources_equally(
-    app: FastAPI,
-    service: _FakeJobPostingService,
-    network_calls: list[str],
-) -> None:
-    body = {
-        "job_id": str(_IMPORT_JOB_ID),
-        "expected_input_version": 1,
-        "expected_result_version": 1,
-    }
-    non_owned = _request(
-        app,
-        "POST",
-        f"/api/v1/job-postings/{_OTHER_JOB_POSTING_ID}/retry",
-        headers=_owner_headers(**{"Idempotency-Key": "retry-non-owned"}),
-        body=body,
-    )
-    unknown = _request(
-        app,
-        "POST",
-        "/api/v1/job-postings/00000000-0000-4000-8000-000000000899/retry",
-        headers=_owner_headers(**{"Idempotency-Key": "retry-unknown"}),
-        body=body,
-    )
-
-    assert non_owned.status_code == unknown.status_code == 404
-    assert _error_code(non_owned) == _error_code(unknown) == ApiErrorCode.RESOURCE_NOT_FOUND
-    assert network_calls == []
-
-
-def test_job_posting_retry_scopes_idempotency_key_to_authenticated_principal(
-    app: FastAPI,
-    service: _FakeJobPostingService,
-    network_calls: list[str],
-) -> None:
-    path = f"/api/v1/job-postings/{_JOB_POSTING_ID}/retry"
-    body = {
-        "job_id": str(_IMPORT_JOB_ID),
-        "expected_input_version": 1,
-        "expected_result_version": 1,
-    }
-    idempotency_key = "same-key-different-owner"
-    owner = _request(
-        app,
-        "POST",
-        path,
-        headers=_owner_headers(**{"Idempotency-Key": idempotency_key}),
-        body=body,
-    )
-    other_owner = _request(
-        app,
-        "POST",
-        path,
-        headers=_other_owner_headers(**{"Idempotency-Key": idempotency_key}),
-        body=body,
-    )
-
-    assert owner.status_code == 202
-    assert other_owner.status_code == 404
-    _assert_public_response(owner.payload(), _RETRY_RESPONSE_KEYS)
-    assert _error_code(other_owner) == ApiErrorCode.RESOURCE_NOT_FOUND
-    assert owner.payload()["status_url"] not in json.dumps(other_owner.payload())
-    assert service.retry_count == 1
+    assert response.status_code == 404
+    assert service.calls == []
+    assert service.retry_count == 0
     assert network_calls == []

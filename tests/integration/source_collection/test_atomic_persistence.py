@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from threading import Barrier, Lock
 from uuid import UUID, uuid4
 
@@ -53,11 +55,14 @@ from epick_engine.source_collection.persistence import (
     replay_committed_collection,
     resolve_request_deduplication,
 )
+from epick_engine.source_collection.source_runtime_store import reserve_collection_attempt
+from epick_engine.source_collection.w1_transport import W1Dispatch, parse_w1_dispatch
 
 pytestmark = pytest.mark.approved_postgres
 
 NOW = datetime(2026, 9, 10, tzinfo=UTC)
 OWNER = UUID("00000000-0000-4000-8000-000000000201")
+W1_FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "w1_private_contract"
 
 
 @pytest.fixture
@@ -162,6 +167,51 @@ def _command(source: Source, *, command_id: UUID | None = None) -> CollectionCom
             "policy_revision": 1,
         }
     )
+
+
+def _runtime_dispatch(source: Source, *, command_id: UUID | None = None) -> W1Dispatch:
+    """Build a real W1 dispatch solely for the reservation boundary."""
+
+    command_id = command_id or uuid4()
+    raw = json.loads((W1_FIXTURES / "private-w2-command-dispatch.json").read_text(encoding="utf-8"))
+    raw["message_id"] = str(command_id)
+    raw["payload"].update(
+        command_id=str(command_id),
+        job_id=str(uuid4()),
+        authenticated_owner_ref=str(OWNER),
+        company_id=str(source.company_id),
+        source_id=str(source.source_id),
+        execution_fence="1",
+        owner_deletion_epoch=0,
+    )
+    raw["lookup_request"].update(
+        command_id=str(command_id),
+        execution_fence=1,
+        owner_deletion_epoch=0,
+    )
+    raw["core_decision_pin"].update(
+        company_id=str(source.company_id),
+        source_id=str(source.source_id),
+        decision_id=str(uuid4()),
+    )
+    return parse_w1_dispatch(raw)
+
+
+def _reserve_finalize_gate(
+    session_factory: sessionmaker[Session],
+    source: Source,
+    policy: SourcePolicyDecision,
+) -> W1Dispatch:
+    dispatch = _runtime_dispatch(source)
+    with session_factory.begin() as session:
+        reserve_collection_attempt(
+            session,
+            dispatch,
+            effective_policy_revision=policy.revision,
+            now=NOW,
+            uuid_factory=uuid4,
+        )
+    return dispatch
 
 
 def _unknown_date() -> DateValue:
@@ -1426,3 +1476,326 @@ def test_concurrent_request_deduplication_reuses_one_row(
     assert row_ids[0] == row_ids[1]
     with session_factory() as session:
         assert _count(session, RequestDeduplication) == 1
+
+
+def test_legacy_commit_allows_pre_reservation_then_rejects_finalize_gate_without_mutation(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A legacy writer may finish before reservation, but never after its mode switch."""
+
+    _, source, policy = _seed_source(session_factory)
+    pre_reservation_command = _command(source)
+    pre_reservation = _complete_prepared(
+        pre_reservation_command,
+        source,
+        policy,
+        aggregate_revision=41,
+    )
+
+    assert (
+        commit_prepared_collection(
+            session_factory,
+            command=pre_reservation_command,
+            prepared=pre_reservation,
+            lock_authority=_locker(pre_reservation_command, pointer_eligible=True),
+        )
+        == pre_reservation.result
+    )
+    _reserve_finalize_gate(session_factory, source, policy)
+
+    blocked_command = _command(source)
+    blocked_prepared = _complete_prepared(
+        blocked_command,
+        source,
+        policy,
+        aggregate_revision=1,
+        content_hash="b" * 64,
+    )
+    with session_factory() as session:
+        before_rows = _counts(session)
+        persisted_source = session.get(Source, source.source_id)
+        assert persisted_source is not None
+        before_pointers = (
+            persisted_source.current_source_version_id,
+            persisted_source.latest_observation_id,
+            persisted_source.first_collected_at,
+            persisted_source.last_collected_at,
+            persisted_source.last_promoted_observation_order,
+            persisted_source.next_observation_order,
+        )
+        assert persisted_source.pointer_update_mode == "FINALIZE_GATE"
+
+    with pytest.raises(InvalidPreparedCollection):
+        commit_prepared_collection(
+            session_factory,
+            command=blocked_command,
+            prepared=blocked_prepared,
+            lock_authority=_locker(blocked_command, pointer_eligible=True),
+        )
+
+    with session_factory() as session:
+        persisted_source = session.get(Source, source.source_id)
+        assert persisted_source is not None
+        assert _counts(session) == before_rows
+        assert (
+            persisted_source.current_source_version_id,
+            persisted_source.latest_observation_id,
+            persisted_source.first_collected_at,
+            persisted_source.last_collected_at,
+            persisted_source.last_promoted_observation_order,
+            persisted_source.next_observation_order,
+        ) == before_pointers
+        assert persisted_source.pointer_update_mode == "FINALIZE_GATE"
+
+
+def test_legacy_commit_refreshes_preloaded_source_before_finalize_gate_write(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A cached Source cannot let a delayed legacy session cross a mode transition."""
+
+    _, source, policy = _seed_source(session_factory)
+    legacy_session = session_factory()
+    try:
+        preloaded = legacy_session.get(Source, source.source_id)
+        assert preloaded is not None
+        assert preloaded.pointer_update_mode == "LEGACY_SAME_DB"
+        legacy_session.commit()
+
+        _reserve_finalize_gate(session_factory, source, policy)
+        blocked_command = _command(source)
+        blocked_prepared = _complete_prepared(
+            blocked_command,
+            source,
+            policy,
+            aggregate_revision=1,
+        )
+        with session_factory() as session:
+            before_rows = _counts(session)
+            before_source = session.get(Source, source.source_id)
+            assert before_source is not None
+            before_pointers = (
+                before_source.current_source_version_id,
+                before_source.latest_observation_id,
+                before_source.last_promoted_observation_order,
+                before_source.next_observation_order,
+            )
+
+        with pytest.raises(InvalidPreparedCollection):
+            commit_prepared_collection(
+                lambda: legacy_session,
+                command=blocked_command,
+                prepared=blocked_prepared,
+                lock_authority=_locker(blocked_command, pointer_eligible=True),
+            )
+
+        with session_factory() as session:
+            persisted_source = session.get(Source, source.source_id)
+            assert persisted_source is not None
+            assert _counts(session) == before_rows
+            assert (
+                persisted_source.current_source_version_id,
+                persisted_source.latest_observation_id,
+                persisted_source.last_promoted_observation_order,
+                persisted_source.next_observation_order,
+            ) == before_pointers
+            assert persisted_source.pointer_update_mode == "FINALIZE_GATE"
+    finally:
+        legacy_session.close()
+
+
+def test_legacy_public_events_use_authoritative_revisions_not_hints_or_internal_order(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Public revisions follow the locked outbox history, never Task 3 ordering hints."""
+
+    _, source, policy = _seed_source(session_factory)
+    first_command = _command(source)
+    first = _complete_prepared(
+        first_command,
+        source,
+        policy,
+        aggregate_revision=900,
+    )
+    commit_prepared_collection(
+        session_factory,
+        command=first_command,
+        prepared=first,
+        lock_authority=_locker(first_command, pointer_eligible=True),
+    )
+
+    with session_factory.begin() as session:
+        persisted_source = session.get(Source, source.source_id)
+        assert persisted_source is not None
+        persisted_source.next_observation_order = 700
+        persisted_source.last_promoted_observation_order = 699
+
+    reused_command = _command(source)
+    reused = _complete_prepared(
+        reused_command,
+        source,
+        policy,
+        source_version_id=first.source_version.source_version_id,
+        evidence_id=first.evidence[0].evidence_id,
+        extraction_revision_id=first.extraction_revision.extraction_revision_id,
+        parser_execution_id=first.parser_execution.parser_execution_id,
+        observation_id=first.observation.snapshot.observation_id,
+        event_id=first.events[0].event_id,
+        content_hash=first.source_version.content_hash,
+        aggregate_revision=4,
+    )
+    commit_prepared_collection(
+        session_factory,
+        command=reused_command,
+        prepared=reused,
+        lock_authority=_locker(reused_command, pointer_eligible=True),
+    )
+
+    second_command = _command(source)
+    second = _complete_prepared(
+        second_command,
+        source,
+        policy,
+        aggregate_revision=1,
+        content_hash="b" * 64,
+    )
+    third_command = _command(source)
+    third = _complete_prepared(
+        third_command,
+        source,
+        policy,
+        aggregate_revision=1,
+        content_hash="c" * 64,
+    )
+    for command, prepared in ((second_command, second), (third_command, third)):
+        commit_prepared_collection(
+            session_factory,
+            command=command,
+            prepared=prepared,
+            lock_authority=_locker(command, pointer_eligible=True),
+        )
+
+    with session_factory() as session:
+        events = session.scalars(
+            select(OutboxEvent)
+            .where(OutboxEvent.aggregate_id == source.source_id)
+            .order_by(OutboxEvent.aggregate_revision)
+        ).all()
+        assert [event.event_id for event in events] == [
+            first.events[0].event_id,
+            second.events[0].event_id,
+            third.events[0].event_id,
+        ]
+        assert [event.aggregate_revision for event in events] == [1, 2, 3]
+        persisted_source = session.get(Source, source.source_id)
+        assert persisted_source is not None
+        assert persisted_source.next_observation_order == 700
+        assert persisted_source.last_promoted_observation_order == 699
+
+
+def test_source_lock_serializes_legacy_writer_after_first_reservation_transition(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A reservation holding the Source lock wins the mode decision against legacy."""
+
+    _, source, policy = _seed_source(session_factory)
+    dispatch = _runtime_dispatch(source)
+    legacy_command = _command(source)
+    legacy_prepared = _complete_prepared(
+        legacy_command,
+        source,
+        policy,
+        aggregate_revision=1,
+    )
+    source_locked = Barrier(2)
+    release_reservation = Barrier(2)
+
+    def reserve_while_holding_source_lock() -> UUID:
+        with session_factory.begin() as session:
+            locked_source = session.scalar(
+                select(Source).where(Source.source_id == source.source_id).with_for_update()
+            )
+            assert locked_source is not None
+            source_locked.wait(timeout=10)
+            reserved = reserve_collection_attempt(
+                session,
+                dispatch,
+                effective_policy_revision=policy.revision,
+                now=NOW,
+                uuid_factory=uuid4,
+            )
+            release_reservation.wait(timeout=10)
+            return reserved.attempt_id
+
+    def legacy_commit() -> CollectionResult:
+        return commit_prepared_collection(
+            session_factory,
+            command=legacy_command,
+            prepared=legacy_prepared,
+            lock_authority=_locker(legacy_command, pointer_eligible=True),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reservation = executor.submit(reserve_while_holding_source_lock)
+        source_locked.wait(timeout=10)
+        legacy = executor.submit(legacy_commit)
+        release_reservation.wait(timeout=10)
+        assert reservation.result(timeout=10)
+        with pytest.raises(InvalidPreparedCollection):
+            legacy.result(timeout=10)
+
+    with session_factory() as session:
+        persisted_source = session.get(Source, source.source_id)
+        assert persisted_source is not None
+        assert persisted_source.pointer_update_mode == "FINALIZE_GATE"
+        assert _counts(session) == (0, 0, 0, 0, 0, 0, 0)
+        assert persisted_source.current_source_version_id is None
+        assert persisted_source.latest_observation_id is None
+
+
+def test_legacy_replay_after_finalize_gate_returns_stored_result_without_recanonicalizing(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The legacy signature still replays a prior attempt; only new writes are mode-gated."""
+
+    _, source, policy = _seed_source(session_factory)
+    command = _command(source)
+    committed = _complete_prepared(command, source, policy, aggregate_revision=1)
+    commit_prepared_collection(
+        session_factory,
+        command=command,
+        prepared=committed,
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+    _reserve_finalize_gate(session_factory, source, policy)
+    replay_input = replace(committed, events=())
+
+    with session_factory() as session:
+        before_rows = _counts(session)
+        before_source = session.get(Source, source.source_id)
+        assert before_source is not None
+        before_pointers = (
+            before_source.current_source_version_id,
+            before_source.latest_observation_id,
+            before_source.last_promoted_observation_order,
+            before_source.next_observation_order,
+        )
+
+    replayed = commit_prepared_collection(
+        session_factory,
+        command=command,
+        prepared=replay_input,
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+
+    assert replayed == committed.result
+    with session_factory() as session:
+        persisted_source = session.get(Source, source.source_id)
+        assert persisted_source is not None
+        assert _counts(session) == before_rows
+        assert (
+            persisted_source.current_source_version_id,
+            persisted_source.latest_observation_id,
+            persisted_source.last_promoted_observation_order,
+            persisted_source.next_observation_order,
+        ) == before_pointers
+        assert persisted_source.pointer_update_mode == "FINALIZE_GATE"

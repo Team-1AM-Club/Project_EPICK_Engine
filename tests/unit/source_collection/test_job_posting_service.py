@@ -24,7 +24,6 @@ from epick_engine.source_collection.service import (
     JobPostingRetryResult,
     JobPostingSelectionInvalid,
     JobPostingService,
-    JobPostingW3Handoff,
 )
 
 OWNER_ID = UUID("00000000-0000-4000-8000-000000009101")
@@ -549,7 +548,7 @@ def test_get_without_content_or_failure_is_unavailable() -> None:
     assert jobs.failure_calls == [(OWNER_ID, JOB_POSTING_ID)]
 
 
-def test_get_and_retry_hide_unknown_and_non_owned_postings_before_job_port() -> None:
+def test_get_hides_unknown_and_non_owned_postings_before_job_port() -> None:
     service, repository, jobs = _service()
 
     with pytest.raises(JobPostingNotFound) as unknown:
@@ -566,108 +565,12 @@ def test_get_and_retry_hide_unknown_and_non_owned_postings_before_job_port() -> 
             source_version_id=None,
             extraction_revision_id=None,
         )
-    with pytest.raises(JobPostingNotFound) as unknown_retry:
-        service.retry_job_posting(
-            owner_user_id=OWNER_ID,
-            job_posting_id=UUID("00000000-0000-4000-8000-000000000899"),
-            job_id=IMPORT_JOB_ID,
-            expected_input_version=1,
-            expected_result_version=2,
-            idempotency_key="retry-unknown",
-        )
-    with pytest.raises(JobPostingNotFound) as non_owned_retry:
-        service.retry_job_posting(
-            owner_user_id=OTHER_OWNER_ID,
-            job_posting_id=JOB_POSTING_ID,
-            job_id=IMPORT_JOB_ID,
-            expected_input_version=1,
-            expected_result_version=2,
-            idempotency_key="retry-non-owned",
-        )
-
     assert str(unknown.value) == str(non_owned.value)
-    assert str(unknown_retry.value) == str(non_owned_retry.value)
-    assert repository.content_calls == []
-    assert jobs.failure_calls == []
-    assert jobs.retry_calls == []
-
-
-def test_retry_delegates_exact_payload_and_preserves_safe_w3_handoff_without_fetch() -> None:
-    handoff = JobPostingW3Handoff(
-        owner="W3",
-        status="FAILED",
-        code="CLAIM_INDEX_REJECTED",
-        handoff_ref="w3-safe-ref",
-    )
-    retry_result = JobPostingRetryResult(
-        job_posting_id=JOB_POSTING_ID,
-        job_id=IMPORT_JOB_ID,
-        resume_stage=CollectionStage.PARSE,
-        w3_handoff=handoff,
-    )
-    jobs = _Jobs(
-        import_accepted=_import_accepted(),
-        retry_result=retry_result,
-    )
-    service, repository, _jobs = _service(jobs=jobs)
-
-    accepted = service.retry_job_posting(
-        owner_user_id=OWNER_ID,
-        job_posting_id=JOB_POSTING_ID,
-        job_id=IMPORT_JOB_ID,
-        expected_input_version=37,
-        expected_result_version=41,
-        idempotency_key="retry-key-001",
-    )
-
-    assert accepted == retry_result
-    assert jobs.retry_calls == [
-        {
-            "owner_user_id": OWNER_ID,
-            "job_posting_id": JOB_POSTING_ID,
-            "job_id": IMPORT_JOB_ID,
-            "expected_input_version": 37,
-            "expected_result_version": 41,
-            "idempotency_key": "retry-key-001",
-        }
-    ]
     assert repository.content_calls == []
     assert jobs.failure_calls == []
 
 
-@pytest.mark.parametrize(
-    "retry_result",
-    [
-        pytest.param(
-            JobPostingRetryResult(
-                job_posting_id=CANONICAL_JOB_POSTING_ID,
-                job_id=IMPORT_JOB_ID,
-                resume_stage=CollectionStage.PARSE,
-            ),
-            id="other-job-posting",
-        ),
-        pytest.param(
-            JobPostingRetryResult(
-                job_posting_id=JOB_POSTING_ID,
-                job_id=RETRY_JOB_ID,
-                resume_stage=CollectionStage.PARSE,
-            ),
-            id="other-job",
-        ),
-    ],
-)
-def test_retry_rejects_mismatched_w1_acceptance(
-    retry_result: JobPostingRetryResult,
-) -> None:
-    jobs = _Jobs(import_accepted=_import_accepted(), retry_result=retry_result)
-    service, _repository, _jobs = _service(jobs=jobs)
+def test_job_posting_service_does_not_expose_a_user_retry_boundary() -> None:
+    service, _, _ = _service()
 
-    with pytest.raises(JobPostingSelectionInvalid):
-        service.retry_job_posting(
-            owner_user_id=OWNER_ID,
-            job_posting_id=JOB_POSTING_ID,
-            job_id=IMPORT_JOB_ID,
-            expected_input_version=1,
-            expected_result_version=1,
-            idempotency_key="retry-mismatched-acceptance",
-        )
+    assert not hasattr(service, "retry_job_posting")

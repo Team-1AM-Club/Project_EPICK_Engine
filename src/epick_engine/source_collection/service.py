@@ -1482,18 +1482,6 @@ class JobPostingJobPort(Protocol):
         same owner/key/payload with the same accepted identity.
         """
 
-    def retry_job_posting(
-        self,
-        *,
-        owner_user_id: UUID,
-        job_posting_id: UUID,
-        job_id: UUID,
-        expected_input_version: int,
-        expected_result_version: int,
-        idempotency_key: str,
-    ) -> JobPostingRetryResult:
-        """Delegate one explicit retry request to W1 without auto-retrying."""
-
     def read_failure_reference(
         self,
         *,
@@ -1597,33 +1585,6 @@ class JobPostingService:
             failure_reference=failure_reference,
             evidence=evidence,
         )
-
-    def retry_job_posting(
-        self,
-        *,
-        owner_user_id: UUID,
-        job_posting_id: UUID,
-        job_id: UUID,
-        expected_input_version: int,
-        expected_result_version: int,
-        idempotency_key: str,
-    ) -> JobPostingRetryResult:
-        """Verify owner visibility, then delegate the exact retry payload to W1."""
-
-        self._owned_posting(owner_user_id, job_posting_id)
-        accepted = self._job_port.retry_job_posting(
-            owner_user_id=owner_user_id,
-            job_posting_id=job_posting_id,
-            job_id=job_id,
-            expected_input_version=expected_input_version,
-            expected_result_version=expected_result_version,
-            idempotency_key=idempotency_key,
-        )
-        if accepted.job_posting_id != job_posting_id or accepted.job_id != job_id:
-            raise JobPostingSelectionInvalid(
-                "retry result does not match the requested job posting or job"
-            )
-        return accepted
 
     def _owned_posting(self, owner_user_id: UUID, job_posting_id: UUID) -> JobPostingRecord:
         posting = self._repository.find_owned_job_posting(

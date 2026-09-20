@@ -1,4 +1,4 @@
-"""W2_UNADOPTED_PROPOSAL_QUEUE_DISCONNECTED private PostgreSQL boundary.
+"""W1-adopted private PostgreSQL boundary, independent from queue transport.
 
 The caller owns the transaction. Savepoints isolate storage conflicts; releasing
 a savepoint is not a database commit and no relay/worker is registered here.
@@ -11,10 +11,20 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, ForeignKey, String, Text, UniqueConstraint, select, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    select,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.exc import IntegrityError, StatementError
@@ -50,6 +60,10 @@ class PrivateCommitStage(Base):
             "(state IN ('STAGED', 'PREPARED', 'FINALIZED') AND result_payload IS NOT NULL)",
             name="payload_matches_state",
         ),
+        CheckConstraint(
+            "stage_kind IN ('PRIVATE_ONLY', 'COLLECTION')",
+            name="valid_stage_kind",
+        ),
     )
 
     command_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
@@ -63,6 +77,12 @@ class PrivateCommitStage(Base):
     operation_revision: Mapped[str] = mapped_column(Text, nullable=False)
     max_purge_epoch: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
+    stage_kind: Mapped[str] = mapped_column(
+        String(16),
+        default="PRIVATE_ONLY",
+        server_default=text("'PRIVATE_ONLY'"),
+        nullable=False,
+    )
     result_payload: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
@@ -70,7 +90,13 @@ class PrivateCommitStage(Base):
 
 class PrivateStagedOutbox(Base):
     __tablename__ = "private_staged_outbox"
-    __table_args__ = (UniqueConstraint("command_id", name="uq_private_staged_outbox_command"),)
+    __table_args__ = (
+        UniqueConstraint("command_id", name="uq_private_staged_outbox_command"),
+        CheckConstraint(
+            "(relay_claim_token IS NULL) = (relay_claim_expires_at IS NULL)",
+            name="relay_claim_fields_together",
+        ),
+    )
 
     message_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
     command_id: Mapped[UUID] = mapped_column(
@@ -78,16 +104,36 @@ class PrivateStagedOutbox(Base):
     )
     wire_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    relay_claim_token: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=True
+    )
+    relay_claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class PrivateCommitGateAck(Base):
     __tablename__ = "private_commit_gate_acks"
+    __table_args__ = (
+        CheckConstraint(
+            "(relay_claim_token IS NULL) = (relay_claim_expires_at IS NULL)",
+            name="relay_claim_fields_together",
+        ),
+    )
 
     message_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
     command_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), ForeignKey("private_commit_stages.command_id"), nullable=False
     )
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    relay_claim_token: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=True
+    )
+    relay_claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class PrivateCommitGateReceipt(Base):
@@ -125,6 +171,35 @@ class CommitGateRejected(ValueError):
     """Safe storage rejection without embedding private input in diagnostics."""
 
 
+def _prepare_staged_outbox_for_terminal(
+    session: Session,
+    command_id: UUID,
+) -> PrivateStagedOutbox | None:
+    """Reject an active relay claim; reclaim an expired one using the DB clock."""
+
+    staged = session.scalar(
+        select(PrivateStagedOutbox)
+        .where(PrivateStagedOutbox.command_id == command_id)
+        .execution_options(populate_existing=True)
+    )
+    if staged is None:
+        return None
+    token = staged.relay_claim_token
+    expires_at = staged.relay_claim_expires_at
+    if token is None and expires_at is None:
+        return staged
+    if token is None or expires_at is None:
+        raise CommitGateRejected("private staged relay claim is invalid")
+    db_now = session.scalar(select(func.clock_timestamp()))
+    if not isinstance(db_now, datetime) or db_now.tzinfo is None:
+        raise CommitGateRejected("private staged relay clock unavailable")
+    if expires_at > db_now:
+        raise CommitGateRejected("private staged relay is active")
+    staged.relay_claim_token = None
+    staged.relay_claim_expires_at = None
+    return staged
+
+
 def _hash(raw: dict[str, Any]) -> str:
     encoded = json.dumps(
         raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
@@ -132,7 +207,7 @@ def _hash(raw: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _lock_command(session: Session, command_id: UUID) -> None:
+def lock_private_command(session: Session, command_id: UUID) -> None:
     if session.get_bind().dialect.name != "postgresql":
         raise CommitGateRejected("private commit-gate storage requires PostgreSQL")
     # Namespace + UUID, not owner, prevents alternate-owner claims bypassing the lock.
@@ -145,11 +220,14 @@ def _lock_command(session: Session, command_id: UUID) -> None:
     session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
 
+_lock_command = lock_private_command
+
+
 @contextmanager
 def _storage_transaction(session: Session, command_id: UUID) -> Iterator[None]:
     try:
         with session.begin_nested():
-            _lock_command(session, command_id)
+            lock_private_command(session, command_id)
             yield
     except IntegrityError:
         # Unique delivery/operation collisions cannot leak driver parameters or
@@ -171,7 +249,14 @@ def _flush_private_storage(session: Session) -> None:
 
 
 def _bound_row(
-    row: PrivateCommitStage, *, owner: UUID, job: UUID, fence: str, epoch: int, digest: str
+    row: PrivateCommitStage,
+    *,
+    owner: UUID,
+    job: UUID,
+    fence: str,
+    epoch: int,
+    digest: str,
+    stage_kind: Literal["PRIVATE_ONLY", "COLLECTION"] | None = None,
 ) -> None:
     if (
         row.owner_ref != owner
@@ -179,6 +264,7 @@ def _bound_row(
         or row.execution_fence != fence
         or row.owner_deletion_epoch != str(epoch)
         or row.result_digest != digest
+        or (stage_kind is not None and row.stage_kind != stage_kind)
     ):
         raise CommitGateRejected("private commit-gate binding mismatch")
 
@@ -200,6 +286,7 @@ def stage_private_result(
     *,
     message_id: UUID,
     occurred_at: datetime,
+    stage_kind: Literal["PRIVATE_ONLY", "COLLECTION"] = "PRIVATE_ONLY",
 ) -> StagedResultProposal:
     """Store an invisible result and submission together, without committing."""
     try:
@@ -226,6 +313,7 @@ def stage_private_result(
                 fence=command.execution_fence,
                 epoch=command.owner_deletion_epoch,
                 digest=proposal.result_digest,
+                stage_kind=stage_kind,
             )
             if row.state in {"ABORTED", "PURGED"}:
                 raise CommitGateRejected("private staged-result command is terminal")
@@ -254,6 +342,7 @@ def stage_private_result(
                 operation_revision="0",
                 max_purge_epoch=str(command.owner_deletion_epoch),
                 state="STAGED",
+                stage_kind=stage_kind,
                 result_payload=proposal.result.model_dump(mode="json"),
             )
         )
@@ -276,6 +365,7 @@ def apply_commit_gate(
     *,
     ack_message_id: UUID,
     occurred_at: datetime,
+    missing_stage_kind: Literal["PRIVATE_ONLY", "COLLECTION"] = "PRIVATE_ONLY",
 ) -> CommitGateAckProposal:
     """Apply binding/state/revision and persist the exact ACK in the same transaction."""
     try:
@@ -341,11 +431,15 @@ def apply_commit_gate(
                 operation_revision="0",
                 max_purge_epoch=str(gate.owner_deletion_epoch),
                 state="ABORTED",
+                stage_kind=missing_stage_kind,
                 result_payload=None,
             )
             session.add(row)
         elif gate.operation_revision <= int(row.operation_revision):
             raise CommitGateRejected("private commit-gate stale revision")
+        staged: PrivateStagedOutbox | None = None
+        if gate.action in {"ABORT", "PURGE"}:
+            staged = _prepare_staged_outbox_for_terminal(session, gate.command_id)
         if gate.action == "PREPARE":
             if row.state != "STAGED":
                 raise CommitGateRejected("private commit-gate PREPARE requires STAGED")
@@ -371,9 +465,6 @@ def apply_commit_gate(
         row.operation_id = gate.operation_id
         row.operation_revision = str(gate.operation_revision)
         if gate.action in {"ABORT", "PURGE"}:
-            staged = session.scalar(
-                select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == gate.command_id)
-            )
             if staged is not None:
                 staged.payload = None
         _flush_private_storage(session)
