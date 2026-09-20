@@ -65,22 +65,73 @@ jobs:
           persist-credentials: false
       - name: Build pinned container without publishing
         run: docker build --build-arg W4_SOURCE_SHA="$GITHUB_SHA" -f deploy/question-core/Dockerfile -t w4-ct12-ci .
-      - name: Verify entrypoint and persistent store across two containers
+      - name: Verify production Compose mounts and two container starts
         shell: bash
         run: |
           set -euo pipefail
-          docker volume create w4-ct12-ci-outbox
-          trap 'docker volume rm w4-ct12-ci-outbox' EXIT
           mkdir -p output/ci/container
+          docker compose version > output/ci/container/compose-version.txt
+          fixture_dir=$(mktemp -d)
+          export W4_IMAGE_REF=$(docker image inspect --format '{{.Id}}' w4-ct12-ci)
+          export W4_RUNTIME_ENV_FILE="$fixture_dir/runtime.env"
+          export W4_CT12_PLAN_DIR="$PWD/samples/question-core-w1-context-20260919"
+          export W4_AWS_SESSION_DIR="$fixture_dir/aws"
+          export W4_CI_NAME="w4-ct12-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir "$W4_AWS_SESSION_DIR"
+          chmod 755 "$fixture_dir" "$W4_AWS_SESSION_DIR"
+          printf '%s\n' 'W1_W4_CONTEXT_BEARER=SYNTHETIC-CI-NOT-A-SECRET' 'W4_SQS_SEND_ENABLED=false' > "$W4_RUNTIME_ENV_FILE"
+          # CI uses the immutable local image ID, not a published ECR reference.
+          # Only registry metadata and resource names differ; tmpfs stays in the production file.
+          cat > "$fixture_dir/override.yaml" <<'YAML'
+          services:
+            w4-question-core:
+              environment:
+                W4_IMAGE_REF: !reset null
+          networks:
+            worker:
+              name: ${W4_CI_NAME}
+          volumes:
+            w4-outbox:
+              name: ${W4_CI_NAME}-outbox
+          YAML
+          compose=(docker compose -p "$W4_CI_NAME" -f deploy/question-core/compose.yaml -f "$fixture_dir/override.yaml")
+          docker network create --internal "$W4_CI_NAME"
+          cleanup() {
+            "${compose[@]}" down --volumes --remove-orphans
+            docker network rm "$W4_CI_NAME"
+          }
+          trap cleanup EXIT
+          "${compose[@]}" config --format json > "$fixture_dir/config.json"
+          python3 - "$fixture_dir/config.json" <<'PY'
+          import json, sys
+          config = json.load(open(sys.argv[1]))
+          service = config['services']['w4-question-core']
+          assert service['tmpfs'] == ['/tmp:rw,noexec,nosuid,nodev,size=16m']
+          assert 'W4_IMAGE_REF' not in service['environment']
+          assert service['read_only'] and service['user'] == '10001:10001'
+          assert not service.get('ports')
+          print('production Compose mount configuration verified')
+          PY
+          # Prove the former unquoted scalar fails with this same Compose harness.
+          python3 - "$fixture_dir/before.yaml" <<'PY'
+          from pathlib import Path
+          import sys
+          fixed = Path('deploy/question-core/compose.yaml').read_text()
+          before = fixed.replace('tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m"]',
+                                 'tmpfs: [/tmp:rw,noexec,nosuid,nodev,size=16m]')
+          assert before != fixed
+          Path(sys.argv[1]).write_text(before)
+          PY
+          if docker compose -p "$W4_CI_NAME" -f "$fixture_dir/before.yaml" -f "$fixture_dir/override.yaml" run --rm --no-deps --pull never w4-question-core check > output/ci/container/before-fix.log 2>&1; then
+            echo 'Expected the original tmpfs configuration to fail' >&2
+            exit 1
+          fi
+          grep -Eq "mount path.*absolute|invalid mount" output/ci/container/before-fix.log
           for attempt in 1 2; do
-            docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
-              --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
-              -e W1_W4_CONTEXT_BEARER=SYNTHETIC-CI-NOT-A-SECRET \
-              -v "$PWD/samples/question-core-w1-context-20260919:/run/w4-plan:ro" \
-              -v w4-ct12-ci-outbox:/var/lib/w4 w4-ct12-ci check \
+            "${compose[@]}" run --rm --no-deps --pull never w4-question-core check \
               | tee "output/ci/container/check-$attempt.json"
           done
-          docker image inspect --format '{{.Id}}' w4-ct12-ci > output/ci/container/local-image-id.txt
+          printf '%s\n' "$W4_IMAGE_REF" > output/ci/container/local-image-id.txt
       - name: Retain container smoke evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f

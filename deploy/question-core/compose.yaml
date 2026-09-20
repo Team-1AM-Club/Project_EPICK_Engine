@@ -10,7 +10,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 64
-    tmpfs: [/tmp:rw,noexec,nosuid,nodev,size=16m]
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m"]
     env_file:
       - ${W4_RUNTIME_ENV_FILE:?Set W4-only root-owned env file}
     environment:

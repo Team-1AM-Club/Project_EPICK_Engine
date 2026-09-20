@@ -1,3 +1,5 @@
+> 최신 상태: [실제 CT-12 결과 수용·Compose 보정 r6](docs/w4-ct12-result-acceptance-2026-09-20.md). 실제 W4→W1 PASS는 W1 보고 기준이며 W2 확인·staging teardown은 대기 중입니다.
+
 > 최신 W1 연결 작업: [HTTP context·runtime 인계 r5](docs/w4-http-runtime-handoff-2026-09-20.md) · [staging 실행 안내](docs/w4-http-runtime-deployment-2026-09-20.md). REAL은 비활성 상태이며 실제 AWS/공동 CT-12는 아직 미실행입니다.
 
 # Project_EPICK_Engine

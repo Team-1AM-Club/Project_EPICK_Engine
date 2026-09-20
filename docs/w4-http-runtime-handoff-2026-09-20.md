@@ -1,3 +1,5 @@
+> 후속 결과: [r6 회신](w4-ct12-result-acceptance-2026-09-20.md). 아래는 실제 실행 보고 수령 전 r5 기록입니다. C1 구현 수정과 actual W4→W1 실행 PASS가 보고됐습니다.
+
 # W4 → W1 HTTP Context·실행 구성 인계 · 2026-09-20 r5
 
 새 W1 기준: `deda25c62a762e3f7f6ea5273c93a7e6a18c6412`.

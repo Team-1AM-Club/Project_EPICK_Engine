@@ -1,3 +1,5 @@
+> 최신 상태: [실제 CT-12 결과 수용·Compose 보정 r6](docs/w4-ct12-result-acceptance-2026-09-20.md). 실제 W4→W1 PASS는 W1 보고 기준이며 W2 확인·staging teardown은 대기 중입니다.
+
 # W4 Question Core runtime source · 2026-09-20 r5
 
 [W1 인계 회신](docs/w4-http-runtime-handoff-2026-09-20.md) · [실행 안내](docs/w4-http-runtime-deployment-2026-09-20.md).
