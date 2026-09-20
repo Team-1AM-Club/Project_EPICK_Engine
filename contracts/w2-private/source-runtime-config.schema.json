@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://epick.example/contracts/w2-private/source-runtime-config.schema.json",
+  "title": "W2 Source Runtime Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "claim_lease_seconds", "sources"],
+  "properties": {
+    "schema_version": {
+      "const": "w2.source-runtime-config.v1"
+    },
+    "claim_lease_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sources": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "format": "uuid"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/source"
+      }
+    }
+  },
+  "$defs": {
+    "permission": {
+      "type": "string",
+      "enum": ["allowed", "denied", "unknown"]
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "site_concurrency",
+        "global_concurrency",
+        "source_ttl_seconds",
+        "max_response_bytes",
+        "max_decompressed_bytes",
+        "connect_timeout_seconds",
+        "read_timeout_seconds",
+        "max_redirects",
+        "general_retry_limit",
+        "retention_days"
+      ],
+      "properties": {
+        "site_concurrency": {"$ref": "#/$defs/positiveInteger"},
+        "global_concurrency": {"$ref": "#/$defs/positiveInteger"},
+        "source_ttl_seconds": {"$ref": "#/$defs/positiveInteger"},
+        "max_response_bytes": {"$ref": "#/$defs/positiveInteger"},
+        "max_decompressed_bytes": {"$ref": "#/$defs/positiveInteger"},
+        "connect_timeout_seconds": {"$ref": "#/$defs/positiveNumber"},
+        "read_timeout_seconds": {"$ref": "#/$defs/positiveNumber"},
+        "max_redirects": {"$ref": "#/$defs/positiveInteger"},
+        "general_retry_limit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retention_days": {"$ref": "#/$defs/positiveInteger"}
+      }
+    },
+    "redirectRobotsPermission": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "string", "minLength": 1},
+        {"$ref": "#/$defs/permission"}
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_revision",
+        "robots_permission",
+        "result_version",
+        "language",
+        "redirect_robots_permissions",
+        "limits"
+      ],
+      "properties": {
+        "policy_revision": {"$ref": "#/$defs/positiveInteger"},
+        "robots_permission": {"$ref": "#/$defs/permission"},
+        "result_version": {"$ref": "#/$defs/positiveInteger"},
+        "language": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        },
+        "redirect_robots_permissions": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/redirectRobotsPermission"}
+        },
+        "limits": {"$ref": "#/$defs/limits"}
+      }
+    }
+  }
+}
