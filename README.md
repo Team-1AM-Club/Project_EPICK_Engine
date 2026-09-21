@@ -83,7 +83,8 @@ codec은 HTTP/queue/DB나 기존 worker 실행·commit 권한 경로에 연결�
 `continue_limited` action의 W2 runtime 불일치는 snapshot에서 수정하지 않습니다.
 정책 판정 전 실패의 `policy_revision=null`도 현재 W2에서는 유효하지만 pinned result Schema는
 거부하므로, 실제 연결 전 W1 정본과 정렬해야 하는 별도 호환성 Gate입니다.
-- W3의 `w3-restriction/0.1-draft`는 로컬 검증용 **후보 계약**입니다. W2와 wire-compatible하다고 확정되지 않았으므로, 승인된 versioned adapter·consumer·ACK가 준비되기 전 W2가 직접 publish하거나 W3가 직접 consume하지 않습니다.
+- W3 C-01 `0.2-candidate/r2`를 위한 W2 versioned adapter와 HTTP publisher는 `source_collection/w3_public_transport.py`에 있습니다. 내부 `SourceEvent`를 그대로 송신하지 않고 W1 outer envelope `1.0`과 W2 payload `w2.source.v1`로 변환합니다. 제한 변경은 저장과 같은 transaction에서 공용 outbox에 기록하며 `source_collection/w3_outbox_operator.py`가 W3의 정확한 `receipt=COMMITTED`와 event ID를 확인한 뒤에만 전달 완료로 표시합니다. 이 receipt는 W3 index ACK가 아닙니다. 실제 W3 process·배포 환경에서의 공동 E2E와 W1 운영 연결은 아직 별도 Gate입니다.
+- W3의 `SourceAuthority.is_registered` 입력은 W2의 별도 내부 `GET /internal/v1/sources/{source_id}/authority`에서 제공합니다. 등록 여부는 W2 `sources` PK의 존재로만 판정하고, DB 장애는 미등록(`false`)이 아닌 `503`입니다. `source_collection/source_authority_operator.py:create_app`이 W2 DB와 주입된 `EPICK_W2_SOURCE_AUTHORITY_TOKEN`을 연결합니다. W1은 이 내부 경로의 network/TLS·secret 주입·배포를 담당하며 공개 owner API로 대체하지 않습니다.
 - W4의 public input에는 owner/user, private Job·Checkpoint correlation, 원문 Source body, credential, model key를 넣지 않습니다. 민감한 private lifecycle은 W1 경계에서 관리합니다.
 
 ## 🛠️ 기술 스택
@@ -174,7 +175,7 @@ rtk proxy .\.venv\Scripts\python.exe -m mypy src
 rtk proxy docker compose -f compose.test.yaml down
 ```
 
-현재 이 저장소에는 독립 실행 가능한 `epick_engine.app:app` 또는 Celery runtime entrypoint가 없습니다. Uvicorn·Celery 실행은 W1의 Platform authority, private Job lifecycle, Linux 통합 환경이 제공된 뒤의 Gate이며, 작동하는 명령처럼 문서화하지 않습니다.
+현재 이 저장소에는 전체 서비스용 `epick_engine.app:app` 또는 Celery runtime entrypoint가 없습니다. 위 SourceAuthority 전용 ASGI factory와 일회성 W3 outbox operator는 존재하지만, 상시 실행·TLS 경계·배포·실제 W3 접속은 W1의 Platform authority와 통합 환경이 제공된 뒤의 Gate입니다.
 
 ## 🧪 검증 원칙
 
