@@ -4,7 +4,7 @@
 
 ## 고정 대상과 실행 경계
 
-- W2 제품 코드: `c27e6f318080b2a382aa93833bf3de3d87a1cb2a`; W3: `0c4f01f9537a3129c976fae5e63111a7982c5da6`.
+- W2 제품 코드: `7523d757d59ed0e28c9102ebf456140e76e2c493`; W3: `0c4f01f9537a3129c976fae5e63111a7982c5da6`.
 - W3는 위 SHA의 분리 checkout, W2는 승인된 loopback PostgreSQL 테스트 DB 안의 실행별 임시 schema와 Alembic upgrade, W3는 실행별 임시 SQLite DB를 사용했다. 입력은 W3의 공개 합성 fixture 및 추가 합성 event다. 검증 종료 시 임시 schema·DB·프로세스를 정리했다.
 - `scripts/verify_w2_w3_postgres_http.py`를 위 두 SHA와 `EPICK_TEST_DATABASE_APPROVED=1`, 승인된 `EPICK_TEST_DATABASE_URL`로 실행해 exit 0 및 `status=PASS`를 받았다. 결과 파일에는 DB URL, bearer token, Source 원문, raw HTTP response body를 넣지 않았다.
 
@@ -13,7 +13,7 @@
 | Gate | 실제 확인 결과 |
 | --- | --- |
 | replay | 별도 W3 DB에서 revision 7만 먼저 받아 `event_cursor=0`, `required_event_cursor=7`, `EVENT_GAP`을 확인했다. W2 복구 operator 실행 후 `event_cursor=7`, `restriction_revision=2`; W2 outbox delivery state는 전후 동일했다. |
-| 명시적 snapshot | 또 다른 W3 DB에서 `H=3`, `R=2` snapshot 적용. 직후 `history_complete=false`, `index_ack=false`; W3 operator index endpoint에서 재색인한 뒤에만 `index_ack=true`. W2 outbox delivery state는 동일했다. |
+| 명시적 snapshot 재전송 | 또 다른 W3 DB에서 같은 W2 Source/history로 `H=3`, `R=2` snapshot을 연속 두 번 명시적으로 POST했다. 두 번째도 `SNAPSHOT_APPLIED`(충돌 아님)였고, 재색인 전 W3 status는 처리 카운터 `generation`만 증가했다. 나머지 모든 status 필드, 특히 `H=3`, `R=2`, `history_complete=false`, `index_ack=false`, `reason=INDEX_PENDING`와 W2 outbox delivery state가 동일했다. W3 operator index endpoint에서 재색인한 뒤에만 `index_ack=true`. |
 | 불변 충돌 | 이미 수락된 W3 event와 동일 identity/revision의 다른 fact를 주입해 W3 `CONFLICT`를 확인했다. 재실행한 W2 replay는 `W3_RECOVERY_FAILED`로 실패 종료하고 W2 outbox를 변경하지 않았다. |
 | Source 미등록 | 동일한 미등록 UUID에 대해 실제 W2 SourceAuthority가 `registered=false`를 반환했다. W2 operator 사전검사도 실패했다. 별도로 고정 W3의 `events`·`replay`·`snapshot`·`index` 네 HTTP 경로에 유효한 합성 요청을 각각 보내 모두 HTTP 422 `SOURCE_NOT_REGISTERED`와 `index_ack=false`를 받았다. 각 요청 전후 W3 status 전체가 동일해 cursor 0·index ACK false를 유지했다. |
 | SourceAuthority 장애 | Authority 연결이 불가능한 별도 W3 DB에서 replay가 실패 종료했고 cursor 0 및 index ACK false를 유지했다. |
@@ -22,8 +22,8 @@
 
 ## 코드 검증과 남은 Gate
 
-- 신규 복구 관련 unit 4개 파일: **95 passed**. PostgreSQL 통합 2개 파일(`test_w3_recovery_store.py`, `test_source_outbox.py`): **21 passed**. Ruff check 통과.
-- 전체 W2 pytest는 **1780 passed, 14 failed, 1 skipped, 4 warnings**였다. 실패 14건은 기존 `test_private_deletion.py` 6건과 `test_rendering_safety.py` 8건이며 신규 복구 테스트 실패는 없었다. 전체 suite green으로 표시하지 않는다.
+- 신규 복구 관련 unit 4개 파일: **95 passed**. PostgreSQL 통합 2개 파일(`test_w3_recovery_store.py`, `test_source_outbox.py`): **22 passed**. Ruff check·format check 통과.
+- 전체 W2 pytest는 **1781 passed, 14 failed, 1 skipped, 4 warnings**였다. 실패 14건은 기존 `test_private_deletion.py` 6건과 `test_rendering_safety.py` 8건이며 신규 복구 테스트 실패는 없었다. 전체 suite green으로 표시하지 않는다.
 - 실제 채용공고 Source 수집 → W2 영속화/outbox → W3 전달은 이번 합성 Gate에 포함되지 않는다. G-07 보존기간·pruning·`F>0`, W1 배포/IAM/SQS/운영 자격증명·모니터링, T067–T069 전체 완료도 보류다.
 
 재실행·실패 처리 방법은 [복구 operator 인계](w2-w3-recovery-operator.md)를 따른다. W3 담당자의 회신은 프로젝트 `.agents/docs/reply_260921/w2-w3-local-e2e-contract-response-2026-09-21-v2.md`이며, W3 SHA 및 미완료 Gate 판정은 변경하지 않았다.

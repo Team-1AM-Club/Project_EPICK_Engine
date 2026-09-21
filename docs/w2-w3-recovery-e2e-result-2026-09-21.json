@@ -1,8 +1,8 @@
 {
-  "verified_at_utc": "2026-09-21T13:41:31Z",
+  "verified_at_utc": "2026-09-21T14:37:59Z",
   "scope": "synthetic isolated PostgreSQL outbox to pinned W3 C-01 HTTP",
   "status": "PASS_WITH_OPEN_GATES",
-  "w2_product_code_sha": "c27e6f318080b2a382aa93833bf3de3d87a1cb2a",
+  "w2_product_code_sha": "7523d757d59ed0e28c9102ebf456140e76e2c493",
   "w3_sha": "0c4f01f9537a3129c976fae5e63111a7982c5da6",
   "database": {
     "kind": "approved isolated loopback PostgreSQL",
@@ -22,6 +22,18 @@
       "restriction_revision": 2,
       "history_complete_after_apply": false,
       "index_ack_after_apply": false,
+      "repeated_explicit_post": {
+        "outcome": "SNAPSHOT_APPLIED",
+        "same_w2_source_and_w3_database": true,
+        "event_cursor": 3,
+        "restriction_revision": 2,
+        "history_complete": false,
+        "index_ack": false,
+        "reason": "INDEX_PENDING",
+        "status_unchanged_except_generation": true,
+        "generation_changed": true,
+        "w2_outbox_delivery_states_unchanged": true
+      },
       "index_ack_after_explicit_reindex": true,
       "w2_outbox_delivery_states_unchanged": true
     },
@@ -42,11 +54,12 @@
   },
   "focused_tests": {
     "unit": "95 passed",
-    "postgresql_integration": "21 passed",
-    "ruff_check": "PASS"
+    "postgresql_integration": "22 passed",
+    "ruff_check": "PASS",
+    "ruff_format_check": "PASS"
   },
   "full_w2_suite": {
-    "result": "1780 passed, 14 failed, 1 skipped, 4 warnings",
+    "result": "1781 passed, 14 failed, 1 skipped, 4 warnings",
     "known_failure_groups": {
       "test_private_deletion.py": 6,
       "test_rendering_safety.py": 8

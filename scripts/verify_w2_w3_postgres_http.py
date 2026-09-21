@@ -736,6 +736,23 @@ def main() -> int:
             assert snapshot_status["history_complete"] is False
             assert snapshot_status["index_ack"] is False
             assert snapshot_status["reason"] == "INDEX_PENDING"
+            repeat_snapshot_code, repeat_snapshot_result = _recovery_worker(
+                snapshot_env,
+                "--source-id",
+                str(index_source_id),
+                "--mode",
+                "snapshot",
+            )
+            assert repeat_snapshot_code == 0 and repeat_snapshot_result == {
+                "status": "SNAPSHOT_APPLIED",
+                "source_id": str(index_source_id),
+                "event_cursor": 3,
+            }
+            repeat_snapshot_status = _get_json(snapshot_status_url, token=operator_token)
+            assert {
+                key: value for key, value in repeat_snapshot_status.items() if key != "generation"
+            } == {key: value for key, value in snapshot_status.items() if key != "generation"}
+            assert _states(session_factory) == states_before_recovery
             snapshot_index = _post_json(
                 f"http://127.0.0.1:{snapshot_port}/c01/v1/index",
                 token=operator_token,
@@ -923,6 +940,12 @@ def main() -> int:
                         "snapshot_recovery_cursor_3_restriction_2": True,
                         "snapshot_history_complete_after_apply": False,
                         "snapshot_index_ack_after_apply": False,
+                        "repeated_explicit_snapshot_applied": True,
+                        "repeated_explicit_snapshot_status_unchanged_except_generation": True,
+                        "repeated_explicit_snapshot_generation_changed": (
+                            repeat_snapshot_status["generation"] != snapshot_status["generation"]
+                        ),
+                        "repeated_explicit_snapshot_outbox_states_unchanged": True,
                         "snapshot_index_ack_after_reindex": True,
                         "immutable_conflict_fail_closed": True,
                         "unregistered_source_w2_authority_false": True,
