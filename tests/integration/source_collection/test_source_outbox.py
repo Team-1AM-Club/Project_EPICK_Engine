@@ -127,6 +127,30 @@ def _observation_event(
     )
 
 
+def _restriction_event(source: Source, *, aggregate_revision: int) -> SourceEvent:
+    return SourceEvent.model_validate(
+        {
+            "event_id": uuid4(),
+            "event_type": "source.restriction.changed",
+            "schema_version": "w2.source.v1",
+            "aggregate_id": source.source_id,
+            "aggregate_revision": aggregate_revision,
+            "occurred_at": NOW,
+            "payload": {
+                "restriction_id": uuid4(),
+                "source_id": source.source_id,
+                "source_version_id": None,
+                "restriction_revision": 1,
+                "restriction_status": "active",
+                "accuracy_status": "error_confirmed",
+                "reason_code": "CONFIRMED_ERROR",
+                "changed_at": NOW,
+                "replacement_ref": None,
+            },
+        }
+    )
+
+
 def _unknown_date_payload() -> dict[str, object]:
     return {
         "status": "unknown",
@@ -291,6 +315,23 @@ def test_committed_pending_event_is_published_then_acknowledged_once(
 
     assert worker.deliver_pending(limit=10) == 0
     assert publisher.events == [source_event]
+
+
+def test_restriction_event_is_reconstructed_delivered_and_replayable(
+    session_factory: sessionmaker[Session],
+) -> None:
+    source = _seed_source(session_factory)
+    source_event = _restriction_event(source, aggregate_revision=1)
+    _seed_outbox(session_factory, source_event)
+    publisher = RecordingPublisher()
+    worker = _worker(session_factory, publisher)
+
+    assert worker.deliver_pending(limit=1) == 1
+    assert publisher.events == [source_event]
+    assert _delivery_state(session_factory, source_event.event_id) == "delivered"
+
+    worker.replay(event_id=source_event.event_id)
+    assert publisher.events == [source_event, source_event]
 
 
 def test_publisher_failure_preserves_committed_source_sql_and_pending_event(

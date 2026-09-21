@@ -30,11 +30,13 @@ from epick_engine.source_collection import (
 from epick_engine.source_collection.contracts import (
     AccuracyStatus,
     RestrictionStatus,
+    SourceObservationSnapshot,
     SourceRestrictionSnapshot,
 )
 from epick_engine.source_collection.persistence import (
     Base,
     Company,
+    OutboxEvent,
     PersistenceConflict,
     Source,
 )
@@ -185,6 +187,96 @@ def test_receipt_api_is_present() -> None:
     assert getattr(persistence, "RestrictionMutationReceipt", None) is not None
     assert getattr(persistence, "lock_source_restriction_revision", None) is not None
     assert getattr(persistence, "get_source_restriction_revision", None) is not None
+
+
+def test_restriction_mutation_commits_one_public_event_per_new_revision(
+    service: SourceRestrictionService,
+    session_factory: sessionmaker[Session],
+    create_request: RestrictionMutation,
+) -> None:
+    created = service.apply(create_request)
+    assert service.apply(create_request) == created
+
+    with session_factory() as session:
+        first_events = session.scalars(select(OutboxEvent)).all()
+    assert len(first_events) == 1
+    first = first_events[0]
+    assert first.event_type == "source.restriction.changed"
+    assert first.aggregate_id == create_request.source_id
+    assert first.aggregate_revision == 1
+    assert first.payload["restriction_revision"] == 1
+    assert first.payload["restriction_id"] == str(created.restriction_id)
+    assert first.delivery_state == "pending"
+
+    cleared = service.apply(
+        RestrictionMutation(
+            request_id=uuid4(),
+            kind="clear",
+            source_id=create_request.source_id,
+            source_version_id=None,
+            restriction_id=created.restriction_id,
+            accuracy_status=AccuracyStatus.UNVERIFIED,
+            reason_code="CORRECTION_CONFIRMED",
+            evidence_refs=("fixture:correction",),
+            changed_at=NOW,
+            replacement_ref=None,
+        )
+    )
+    with session_factory() as session:
+        events = session.scalars(select(OutboxEvent).order_by(OutboxEvent.aggregate_revision)).all()
+    revisions = [
+        (event.aggregate_revision, event.payload["restriction_revision"]) for event in events
+    ]
+    assert revisions == [
+        (1, 1),
+        (2, 2),
+    ]
+    assert events[1].payload["restriction_status"] == "cleared"
+    assert events[1].payload["restriction_id"] == str(cleared.restriction_id)
+
+
+def test_restriction_revision_remains_distinct_from_mixed_aggregate_revision(
+    service: SourceRestrictionService,
+    session_factory: sessionmaker[Session],
+    create_request: RestrictionMutation,
+) -> None:
+    observation = SourceObservationSnapshot(
+        observation_id=uuid4(),
+        source_id=create_request.source_id,
+        source_version_id=None,
+        policy_decision_id=None,
+        observed_at=NOW,
+        access_class="public",
+        acquisition_status="AVAILABLE",
+        http_status=200,
+        checked_url="https://receipt.example.test/source",
+        error_code=None,
+        representation="static_html",
+    )
+    with session_factory.begin() as session:
+        session.add(
+            OutboxEvent(
+                event_id=uuid4(),
+                aggregate_id=create_request.source_id,
+                aggregate_revision=1,
+                event_type="source.observation.changed",
+                schema_version="w2.source.v1",
+                payload=observation.model_dump(mode="json"),
+                occurred_at=NOW,
+                delivery_state="delivered",
+            )
+        )
+
+    stored = service.apply(create_request)
+
+    with session_factory() as session:
+        events = session.scalars(select(OutboxEvent).order_by(OutboxEvent.aggregate_revision)).all()
+    assert [(event.event_type, event.aggregate_revision) for event in events] == [
+        ("source.observation.changed", 1),
+        ("source.restriction.changed", 2),
+    ]
+    assert stored.restriction_revision == 1
+    assert events[1].payload["restriction_revision"] == 1
 
 
 def test_lock_source_revision_returns_gap_free_next_revision_and_rejects_unknown_source(
@@ -519,7 +611,7 @@ def test_create_replay_returns_original_snapshot(
         assert source.latest_observation_id is None
         assert session.scalar(select(func.count()).select_from(persistence.SourceVersion)) == 0
         assert session.scalar(select(func.count()).select_from(persistence.Evidence)) == 0
-        assert session.scalar(select(func.count()).select_from(persistence.OutboxEvent)) == 0
+        assert session.scalar(select(func.count()).select_from(persistence.OutboxEvent)) == 1
 
 
 @pytest.mark.parametrize(
@@ -832,6 +924,7 @@ def test_concurrent_same_key_create_returns_one_original_result(
     assert first.restriction_revision == 1
     with session_factory() as session:
         assert _restriction_counts(session) == (1, 1, 1)
+        assert session.scalar(select(func.count()).select_from(OutboxEvent)) == 1
 
 
 def test_concurrent_different_keys_same_source_allocate_gap_free_revisions(
@@ -853,6 +946,9 @@ def test_concurrent_different_keys_same_source_allocate_gap_free_revisions(
     assert {first.restriction_revision, second.restriction_revision} == {1, 2}
     with session_factory() as session:
         assert _restriction_counts(session) == (2, 2, 2)
+        events = session.scalars(select(OutboxEvent).order_by(OutboxEvent.aggregate_revision)).all()
+    assert [event.aggregate_revision for event in events] == [1, 2]
+    assert [event.payload["restriction_revision"] for event in events] == [1, 2]
 
 
 def test_concurrent_same_key_different_source_conflicts_before_second_source_write(

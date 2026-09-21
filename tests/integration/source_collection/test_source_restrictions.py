@@ -15,7 +15,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import Engine, create_engine, select, text
+from sqlalchemy import Engine, create_engine, func, select, text
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session, sessionmaker
 from tests.integration.source_collection.test_static_posting_slice import (
@@ -599,6 +599,18 @@ def test_restriction_events_are_immutable_public_snapshots_and_do_not_rewind_ove
     session_factory: sessionmaker[Session],
 ) -> None:
     history = _collect_historical_source(session_factory)
+    with session_factory() as session:
+        prior_aggregate_revision = session.scalar(
+            select(func.coalesce(func.max(OutboxEvent.aggregate_revision), 0)).where(
+                OutboxEvent.aggregate_id == history.source_id
+            )
+        )
+    assert prior_aggregate_revision is not None
+    initial_worker = SourceOutboxDeliveryWorker(
+        publisher=_RecordingPublisher(events=[]),
+        store=SqlAlchemyOutboxDeliveryStore(session_factory=session_factory),
+    )
+    assert initial_worker.deliver_pending(limit=10) == 1
     restriction_id = uuid4()
     revision_one = _restriction_snapshot(
         history,
@@ -628,11 +640,11 @@ def test_restriction_events_are_immutable_public_snapshots_and_do_not_rewind_ove
         (
             SourceEventType.RESTRICTION_CHANGED.value,
             history.source_id,
-            snapshot.restriction_revision,
+            prior_aggregate_revision + offset,
             "w2.source.v1",
             snapshot.model_dump(mode="json"),
         )
-        for snapshot in (revision_one, revision_two, revision_three)
+        for offset, snapshot in enumerate((revision_one, revision_two, revision_three), start=1)
     ]
 
     with session_factory.begin() as session:

@@ -420,10 +420,11 @@ def test_source_wide_revision_sequence_keeps_latest_state_per_stable_identity(
             == before_versions
         )
         assert session.scalars(select(Evidence.evidence_id)).all() == before_evidence
-        assert (
-            session.scalars(select(OutboxEvent.event_id).order_by(OutboxEvent.event_id)).all()
-            == before_outbox
-        )
+        after_outbox = session.scalars(
+            select(OutboxEvent.event_id).order_by(OutboxEvent.event_id)
+        ).all()
+        assert set(before_outbox).issubset(after_outbox)
+        assert len(after_outbox) == len(before_outbox) + len(sequence)
         assert session.get(Source, scope.source_id).current_source_version_id == before_current
 
 

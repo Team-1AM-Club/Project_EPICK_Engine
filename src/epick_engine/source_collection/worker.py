@@ -628,6 +628,7 @@ _DELIVERABLE_EVENT_TYPES = frozenset(
     {
         SourceEventType.VERSION_AVAILABLE,
         SourceEventType.OBSERVATION_CHANGED,
+        SourceEventType.RESTRICTION_CHANGED,
     }
 )
 

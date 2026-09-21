@@ -54,6 +54,7 @@ from epick_engine.source_collection.contracts import (
     RetentionScope,
     SourceEnvelope,
     SourceEvent,
+    SourceEventType,
     SourceObservationSnapshot,
     SourceRestrictionSnapshot,
     SourceType,
@@ -1558,7 +1559,7 @@ def record_source_restriction(
     snapshot: SourceRestrictionSnapshot,
     evidence_refs: Sequence[str] = (),
 ) -> SourceRestrictionSnapshot:
-    """Persist one storage-only revision in the caller-owned transaction."""
+    """Persist a restriction revision and its public event in one transaction."""
 
     _require_aware(snapshot.changed_at, field="restriction changed_at")
     source = session.scalar(
@@ -1649,7 +1650,9 @@ def record_source_restriction(
     )
     session.add(created)
     session.flush()
-    return _restriction_snapshot(created, identity)
+    stored = _restriction_snapshot(created, identity)
+    record_source_restriction_public_event(session, snapshot=stored)
+    return stored
 
 
 def get_current_source_restriction(
@@ -2971,6 +2974,55 @@ def _resolve_outbox_event(
     session.add(created)
     session.flush()
     return created
+
+
+def record_source_restriction_public_event(
+    session: Session,
+    *,
+    snapshot: SourceRestrictionSnapshot,
+) -> SourceEvent:
+    """Atomically append the public event for one newly stored restriction revision.
+
+    The Source row serializes this allocation with collection commits and other
+    restriction mutations. The caller owns the transaction and must not publish
+    to W3 until it has committed.
+    """
+
+    source = session.scalar(
+        select(Source)
+        .where(Source.source_id == snapshot.source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        source is None
+        or get_source_restriction_revision(
+            session,
+            restriction_id=snapshot.restriction_id,
+            restriction_revision=snapshot.restriction_revision,
+        )
+        != snapshot
+    ):
+        raise PersistenceConflict("restriction event requires a stored immutable revision")
+    next_revision = (
+        session.scalar(
+            select(func.max(OutboxEvent.aggregate_revision)).where(
+                OutboxEvent.aggregate_id == snapshot.source_id
+            )
+        )
+        or 0
+    ) + 1
+    event = SourceEvent(
+        event_id=uuid4(),
+        event_type=SourceEventType.RESTRICTION_CHANGED,
+        schema_version="w2.source.v1",
+        aggregate_id=snapshot.source_id,
+        aggregate_revision=next_revision,
+        occurred_at=snapshot.changed_at,
+        payload=snapshot,
+    )
+    _resolve_outbox_event(session, event, aggregate_revision=next_revision)
+    return event
 
 
 def _persist_canonical_entities(
