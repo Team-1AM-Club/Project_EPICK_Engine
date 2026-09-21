@@ -4,6 +4,7 @@ Only synthetic acceptance runs are enabled. This adapter does not implement the
 team's PostgreSQL repository or declare the draft status policy approved.
 """
 
+import os
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Protocol
@@ -122,7 +123,11 @@ def publication_for(binding, result):
     selector = request["question"]
     if any(result["question_scope"][key] != value for key, value in selector.items()):
         raise BridgeError("W1_RESULT_QUESTION_MISMATCH")
-    if any(result["inference"][stage].get("mode") != "LLM" for stage in ("extraction", "judgment")):
+    inference_modes = {result["inference"][stage].get("mode")
+                       for stage in ("extraction", "judgment")}
+    synthetic_acceptance = (inference_modes == {"SIMULATED_LLM"}
+                            and os.environ.get("W4_RECOMMENDATION_SYNTHETIC_ACCEPTANCE") == "YES")
+    if inference_modes != {"LLM"} and not synthetic_acceptance:
         raise BridgeError("W1_ACTUAL_INFERENCE_REQUIRED")
     result_version = "w4-" + content_hash({"run_id": str(binding.run_id),
         "question_version_id": str(binding.question_version_id), "context_sha256": binding.context_sha256,
@@ -145,10 +150,14 @@ def publication_for(binding, result):
             "validation_status": "LIMITED", "result_version": result_version, "internal_rank": number})
     if len(candidates) > request["top_k"]:
         raise BridgeError("W1_RESULT_LIMIT_EXCEEDED")
+    limitations = ["W4_SYNTHETIC_ACCEPTANCE_ONLY", "W4_POLICY_REVIEW_PENDING",
+                   "W4_MODEL_NOT_PRODUCTION_SELECTED"]
+    if synthetic_acceptance:
+        limitations.append("W4_FIXED_SYNTHETIC_CLIENT_NO_NETWORK")
     return {"schema_version": "w4-w1-publication/0.1-draft", "run_id": str(binding.run_id),
         "result_origin": "ENGINE", "input_data_kind": "SYNTHETIC", "run_status": "LIMITED",
         "result_status": "LIMITED", "limited_analysis": True,
-        "limitations": ["W4_SYNTHETIC_ACCEPTANCE_ONLY", "W4_POLICY_REVIEW_PENDING", "W4_MODEL_NOT_PRODUCTION_SELECTED"],
+        "limitations": limitations,
         "result_version": result_version, "candidates": candidates, "full_result": result,
         "source_dependencies": deepcopy(result["company_context"]["dependencies"])}
 

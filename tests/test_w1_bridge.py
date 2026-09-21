@@ -1,6 +1,7 @@
 from copy import deepcopy
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -89,6 +90,21 @@ class W1BridgeTests(unittest.TestCase):
         self.result["inference"]["judgment"]["mode"] = "SIMULATED_LLM"
         with self.assertRaisesRegex(BridgeError, "ACTUAL_INFERENCE_REQUIRED"):
             self.execute()
+        self.assertIsNone(self.store.read_result(self.binding.owner_user_id, self.binding.run_id))
+
+    def test_both_simulated_stages_are_rejected_without_acceptance_opt_in(self):
+        for stage in ("extraction", "judgment"):
+            self.result["inference"][stage]["mode"] = "SIMULATED_LLM"
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(BridgeError, "ACTUAL_INFERENCE_REQUIRED"):
+                self.execute()
+        self.assertIsNone(self.store.read_result(self.binding.owner_user_id, self.binding.run_id))
+
+    def test_mixed_actual_and_simulated_stages_are_rejected_even_with_opt_in(self):
+        self.result["inference"]["judgment"]["mode"] = "SIMULATED_LLM"
+        with patch.dict(os.environ, {"W4_RECOMMENDATION_SYNTHETIC_ACCEPTANCE": "YES"}, clear=True):
+            with self.assertRaisesRegex(BridgeError, "ACTUAL_INFERENCE_REQUIRED"):
+                self.execute()
         self.assertIsNone(self.store.read_result(self.binding.owner_user_id, self.binding.run_id))
 
     def test_unknown_episode_or_duplicate_rank_cannot_be_saved(self):

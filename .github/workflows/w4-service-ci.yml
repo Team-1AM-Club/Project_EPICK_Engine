@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [develop]
   push:
-    branches: [develop, feat/w4-service-handoff, feat/w4-question-core-runtime]
+    branches: [develop, feat/w4-service-handoff, feat/w4-question-core-runtime, feat/w4-recommendation-runtime]
   workflow_dispatch:
 
 permissions:
@@ -138,5 +138,44 @@ jobs:
         with:
           name: w4-question-core-container-${{ github.run_id }}-${{ github.run_attempt }}
           path: output/ci/container/
+          if-no-files-found: warn
+          retention-days: 14
+
+  recommendation-container:
+    name: Recommendation container / fixed synthetic runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          version: "0.12.0"
+          enable-cache: false
+      - name: Verify recommendation dependency export matches uv.lock
+        run: |
+          uv export --locked --no-dev --extra transport --no-emit-project --output-file deploy/recommendation/requirements.lock > /dev/null
+          git diff --exit-code -- deploy/recommendation/requirements.lock
+      - name: Build recommendation image from this exact checkout
+        run: |
+          mkdir -p output/ci/recommendation-container
+          docker build --build-arg W4_SOURCE_SHA="$GITHUB_SHA" -f deploy/recommendation/Dockerfile -t w4-recommendation-ci . 2>&1 | tee output/ci/recommendation-container/build.log
+          docker image inspect w4-recommendation-ci > output/ci/recommendation-container/image-inspect.json
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' w4-recommendation-ci)" = "$GITHUB_SHA"
+      - name: Run packaged worker and W1 bridge tests without network
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+            -v "$PWD/tests:/app/tests:ro" -v "$PWD/examples:/app/examples:ro" \
+            -v "$PWD/samples:/app/samples:ro" -v "$PWD/schemas:/app/schemas:ro" \
+            w4-recommendation-ci python -m unittest discover -s tests -p 'test_w1*.py' -v \
+            2>&1 | tee output/ci/recommendation-container/runtime-tests.log
+      - name: Retain recommendation image build and smoke evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: w4-recommendation-container-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/ci/recommendation-container/
           if-no-files-found: warn
           retention-days: 14
