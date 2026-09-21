@@ -39,6 +39,7 @@ dev = [
 [project.scripts]
 epick-w2-ct15 = "epick_engine.source_collection.commit_gate_operator:main"
 epick-w2-source-runtime = "epick_engine.source_collection.source_runtime_operator:main"
+epick-w2-w3-recover = "epick_engine.source_collection.w3_recovery_operator:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
