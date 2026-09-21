@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from epick_engine.source_collection.contracts import (
@@ -91,13 +91,7 @@ class SqlAlchemyRecoveryHistoryStore:
                     restriction_revision = payload.restriction_revision
                 events.append(source_event)
 
-            snapshot_as_of = session.scalar(select(func.now()))
-            if not isinstance(snapshot_as_of, datetime) or snapshot_as_of.tzinfo is None:
-                raise W3RecoveryHistoryError("READ_FAILED")
-            as_of = max(
-                snapshot_as_of.astimezone(UTC),
-                *(source_event.occurred_at.astimezone(UTC) for source_event in events),
-            )
+            as_of = max(source_event.occurred_at.astimezone(UTC) for source_event in events)
             return RecoveryHistory(
                 source_id=source_id,
                 high_watermark=rows[-1].aggregate_revision,

@@ -30,7 +30,7 @@ W2의 이미 보존된 공용 Source outbox를 정본으로 사용해, W3 C-01�
 ## Atomic snapshot
 
 - 같은 read snapshot에서 `1..H`의 모든 유효 공용 event를 재생성한다. `versions`는 `source_version_id`별 최신 `source.version.available` event, `restrictions`는 `restriction_id`별 최신 `source.restriction.changed` event(해제 상태 포함), `observation`은 Source의 최신 `source.observation.changed` event 하나 또는 `null`이다. 각 목록은 aggregate revision 오름차순으로 직렬화한다. W3 schema의 `versions`·`restrictions` 각 최대 500건을 넘으면 불완전 snapshot을 보내지 않고 복구 한계로 실패한다.
-- `event_cursor=H`, `restriction_revision`은 Source 공용 이력 안의 최대 제한 순번(없으면 0), `complete=true`다. 제한 순번이 1부터 연속이고 aggregate revision·ID에 충돌이 없는지 검증한다. `as_of`는 read snapshot에서 확정한 시각과 포함 event의 최대 `occurred_at` 중 늦은 값으로 정해 W3의 시각 조건을 만족한다. 기존 event identity와 payload는 재작성하지 않는다.
+- `event_cursor=H`, `restriction_revision`은 Source 공용 이력 안의 최대 제한 순번(없으면 0), `complete=true`다. 제한 순번이 1부터 연속이고 aggregate revision·ID에 충돌이 없는지 검증한다. `as_of`는 동일 read snapshot에서 검증한 보존 공용 event `1..H`의 최대 `occurred_at`을 UTC로 정규화한 값이다. DB 현재 시각은 섞지 않으므로 이력이 변하지 않은 동일 `H`·`restriction_revision`의 재구성 결과는 byte-identical하며, `as_of`는 snapshot에 포함된 모든 event 시각 이상이다. 기존 event identity와 payload는 재작성하지 않는다.
 - snapshot은 W3가 보고한 현재 cursor·required cursor·restriction watermark보다 낮으면 전송하지 않는다. 구성한 payload를 read transaction 종료 후 W3 `/snapshot`에 전송하고, `SNAPSHOT_APPLIED`와 정확한 Source/cursor/watermark를 검증한다. W3가 기존에 알고 있는 불변 사실과 충돌해 `CONFLICT`를 반환하면 자동으로 덮어쓰거나 W3 DB를 지우지 않는다. 승인된 운영자 조치가 필요하다. Snapshot 수락은 `history_complete=false`와 index 폐기를 수반하므로 index ACK가 다시 true가 되었다고 주장하지 않는다.
 
 ## 실행·보안 경계

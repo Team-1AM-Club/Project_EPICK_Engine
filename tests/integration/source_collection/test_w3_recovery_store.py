@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -16,6 +17,7 @@ from epick_engine.source_collection.contracts import (
     SourceRestrictionSnapshot,
 )
 from epick_engine.source_collection.persistence import Base, Company, OutboxEvent, Source
+from epick_engine.source_collection.w3_recovery_payloads import make_snapshot
 from epick_engine.source_collection.w3_recovery_store import (
     SqlAlchemyRecoveryHistoryStore,
     W3RecoveryHistoryError,
@@ -216,6 +218,42 @@ def test_load_history_as_of_uses_an_included_future_occurred_at(
     history = _store(session_factory).load_history(source_id=source.source_id)
 
     assert history.as_of == future_occurred_at
+
+
+def test_load_history_repeated_reads_produce_the_same_snapshot_for_unchanged_history(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A fresh DB clock must not alter the snapshot at the same H and R."""
+
+    source = _seed_source(session_factory)
+    earlier = datetime(2020, 1, 1, tzinfo=UTC)
+    later = datetime(2020, 1, 2, tzinfo=UTC)
+    _seed_outbox(
+        session_factory, _observation_event(source, aggregate_revision=1, occurred_at=earlier)
+    )
+    _seed_outbox(
+        session_factory, _observation_event(source, aggregate_revision=2, occurred_at=later)
+    )
+    store = _store(session_factory)
+
+    first = store.load_history(source_id=source.source_id)
+    second = store.load_history(source_id=source.source_id)
+    first_snapshot = make_snapshot(first)
+    second_snapshot = make_snapshot(second)
+
+    assert (first.high_watermark, first.restriction_revision) == (2, 0)
+    assert (second.high_watermark, second.restriction_revision) == (2, 0)
+    assert first.as_of == second.as_of == later
+    assert first_snapshot["as_of"] == later.isoformat()
+    assert first_snapshot == second_snapshot
+    assert (
+        json.dumps(
+            first_snapshot, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode()
+        == json.dumps(
+            second_snapshot, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode()
+    )
 
 
 def test_load_history_rejects_an_unregistered_source(
