@@ -1,0 +1,51 @@
+{
+  "verified_at_utc": "2026-09-21T13:30:05Z",
+  "scope": "synthetic isolated PostgreSQL outbox to pinned W3 C-01 HTTP",
+  "status": "PASS_WITH_OPEN_GATES",
+  "w2_product_code_sha": "c27e6f318080b2a382aa93833bf3de3d87a1cb2a",
+  "w3_sha": "0c4f01f9537a3129c976fae5e63111a7982c5da6",
+  "database": {
+    "kind": "approved isolated loopback PostgreSQL",
+    "temporary_schema_and_alembic": "PASS",
+    "cleanup": "PASS"
+  },
+  "recovery": {
+    "replay_from_gap": {
+      "starting_event_cursor": 0,
+      "required_event_cursor": 7,
+      "ending_event_cursor": 7,
+      "ending_restriction_revision": 2,
+      "w2_outbox_delivery_states_unchanged": true
+    },
+    "explicit_snapshot": {
+      "event_cursor": 3,
+      "restriction_revision": 2,
+      "history_complete_after_apply": false,
+      "index_ack_after_apply": false,
+      "index_ack_after_explicit_reindex": true,
+      "w2_outbox_delivery_states_unchanged": true
+    },
+    "immutable_conflict_fail_closed": true,
+    "unregistered_source_fail_closed": true,
+    "source_authority_outage_fail_closed": true
+  },
+  "focused_tests": {
+    "unit": "95 passed",
+    "postgresql_integration": "21 passed",
+    "ruff_check": "PASS"
+  },
+  "full_w2_suite": {
+    "result": "1780 passed, 14 failed, 1 skipped, 4 warnings",
+    "known_failure_groups": {
+      "test_private_deletion.py": 6,
+      "test_rendering_safety.py": 8
+    },
+    "recovery_test_failures": 0
+  },
+  "pending_gates": [
+    "actual Source collection to persistence/outbox to W3 product path",
+    "G-07 retention/pruning and F>0",
+    "W1 deployment, IAM/SQS, credential distribution and monitoring",
+    "T067-T069 full completion"
+  ]
+}

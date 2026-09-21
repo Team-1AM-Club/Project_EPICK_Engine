@@ -27,6 +27,7 @@ from sqlalchemy.orm import sessionmaker
 
 from epick_engine.source_collection.contracts import SourceEvent
 from epick_engine.source_collection.persistence import Company, OutboxEvent, Source
+from epick_engine.source_collection.w3_public_transport import source_event_to_w3_wire
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_NAMES = (
@@ -120,6 +121,37 @@ def _worker(environment: dict[str, str], *args: str) -> tuple[int, dict[str, obj
         check=False,
     )
     return completed.returncode, json.loads(completed.stdout)
+
+
+def _recovery_worker(environment: dict[str, str], *args: str) -> tuple[int, dict[str, object]]:
+    completed = subprocess.run(
+        [sys.executable, "-m", "epick_engine.source_collection.w3_recovery_operator", *args],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    return completed.returncode, json.loads(completed.stdout)
+
+
+def _w3_command(python: Path, db_path: Path, port: int) -> list[str]:
+    return [
+        str(python),
+        "-m",
+        "w3_knowledge.c01.http",
+        "--db",
+        str(db_path),
+        "--port",
+        str(port),
+        "--restriction-scope",
+        "version",
+        "--max-ttl-seconds",
+        "300",
+        "--source-authority",
+        "w3_knowledge.c01.source_authority_http:create_source_authority",
+    ]
 
 
 def _fixtures(w3_checkout: Path) -> list[SourceEvent]:
@@ -295,6 +327,7 @@ def main() -> int:
     admin = create_engine(url, pool_pre_ping=True)
     authority: subprocess.Popen[bytes] | None = None
     w3: subprocess.Popen[bytes] | None = None
+    recovery_w3s: list[subprocess.Popen[bytes]] = []
     scoped_engine = None
     runtime_dir: tempfile.TemporaryDirectory[str] | None = None
     created = False
@@ -345,21 +378,7 @@ def main() -> int:
         runtime_dir = tempfile.TemporaryDirectory(prefix="epick-w2-w3-")
         if runtime_dir is not None:
             db_path = Path(runtime_dir.name) / "w3-c01.sqlite"
-            w3_command = [
-                str(w3_python),
-                "-m",
-                "w3_knowledge.c01.http",
-                "--db",
-                str(db_path),
-                "--port",
-                str(w3_port),
-                "--restriction-scope",
-                "version",
-                "--max-ttl-seconds",
-                "300",
-                "--source-authority",
-                "w3_knowledge.c01.source_authority_http:create_source_authority",
-            ]
+            w3_command = _w3_command(w3_python, db_path, w3_port)
             w3 = _start(w3_command, cwd=w3_checkout, environment=w3_env)
             _wait_ready(w3, f"http://127.0.0.1:{w3_port}/health")
 
@@ -629,6 +648,186 @@ def main() -> int:
             assert len(_get_json(search_url, token=operator_token)["results"]) == 1
             assert _states(session_factory) == ["delivered"] * 10
 
+            replay_port = _free_port()
+            replay_w3 = _start(
+                _w3_command(
+                    w3_python,
+                    Path(runtime_dir.name) / "w3-recovery-replay.sqlite",
+                    replay_port,
+                ),
+                cwd=w3_checkout,
+                environment=w3_env,
+            )
+            recovery_w3s.append(replay_w3)
+            _wait_ready(replay_w3, f"http://127.0.0.1:{replay_port}/health")
+            replay_status_url = (
+                f"http://127.0.0.1:{replay_port}/c01/v1/status/{events[0].aggregate_id}"
+            )
+            _post_json(
+                f"http://127.0.0.1:{replay_port}/c01/v1/events",
+                token=w2_token,
+                value=source_event_to_w3_wire(seventh),
+            )
+            replay_gap = _get_json(replay_status_url, token=w2_token)
+            assert replay_gap["event_cursor"] == 0
+            assert replay_gap["required_event_cursor"] == 7
+            assert replay_gap["reason"] == "EVENT_GAP"
+            states_before_recovery = _states(session_factory)
+            replay_env = {
+                **w2_env,
+                "EPICK_W3_EVENT_ENDPOINT": f"http://127.0.0.1:{replay_port}/c01/v1/events",
+            }
+            replay_code, replay_result = _recovery_worker(
+                replay_env,
+                "--source-id",
+                str(events[0].aggregate_id),
+                "--mode",
+                "replay",
+            )
+            assert replay_code == 0 and replay_result == {
+                "status": "REPLAYED",
+                "source_id": str(events[0].aggregate_id),
+                "event_cursor": 7,
+            }
+            replay_recovered = _get_json(replay_status_url, token=w2_token)
+            assert replay_recovered["event_cursor"] == 7
+            assert replay_recovered["required_event_cursor"] == 7
+            assert replay_recovered["restriction_revision"] == 2
+            assert _states(session_factory) == states_before_recovery
+
+            snapshot_port = _free_port()
+            snapshot_w3 = _start(
+                _w3_command(
+                    w3_python,
+                    Path(runtime_dir.name) / "w3-recovery-snapshot.sqlite",
+                    snapshot_port,
+                ),
+                cwd=w3_checkout,
+                environment=w3_env,
+            )
+            recovery_w3s.append(snapshot_w3)
+            _wait_ready(snapshot_w3, f"http://127.0.0.1:{snapshot_port}/health")
+            snapshot_status_url = (
+                f"http://127.0.0.1:{snapshot_port}/c01/v1/status/{index_source_id}"
+            )
+            snapshot_env = {
+                **w2_env,
+                "EPICK_W3_EVENT_ENDPOINT": f"http://127.0.0.1:{snapshot_port}/c01/v1/events",
+            }
+            initial_snapshot_status = _get_json(snapshot_status_url, token=w2_token)
+            assert initial_snapshot_status["event_cursor"] == 0
+            snapshot_code, snapshot_result = _recovery_worker(
+                snapshot_env,
+                "--source-id",
+                str(index_source_id),
+                "--mode",
+                "snapshot",
+            )
+            assert snapshot_code == 0 and snapshot_result == {
+                "status": "SNAPSHOT_APPLIED",
+                "source_id": str(index_source_id),
+                "event_cursor": 3,
+            }
+            snapshot_status = _get_json(snapshot_status_url, token=operator_token)
+            assert snapshot_status["event_cursor"] == 3
+            assert snapshot_status["required_event_cursor"] == 3
+            assert snapshot_status["restriction_revision"] == 2
+            assert snapshot_status["required_restriction_revision"] == 2
+            assert snapshot_status["history_complete"] is False
+            assert snapshot_status["index_ack"] is False
+            assert snapshot_status["reason"] == "INDEX_PENDING"
+            snapshot_index = _post_json(
+                f"http://127.0.0.1:{snapshot_port}/c01/v1/index",
+                token=operator_token,
+                value=_index_request(
+                    index_source_id,
+                    snapshot_status,
+                    evidence_id=evidence.evidence_id,
+                    text_excerpt=evidence.text_excerpt,
+                ),
+            )
+            assert snapshot_index["index_ack"] is True
+            assert _get_json(snapshot_status_url, token=operator_token)["index_ack"] is True
+            assert _states(session_factory) == states_before_recovery
+
+            conflicting_wire = source_event_to_w3_wire(events[0])
+            conflicting_payload = conflicting_wire["payload"]
+            assert isinstance(conflicting_payload, dict)
+            conflicting_payload["title"] = "Conflicting synthetic title"
+            try:
+                _post_json(
+                    f"http://127.0.0.1:{replay_port}/c01/v1/events",
+                    token=w2_token,
+                    value=conflicting_wire,
+                )
+            except urllib.error.HTTPError:
+                pass
+            assert _get_json(replay_status_url, token=w2_token)["reason"] == "CONFLICT"
+            conflict_code, conflict_result = _recovery_worker(
+                replay_env,
+                "--source-id",
+                str(events[0].aggregate_id),
+                "--mode",
+                "replay",
+            )
+            assert conflict_code == 1
+            assert conflict_result == {"status": "W3_RECOVERY_FAILED"}
+            assert _states(session_factory) == states_before_recovery
+
+            absent_source_id = uuid4()
+            absent_status_url = f"http://127.0.0.1:{snapshot_port}/c01/v1/status/{absent_source_id}"
+            absent_before = _get_json(absent_status_url, token=w2_token)
+            assert absent_before["reason"] == "UNKNOWN_SOURCE"
+            absent_code, absent_result = _recovery_worker(
+                snapshot_env,
+                "--source-id",
+                str(absent_source_id),
+                "--mode",
+                "replay",
+            )
+            assert absent_code == 1
+            assert absent_result == {"status": "W3_RECOVERY_FAILED"}
+            assert _get_json(absent_status_url, token=w2_token)["event_cursor"] == 0
+            assert _states(session_factory) == states_before_recovery
+
+            unavailable_authority_port = _free_port()
+            outage_w3_env = {
+                **w3_env,
+                "W3_SOURCE_AUTHORITY_ENDPOINT": (f"http://127.0.0.1:{unavailable_authority_port}"),
+            }
+            outage_port = _free_port()
+            outage_w3 = _start(
+                _w3_command(
+                    w3_python,
+                    Path(runtime_dir.name) / "w3-recovery-authority-outage.sqlite",
+                    outage_port,
+                ),
+                cwd=w3_checkout,
+                environment=outage_w3_env,
+            )
+            recovery_w3s.append(outage_w3)
+            _wait_ready(outage_w3, f"http://127.0.0.1:{outage_port}/health")
+            outage_env = {
+                **w2_env,
+                "EPICK_W3_EVENT_ENDPOINT": f"http://127.0.0.1:{outage_port}/c01/v1/events",
+            }
+            outage_code, outage_result = _recovery_worker(
+                outage_env,
+                "--source-id",
+                str(index_source_id),
+                "--mode",
+                "replay",
+            )
+            assert outage_code == 1
+            assert outage_result == {"status": "W3_RECOVERY_FAILED"}
+            outage_status = _get_json(
+                f"http://127.0.0.1:{outage_port}/c01/v1/status/{index_source_id}",
+                token=w2_token,
+            )
+            assert outage_status["event_cursor"] == 0
+            assert outage_status["index_ack"] is False
+            assert _states(session_factory) == states_before_recovery
+
             print(
                 json.dumps(
                     {
@@ -655,6 +854,15 @@ def main() -> int:
                         "w3_reason": recovered.get("reason"),
                         "replay_without_cursor_advance": True,
                         "restart_state_preserved": True,
+                        "replay_recovery_gap_to_cursor_7": True,
+                        "replay_recovery_outbox_states_unchanged": True,
+                        "snapshot_recovery_cursor_3_restriction_2": True,
+                        "snapshot_history_complete_after_apply": False,
+                        "snapshot_index_ack_after_apply": False,
+                        "snapshot_index_ack_after_reindex": True,
+                        "immutable_conflict_fail_closed": True,
+                        "unregistered_source_fail_closed": True,
+                        "source_authority_outage_fail_closed": True,
                         "fixture_type": "synthetic",
                         "retention_ttl": "300 seconds for local test only",
                     },
@@ -663,6 +871,8 @@ def main() -> int:
             )
         return 0
     finally:
+        for recovery_w3 in recovery_w3s:
+            _stop(recovery_w3)
         _stop(w3)
         _stop(authority)
         if runtime_dir is not None:
