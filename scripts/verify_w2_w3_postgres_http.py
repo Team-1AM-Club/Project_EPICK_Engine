@@ -752,6 +752,7 @@ def main() -> int:
             assert {
                 key: value for key, value in repeat_snapshot_status.items() if key != "generation"
             } == {key: value for key, value in snapshot_status.items() if key != "generation"}
+            assert repeat_snapshot_status["generation"] == snapshot_status["generation"] + 1
             assert _states(session_factory) == states_before_recovery
             snapshot_index = _post_json(
                 f"http://127.0.0.1:{snapshot_port}/c01/v1/index",
@@ -944,6 +945,9 @@ def main() -> int:
                         "repeated_explicit_snapshot_status_unchanged_except_generation": True,
                         "repeated_explicit_snapshot_generation_changed": (
                             repeat_snapshot_status["generation"] != snapshot_status["generation"]
+                        ),
+                        "repeated_explicit_snapshot_generation_delta": (
+                            repeat_snapshot_status["generation"] - snapshot_status["generation"]
                         ),
                         "repeated_explicit_snapshot_outbox_states_unchanged": True,
                         "snapshot_index_ack_after_reindex": True,

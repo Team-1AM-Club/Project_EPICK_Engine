@@ -13,7 +13,7 @@
 | Gate | 실제 확인 결과 |
 | --- | --- |
 | replay | 별도 W3 DB에서 revision 7만 먼저 받아 `event_cursor=0`, `required_event_cursor=7`, `EVENT_GAP`을 확인했다. W2 복구 operator 실행 후 `event_cursor=7`, `restriction_revision=2`; W2 outbox delivery state는 전후 동일했다. |
-| 명시적 snapshot 재전송 | 또 다른 W3 DB에서 같은 W2 Source/history로 `H=3`, `R=2` snapshot을 연속 두 번 명시적으로 POST했다. 두 번째도 `SNAPSHOT_APPLIED`(충돌 아님)였고, 재색인 전 W3 status는 처리 카운터 `generation`만 증가했다. 나머지 모든 status 필드, 특히 `H=3`, `R=2`, `history_complete=false`, `index_ack=false`, `reason=INDEX_PENDING`와 W2 outbox delivery state가 동일했다. W3 operator index endpoint에서 재색인한 뒤에만 `index_ack=true`. |
+| 명시적 snapshot 재전송 | 또 다른 W3 DB에서 같은 W2 Source/history로 `H=3`, `R=2` snapshot을 연속 두 번 명시적으로 POST했다. 두 번째도 `SNAPSHOT_APPLIED`(충돌 아님)였고, 재색인 전 W3 status는 처리 카운터 `generation`만 정확히 1 증가했다. 나머지 모든 status 필드, 특히 `H=3`, `R=2`, `history_complete=false`, `index_ack=false`, `reason=INDEX_PENDING`와 W2 outbox delivery state가 동일했다. W3 operator index endpoint에서 재색인한 뒤에만 `index_ack=true`. |
 | 불변 충돌 | 이미 수락된 W3 event와 동일 identity/revision의 다른 fact를 주입해 W3 `CONFLICT`를 확인했다. 재실행한 W2 replay는 `W3_RECOVERY_FAILED`로 실패 종료하고 W2 outbox를 변경하지 않았다. |
 | Source 미등록 | 동일한 미등록 UUID에 대해 실제 W2 SourceAuthority가 `registered=false`를 반환했다. W2 operator 사전검사도 실패했다. 별도로 고정 W3의 `events`·`replay`·`snapshot`·`index` 네 HTTP 경로에 유효한 합성 요청을 각각 보내 모두 HTTP 422 `SOURCE_NOT_REGISTERED`와 `index_ack=false`를 받았다. 각 요청 전후 W3 status 전체가 동일해 cursor 0·index ACK false를 유지했다. |
 | SourceAuthority 장애 | Authority 연결이 불가능한 별도 W3 DB에서 replay가 실패 종료했고 cursor 0 및 index ACK false를 유지했다. |
