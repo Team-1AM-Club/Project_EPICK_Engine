@@ -1,0 +1,679 @@
+"""Verify W2 PostgreSQL outbox delivery against a pinned local W3 checkout.
+
+This is a synthetic, isolated integration probe. It neither crawls a real
+source nor approves a production W3 retention TTL or deployment topology.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import secrets
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import UUID, uuid4
+
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import sessionmaker
+
+from epick_engine.source_collection.contracts import SourceEvent
+from epick_engine.source_collection.persistence import Company, OutboxEvent, Source
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURE_NAMES = (
+    "version-available",
+    "version-partial",
+    "observation-changed",
+    "restriction-changed",
+)
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _get_json(url: str, *, token: str | None = None) -> dict[str, object]:
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with urllib.request.urlopen(
+        urllib.request.Request(url, headers=headers), timeout=3
+    ) as response:
+        return json.load(response)
+
+
+def _post_json(url: str, *, token: str, value: dict[str, object]) -> dict[str, object]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(value).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=3) as response:
+        return json.load(response)
+
+
+def _wait_ready(process: subprocess.Popen[bytes], url: str, *, token: str | None = None) -> None:
+    deadline = time.monotonic() + 15
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            error = process.stderr.read(1000) if process.stderr is not None else b""
+            raise RuntimeError(f"server exited before readiness: {process.returncode}: {error!r}")
+        try:
+            _get_json(url, token=token)
+            return
+        except (urllib.error.URLError, TimeoutError) as error:
+            last_error = error
+            time.sleep(0.1)
+    raise RuntimeError(f"local server did not become ready: {last_error!r}")
+
+
+def _start(
+    command: list[str], *, cwd: Path, environment: dict[str, str]
+) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def _stop(process: subprocess.Popen[bytes] | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _worker(environment: dict[str, str], *args: str) -> tuple[int, dict[str, object]]:
+    completed = subprocess.run(
+        [sys.executable, "-m", "epick_engine.source_collection.w3_outbox_operator", *args],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    return completed.returncode, json.loads(completed.stdout)
+
+
+def _fixtures(w3_checkout: Path) -> list[SourceEvent]:
+    directory = w3_checkout / "contracts" / "c01" / "v0.2-candidate" / "fixtures"
+    events = []
+    for name in FIXTURE_NAMES:
+        envelope = json.loads((directory / f"source-event-{name}.json").read_text())
+        payload = envelope["payload"]
+        if name in {"observation-changed", "restriction-changed"}:
+            payload.pop("schema_version")
+        events.append(
+            SourceEvent.model_validate(
+                {
+                    "event_id": envelope["event_id"],
+                    "event_type": envelope["event_type"],
+                    "schema_version": "w2.source.v1",
+                    "aggregate_id": envelope["aggregate_id"],
+                    "aggregate_revision": envelope["revision"],
+                    "occurred_at": envelope["occurred_at"],
+                    "payload": payload,
+                }
+            )
+        )
+    assert [event.aggregate_revision for event in events] == [1, 2, 3, 4]
+    return events
+
+
+def _seed(session_factory: sessionmaker, events: list[SourceEvent]) -> None:
+    first = events[0]
+    payload = first.payload
+    with session_factory.begin() as session:
+        session.add(
+            Company(
+                company_id=payload.company_id,
+                legal_name="Synthetic W2-W3 Integration Company",
+                aliases=[],
+                official_domains=["example.test"],
+                legal_identifiers={"synthetic": "w2-w3-e2e"},
+                identity_status="verified",
+                identity_evidence=["synthetic://w2-w3-e2e"],
+            )
+        )
+        session.add(
+            Source(
+                source_id=first.aggregate_id,
+                company_id=payload.company_id,
+                source_type=payload.source_type.value,
+                canonical_url=str(payload.url_or_path),
+                title=payload.title,
+            )
+        )
+    with session_factory.begin() as session:
+        for event in events:
+            session.add(_outbox_row(event))
+
+
+def _outbox_row(event: SourceEvent) -> OutboxEvent:
+    return OutboxEvent(
+        event_id=event.event_id,
+        aggregate_id=event.aggregate_id,
+        aggregate_revision=event.aggregate_revision,
+        event_type=event.event_type.value,
+        schema_version=event.schema_version,
+        payload=event.payload.model_dump(mode="json"),
+        occurred_at=event.occurred_at,
+        delivery_state="pending",
+    )
+
+
+def _later_observation(base: SourceEvent, revision: int) -> SourceEvent:
+    occurred_at = base.occurred_at + timedelta(minutes=revision * 5)
+    payload = base.payload.model_dump(mode="json")
+    payload.update(observation_id=str(uuid4()), observed_at=occurred_at.isoformat())
+    return SourceEvent.model_validate(
+        {
+            "event_id": uuid4(),
+            "event_type": "source.observation.changed",
+            "schema_version": "w2.source.v1",
+            "aggregate_id": base.aggregate_id,
+            "aggregate_revision": revision,
+            "occurred_at": occurred_at,
+            "payload": payload,
+        }
+    )
+
+
+def _index_request(
+    source_id: UUID,
+    status: dict[str, object],
+    *,
+    evidence_id: UUID,
+    text_excerpt: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": "w3-c01/0.2-candidate",
+        "source_id": str(source_id),
+        "event_cursor": status["event_cursor"],
+        "restriction_revision": status["restriction_revision"],
+        "index_key": status["index_key"],
+        "retention_scope": "excerpts_only",
+        "expires_at": (datetime.now(UTC) + timedelta(seconds=120)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "documents": [
+            {
+                "document_id": str(uuid4()),
+                "evidence_id": str(evidence_id),
+                "text": text_excerpt,
+            }
+        ],
+    }
+
+
+def _states(session_factory: sessionmaker) -> list[str]:
+    with session_factory() as session:
+        return list(
+            session.scalars(
+                select(OutboxEvent.delivery_state).order_by(OutboxEvent.aggregate_revision)
+            )
+        )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--w3-checkout", type=Path, required=True)
+    parser.add_argument("--w3-sha", required=True)
+    parser.add_argument("--w2-code-sha", required=True)
+    args = parser.parse_args()
+    w3_checkout = args.w3_checkout.resolve(strict=True)
+    w3_python = w3_checkout / ".venv" / "Scripts" / "python.exe"
+    if not w3_python.is_file():
+        raise ValueError("W3 locked virtual environment is required")
+    pinned = subprocess.check_output(
+        ["git", "-c", f"safe.directory={w3_checkout}", "-C", str(w3_checkout), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    if pinned != args.w3_sha:
+        raise ValueError("W3 checkout SHA does not match the requested pin")
+    w3_dirty = subprocess.check_output(
+        [
+            "git",
+            "-c",
+            f"safe.directory={w3_checkout}",
+            "-C",
+            str(w3_checkout),
+            "status",
+            "--porcelain",
+            "--",
+            "src",
+        ],
+        text=True,
+    ).strip()
+    if w3_dirty:
+        raise ValueError("W3 source checkout has uncommitted changes")
+    w2_git = ["git", "-c", f"safe.directory={ROOT}", "-C", str(ROOT)]
+    for revision_args in (
+        ["diff", "--quiet", args.w2_code_sha, "HEAD", "--", "src", "migrations"],
+        ["diff", "--quiet", "--", "src", "migrations"],
+    ):
+        if subprocess.run(w2_git + revision_args, check=False).returncode:
+            raise ValueError("W2 source or migration does not match the requested code pin")
+
+    raw_url = os.environ.get("EPICK_TEST_DATABASE_URL", "")
+    url = make_url(raw_url)
+    if (
+        os.environ.get("EPICK_TEST_DATABASE_APPROVED") != "1"
+        or not url.drivername.startswith("postgresql")
+        or url.host not in {"127.0.0.1", "localhost", "::1"}
+        or not url.database
+        or raw_url == os.environ.get("EPICK_DATABASE_URL")
+    ):
+        raise ValueError("approved isolated loopback PostgreSQL test URL is required")
+
+    schema = f"epick_w2_w3_e2e_{uuid4().hex}"
+    admin = create_engine(url, pool_pre_ping=True)
+    authority: subprocess.Popen[bytes] | None = None
+    w3: subprocess.Popen[bytes] | None = None
+    scoped_engine = None
+    runtime_dir: tempfile.TemporaryDirectory[str] | None = None
+    created = False
+    try:
+        with admin.begin() as connection:
+            connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        created = True
+        scoped_url = url.set(query={**url.query, "options": f"-csearch_path={schema}"})
+        db_url = scoped_url.render_as_string(hide_password=False)
+        base_env = {**os.environ, "EPICK_DATABASE_URL": db_url}
+        migration = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=ROOT,
+            env=base_env,
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        if migration.returncode:
+            raise RuntimeError("isolated W2 Alembic migration failed")
+
+        scoped_engine = create_engine(scoped_url, pool_pre_ping=True)
+        session_factory = sessionmaker(scoped_engine, expire_on_commit=False)
+        events = _fixtures(w3_checkout)
+        _seed(session_factory, events)
+        assert _states(session_factory) == ["pending"] * 4
+
+        authority_port, w3_port = _free_port(), _free_port()
+        authority_token = secrets.token_urlsafe(32)
+        w2_token = secrets.token_urlsafe(32)
+        operator_token = secrets.token_urlsafe(32)
+        w4_token = secrets.token_urlsafe(32)
+        w2_env = {
+            **base_env,
+            "EPICK_W2_SOURCE_AUTHORITY_TOKEN": authority_token,
+            "EPICK_W3_EVENT_ENDPOINT": f"http://127.0.0.1:{w3_port}/c01/v1/events",
+            "EPICK_W3_W2_TOKEN": w2_token,
+        }
+        w3_env = {
+            **os.environ,
+            "W3_SOURCE_AUTHORITY_ENDPOINT": f"http://127.0.0.1:{authority_port}",
+            "W3_SOURCE_AUTHORITY_TOKEN": authority_token,
+            "W3_W2_TOKEN": w2_token,
+            "W3_OPERATOR_TOKEN": operator_token,
+            "W3_W4_TOKEN": w4_token,
+        }
+        runtime_dir = tempfile.TemporaryDirectory(prefix="epick-w2-w3-")
+        if runtime_dir is not None:
+            db_path = Path(runtime_dir.name) / "w3-c01.sqlite"
+            w3_command = [
+                str(w3_python),
+                "-m",
+                "w3_knowledge.c01.http",
+                "--db",
+                str(db_path),
+                "--port",
+                str(w3_port),
+                "--restriction-scope",
+                "version",
+                "--max-ttl-seconds",
+                "300",
+                "--source-authority",
+                "w3_knowledge.c01.source_authority_http:create_source_authority",
+            ]
+            w3 = _start(w3_command, cwd=w3_checkout, environment=w3_env)
+            _wait_ready(w3, f"http://127.0.0.1:{w3_port}/health")
+
+            failed_code, failed_response = _worker(w2_env, "--limit", "25")
+            assert failed_code == 1 and failed_response == {"status": "W3_OUTBOX_FAILED"}
+            assert _states(session_factory) == ["pending"] * 4
+
+            authority = _start(
+                [
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    "epick_engine.source_collection.source_authority_operator:create_app",
+                    "--factory",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(authority_port),
+                ],
+                cwd=ROOT,
+                environment=w2_env,
+            )
+            _wait_ready(
+                authority,
+                f"http://127.0.0.1:{authority_port}/internal/v1/sources/"
+                f"{events[0].aggregate_id}/authority",
+                token=authority_token,
+            )
+            authority_result = _get_json(
+                f"http://127.0.0.1:{authority_port}/internal/v1/sources/"
+                f"{events[0].aggregate_id}/authority",
+                token=authority_token,
+            )
+            assert authority_result == {
+                "source_id": str(events[0].aggregate_id),
+                "registered": True,
+            }
+            absent = _get_json(
+                f"http://127.0.0.1:{authority_port}/internal/v1/sources/{uuid4()}/authority",
+                token=authority_token,
+            )
+            assert absent["registered"] is False
+
+            code, response = _worker(w2_env, "--limit", "25")
+            assert code == 0 and response == {"status": "DELIVERED", "count": 4}
+            assert _states(session_factory) == ["delivered"] * 4
+            status_url = f"http://127.0.0.1:{w3_port}/c01/v1/status/{events[0].aggregate_id}"
+            status = _get_json(status_url, token=w2_token)
+            assert status["event_cursor"] == 4
+            assert status["restriction_revision"] == 1
+            assert status["index_ack"] is False
+
+            replay_code, replay = _worker(w2_env, "--replay-event-id", str(events[0].event_id))
+            assert replay_code == 0 and replay == {"status": "REPLAYED", "count": 1}
+            assert _get_json(status_url, token=w2_token)["event_cursor"] == 4
+            assert _states(session_factory) == ["delivered"] * 4
+
+            _stop(w3)
+            w3 = _start(w3_command, cwd=w3_checkout, environment=w3_env)
+            _wait_ready(w3, f"http://127.0.0.1:{w3_port}/health")
+            restarted = _get_json(status_url, token=w2_token)
+            assert restarted["event_cursor"] == 4
+            assert restarted["restriction_revision"] == 1
+            assert restarted["index_ack"] is False
+
+            replacement_id = uuid4()
+            cleared_at = events[3].occurred_at + timedelta(minutes=5)
+            cleared_payload = events[3].payload.model_dump(mode="json")
+            cleared_payload.update(
+                restriction_revision=2,
+                restriction_status="cleared",
+                accuracy_status="verified_in_scope",
+                changed_at=cleared_at.isoformat(),
+                replacement_ref=str(replacement_id),
+            )
+            cleared = SourceEvent.model_validate(
+                {
+                    "event_id": uuid4(),
+                    "event_type": "source.restriction.changed",
+                    "schema_version": "w2.source.v1",
+                    "aggregate_id": events[0].aggregate_id,
+                    "aggregate_revision": 5,
+                    "occurred_at": cleared_at,
+                    "payload": cleared_payload,
+                }
+            )
+            with session_factory.begin() as session:
+                session.add(_outbox_row(cleared))
+            assert _states(session_factory) == ["delivered"] * 4 + ["pending"]
+            unregistered_code, unregistered_response = _worker(w2_env, "--limit", "25")
+            assert unregistered_code == 1
+            assert unregistered_response == {"status": "W3_OUTBOX_FAILED"}
+            assert _states(session_factory) == ["delivered"] * 4 + ["pending"]
+            assert _get_json(status_url, token=w2_token)["event_cursor"] == 4
+
+            with session_factory.begin() as session:
+                session.add(
+                    Source(
+                        source_id=replacement_id,
+                        company_id=events[0].payload.company_id,
+                        source_type=events[0].payload.source_type.value,
+                        canonical_url=f"https://synthetic.example/replacement/{replacement_id}",
+                        title="Synthetic replacement Source",
+                    )
+                )
+            cleared_code, cleared_response = _worker(w2_env, "--limit", "25")
+            assert cleared_code == 0
+            assert cleared_response == {"status": "DELIVERED", "count": 1}
+            assert _states(session_factory) == ["delivered"] * 5
+            cleared_status = _get_json(status_url, token=w2_token)
+            assert cleared_status["event_cursor"] == 5
+            assert cleared_status["restriction_revision"] == 2
+            assert cleared_status["index_ack"] is False
+
+            seventh = _later_observation(events[2], 7)
+            with session_factory.begin() as session:
+                session.add(_outbox_row(seventh))
+            gap_code, gap_response = _worker(w2_env, "--limit", "25")
+            assert gap_code == 0 and gap_response == {"status": "DELIVERED", "count": 1}
+            gap_status = _get_json(status_url, token=w2_token)
+            assert gap_status["event_cursor"] == 5
+            assert gap_status["required_event_cursor"] == 7
+            assert gap_status["reason"] == "EVENT_GAP"
+            assert gap_status["index_ack"] is False
+
+            sixth = _later_observation(events[2], 6)
+            with session_factory.begin() as session:
+                session.add(_outbox_row(sixth))
+            recovery_code, recovery_response = _worker(w2_env, "--limit", "25")
+            assert recovery_code == 0
+            assert recovery_response == {"status": "DELIVERED", "count": 1}
+            recovered = _get_json(status_url, token=w2_token)
+            assert recovered["event_cursor"] == 7
+            assert recovered["required_event_cursor"] == 7
+            assert recovered["restriction_revision"] == 2
+            assert _states(session_factory) == ["delivered"] * 7
+
+            index_source_id, index_version_id, index_evidence_id = uuid4(), uuid4(), uuid4()
+            index_url = f"https://synthetic.example/jobs/index-{index_source_id}"
+            allowed_payload = events[0].payload.model_dump(mode="json")
+            allowed_payload.update(
+                source_id=str(index_source_id),
+                source_version_id=str(index_version_id),
+                extraction_revision_id=str(uuid4()),
+                url_or_path=index_url,
+            )
+            allowed_payload["policy"].update(
+                policy_decision_id=str(uuid4()), redistribution_permission="allowed"
+            )
+            allowed_payload["evidence_spans"][0].update(
+                evidence_id=str(index_evidence_id), source_version_id=str(index_version_id)
+            )
+            allowed_payload["posting_sections"][0]["evidence_ids"] = [str(index_evidence_id)]
+            allowed = SourceEvent.model_validate(
+                {
+                    "event_id": uuid4(),
+                    "event_type": "source.version.available",
+                    "schema_version": "w2.source.v1",
+                    "aggregate_id": index_source_id,
+                    "aggregate_revision": 1,
+                    "occurred_at": events[0].occurred_at,
+                    "payload": allowed_payload,
+                }
+            )
+            with session_factory.begin() as session:
+                session.add(
+                    Source(
+                        source_id=index_source_id,
+                        company_id=events[0].payload.company_id,
+                        source_type=events[0].payload.source_type.value,
+                        canonical_url=index_url,
+                        title="Synthetic indexable Source",
+                    )
+                )
+            with session_factory.begin() as session:
+                session.add(_outbox_row(allowed))
+            allowed_code, allowed_response = _worker(w2_env, "--limit", "25")
+            assert allowed_code == 0
+            assert allowed_response == {"status": "DELIVERED", "count": 1}
+            indexed_status_url = f"http://127.0.0.1:{w3_port}/c01/v1/status/{index_source_id}"
+            index_url_http = f"http://127.0.0.1:{w3_port}/c01/v1/index"
+            search_url = f"http://127.0.0.1:{w3_port}/c01/v1/search?q=cloud"
+            index_status = _get_json(indexed_status_url, token=operator_token)
+            assert index_status["reason"] == "INDEX_PENDING"
+            evidence = allowed.payload.evidence_spans[0]
+            index_request = _index_request(
+                index_source_id,
+                index_status,
+                evidence_id=evidence.evidence_id,
+                text_excerpt=evidence.text_excerpt,
+            )
+            first_index = _post_json(index_url_http, token=operator_token, value=index_request)
+            assert first_index["index_ack"] is True
+            assert len(_get_json(search_url, token=operator_token)["results"]) == 1
+
+            restriction_id = uuid4()
+            active_at = datetime.now(UTC)
+            active_payload = events[3].payload.model_dump(mode="json")
+            active_payload.update(
+                restriction_id=str(restriction_id),
+                source_id=str(index_source_id),
+                source_version_id=str(index_version_id),
+                restriction_revision=1,
+                changed_at=active_at.isoformat(),
+                replacement_ref=None,
+            )
+            active = SourceEvent.model_validate(
+                {
+                    "event_id": uuid4(),
+                    "event_type": "source.restriction.changed",
+                    "schema_version": "w2.source.v1",
+                    "aggregate_id": index_source_id,
+                    "aggregate_revision": 2,
+                    "occurred_at": active_at,
+                    "payload": active_payload,
+                }
+            )
+            with session_factory.begin() as session:
+                session.add(_outbox_row(active))
+            active_code, active_response = _worker(w2_env, "--limit", "25")
+            assert active_code == 0
+            assert active_response == {"status": "DELIVERED", "count": 1}
+            blocked = _get_json(indexed_status_url, token=operator_token)
+            assert blocked["index_ack"] is False
+            assert blocked["reason"] == "RESTRICTED"
+            assert _get_json(search_url, token=operator_token)["results"] == []
+
+            release_at = active_at + timedelta(seconds=1)
+            release_payload = dict(active_payload)
+            release_payload.update(
+                restriction_revision=2,
+                restriction_status="cleared",
+                accuracy_status="verified_in_scope",
+                changed_at=release_at.isoformat(),
+            )
+            release = SourceEvent.model_validate(
+                {
+                    "event_id": uuid4(),
+                    "event_type": "source.restriction.changed",
+                    "schema_version": "w2.source.v1",
+                    "aggregate_id": index_source_id,
+                    "aggregate_revision": 3,
+                    "occurred_at": release_at,
+                    "payload": release_payload,
+                }
+            )
+            with session_factory.begin() as session:
+                session.add(_outbox_row(release))
+            release_code, release_response = _worker(w2_env, "--limit", "25")
+            assert release_code == 0
+            assert release_response == {"status": "DELIVERED", "count": 1}
+            pending_index = _get_json(indexed_status_url, token=operator_token)
+            assert pending_index["reason"] == "INDEX_PENDING"
+            assert pending_index["index_ack"] is False
+            assert _get_json(search_url, token=operator_token)["results"] == []
+            second_index = _post_json(
+                index_url_http,
+                token=operator_token,
+                value=_index_request(
+                    index_source_id,
+                    pending_index,
+                    evidence_id=evidence.evidence_id,
+                    text_excerpt=evidence.text_excerpt,
+                ),
+            )
+            assert second_index["index_ack"] is True
+            assert len(_get_json(search_url, token=operator_token)["results"]) == 1
+            assert _states(session_factory) == ["delivered"] * 10
+
+            print(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "w2_code_sha": args.w2_code_sha,
+                        "w3_sha": pinned,
+                        "w2_migration": "PASS",
+                        "authority_outage_pending": 4,
+                        "authority_registered_true": True,
+                        "authority_unregistered_false": True,
+                        "outbox_delivered": 10,
+                        "unregistered_replacement_pending": True,
+                        "cleared_restriction_revision": 2,
+                        "gap_detected_at_cursor": gap_status["event_cursor"],
+                        "gap_required_cursor": gap_status["required_event_cursor"],
+                        "gap_recovered": True,
+                        "index_ack_before_restriction": True,
+                        "restriction_blocks_search": True,
+                        "release_requires_reindex": True,
+                        "index_ack_after_reindex": True,
+                        "w3_event_cursor": recovered["event_cursor"],
+                        "w3_restriction_revision": recovered["restriction_revision"],
+                        "w3_index_ack": recovered["index_ack"],
+                        "w3_reason": recovered.get("reason"),
+                        "replay_without_cursor_advance": True,
+                        "restart_state_preserved": True,
+                        "fixture_type": "synthetic",
+                        "retention_ttl": "300 seconds for local test only",
+                    },
+                    sort_keys=True,
+                )
+            )
+        return 0
+    finally:
+        _stop(w3)
+        _stop(authority)
+        if runtime_dir is not None:
+            runtime_dir.cleanup()
+        if scoped_engine is not None:
+            scoped_engine.dispose()
+        if created:
+            with admin.begin() as connection:
+                connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
