@@ -488,14 +488,17 @@ def test_failed_receipt_write_rolls_back_history_and_identity(
         )
 
 
-def test_migration_upgrades_0006_to_0007_and_matches_complete_metadata(
+def test_migration_upgrades_0006_through_0007_to_head_and_matches_complete_metadata(
     approved_postgres_url,
 ) -> None:
     root = Path(__file__).resolve().parents[3]
     scripts = ScriptDirectory.from_config(Config(root / "alembic.ini"))
-    assert scripts.get_heads() == ["0007_restriction_receipt"]
+    assert scripts.get_heads() == ["0008_collection_runtime"]
     assert scripts.get_revision("0007_restriction_receipt").down_revision == (
         "0006_source_restriction"
+    )
+    assert scripts.get_revision("0008_collection_runtime").down_revision == (
+        "0007_restriction_receipt"
     )
     schema = f"epick_restriction_mutation_migration_{uuid4().hex}"
     admin = create_engine(approved_postgres_url, pool_pre_ping=True)
@@ -522,7 +525,7 @@ def test_migration_upgrades_0006_to_0007_and_matches_complete_metadata(
         with admin.begin() as connection:
             connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
             assert MigrationContext.configure(connection).get_current_revision() == (
-                "0007_restriction_receipt"
+                "0008_collection_runtime"
             )
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
     finally:

@@ -807,7 +807,7 @@ def test_migration_upgrades_0005_to_current_head_and_matches_complete_metadata(
 ) -> None:
     root = Path(__file__).resolve().parents[3]
     scripts = ScriptDirectory.from_config(Config(root / "alembic.ini"))
-    assert scripts.get_heads() == ["0007_restriction_receipt"]
+    assert scripts.get_heads() == ["0008_collection_runtime"]
     schema = f"epick_source_restriction_migration_{uuid4().hex}"
     admin = create_engine(approved_postgres_url, pool_pre_ping=True)
     with admin.begin() as connection:
@@ -833,7 +833,7 @@ def test_migration_upgrades_0005_to_current_head_and_matches_complete_metadata(
         with admin.begin() as connection:
             connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
             assert MigrationContext.configure(connection).get_current_revision() == (
-                "0007_restriction_receipt"
+                "0008_collection_runtime"
             )
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
     finally:
