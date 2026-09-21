@@ -81,6 +81,58 @@ class _StdlibW3HTTPTransport:
         ssl_context: ssl.SSLContext | None,
         max_response_bytes: int,
     ) -> W3HTTPResponse:
+        return self._request(
+            method="POST",
+            scheme=scheme,
+            host=host,
+            port=port,
+            target=target,
+            headers=headers,
+            body=body,
+            timeout=timeout,
+            ssl_context=ssl_context,
+            max_response_bytes=max_response_bytes,
+        )
+
+    def get(
+        self,
+        *,
+        scheme: str,
+        host: str,
+        port: int,
+        target: str,
+        headers: Mapping[str, str],
+        timeout: float,
+        ssl_context: ssl.SSLContext | None,
+        max_response_bytes: int,
+    ) -> W3HTTPResponse:
+        return self._request(
+            method="GET",
+            scheme=scheme,
+            host=host,
+            port=port,
+            target=target,
+            headers=headers,
+            body=None,
+            timeout=timeout,
+            ssl_context=ssl_context,
+            max_response_bytes=max_response_bytes,
+        )
+
+    def _request(
+        self,
+        *,
+        method: str,
+        scheme: str,
+        host: str,
+        port: int,
+        target: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        timeout: float,
+        ssl_context: ssl.SSLContext | None,
+        max_response_bytes: int,
+    ) -> W3HTTPResponse:
         connection: http.client.HTTPConnection
         if scheme == "https":
             connection = http.client.HTTPSConnection(
@@ -89,7 +141,7 @@ class _StdlibW3HTTPTransport:
         else:
             connection = http.client.HTTPConnection(host, port, timeout=timeout)
         try:
-            connection.request("POST", target, body=body, headers=dict(headers))
+            connection.request(method, target, body=body, headers=dict(headers))
             response = connection.getresponse()
             return W3HTTPResponse(
                 status=response.status,
