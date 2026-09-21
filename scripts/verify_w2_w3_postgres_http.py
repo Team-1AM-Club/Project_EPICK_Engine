@@ -775,9 +775,73 @@ def main() -> int:
             assert _states(session_factory) == states_before_recovery
 
             absent_source_id = uuid4()
+            absent_authority = _get_json(
+                f"http://127.0.0.1:{authority_port}/internal/v1/sources/"
+                f"{absent_source_id}/authority",
+                token=authority_token,
+            )
+            assert absent_authority == {
+                "source_id": str(absent_source_id),
+                "registered": False,
+            }
             absent_status_url = f"http://127.0.0.1:{snapshot_port}/c01/v1/status/{absent_source_id}"
             absent_before = _get_json(absent_status_url, token=w2_token)
             assert absent_before["reason"] == "UNKNOWN_SOURCE"
+            assert absent_before["event_cursor"] == 0
+            assert absent_before["index_ack"] is False
+
+            absent_event = source_event_to_w3_wire(allowed)
+            absent_event["aggregate_id"] = str(absent_source_id)
+            absent_event_payload = absent_event["payload"]
+            assert isinstance(absent_event_payload, dict)
+            absent_event_payload["source_id"] = str(absent_source_id)
+            absent_replay = {
+                "schema_version": "w3-c01/0.2-candidate",
+                "source_id": str(absent_source_id),
+                "after_cursor": 0,
+                "high_watermark": 0,
+                "retention_floor_cursor": 0,
+                "events": [],
+            }
+            absent_snapshot = {
+                "schema_version": "w3-c01/0.2-candidate",
+                "source_id": str(absent_source_id),
+                "as_of": datetime.now(UTC).isoformat(),
+                "event_cursor": 0,
+                "restriction_revision": 0,
+                "complete": True,
+                "versions": [],
+                "restrictions": [],
+                "observation": None,
+            }
+            absent_index = _index_request(
+                absent_source_id,
+                index_status,
+                evidence_id=evidence.evidence_id,
+                text_excerpt=evidence.text_excerpt,
+            )
+            for route, token, request_body in (
+                ("events", w2_token, absent_event),
+                ("replay", w2_token, absent_replay),
+                ("snapshot", w2_token, absent_snapshot),
+                ("index", operator_token, absent_index),
+            ):
+                try:
+                    _post_json(
+                        f"http://127.0.0.1:{snapshot_port}/c01/v1/{route}",
+                        token=token,
+                        value=request_body,
+                    )
+                except urllib.error.HTTPError as rejected:
+                    assert rejected.code == 422
+                    assert json.load(rejected) == {
+                        "error": "SOURCE_NOT_REGISTERED",
+                        "index_ack": False,
+                    }
+                else:
+                    raise AssertionError(f"unregistered Source accepted by W3 {route}")
+                assert _get_json(absent_status_url, token=w2_token) == absent_before
+
             absent_code, absent_result = _recovery_worker(
                 snapshot_env,
                 "--source-id",
@@ -787,7 +851,7 @@ def main() -> int:
             )
             assert absent_code == 1
             assert absent_result == {"status": "W3_RECOVERY_FAILED"}
-            assert _get_json(absent_status_url, token=w2_token)["event_cursor"] == 0
+            assert _get_json(absent_status_url, token=w2_token) == absent_before
             assert _states(session_factory) == states_before_recovery
 
             unavailable_authority_port = _free_port()
@@ -861,7 +925,13 @@ def main() -> int:
                         "snapshot_index_ack_after_apply": False,
                         "snapshot_index_ack_after_reindex": True,
                         "immutable_conflict_fail_closed": True,
-                        "unregistered_source_fail_closed": True,
+                        "unregistered_source_w2_authority_false": True,
+                        "unregistered_source_w2_preflight_fail_closed": True,
+                        "unregistered_source_w3_events_422": True,
+                        "unregistered_source_w3_replay_422": True,
+                        "unregistered_source_w3_snapshot_422": True,
+                        "unregistered_source_w3_index_422": True,
+                        "unregistered_source_w3_state_unchanged": True,
                         "source_authority_outage_fail_closed": True,
                         "fixture_type": "synthetic",
                         "retention_ttl": "300 seconds for local test only",

@@ -1,5 +1,5 @@
 {
-  "verified_at_utc": "2026-09-21T13:30:05Z",
+  "verified_at_utc": "2026-09-21T13:41:31Z",
   "scope": "synthetic isolated PostgreSQL outbox to pinned W3 C-01 HTTP",
   "status": "PASS_WITH_OPEN_GATES",
   "w2_product_code_sha": "c27e6f318080b2a382aa93833bf3de3d87a1cb2a",
@@ -26,7 +26,18 @@
       "w2_outbox_delivery_states_unchanged": true
     },
     "immutable_conflict_fail_closed": true,
-    "unregistered_source_fail_closed": true,
+    "unregistered_source": {
+      "w2_authority_registered": false,
+      "w2_operator_preflight_failed": true,
+      "w3_http_status": {
+        "events": 422,
+        "replay": 422,
+        "snapshot": 422,
+        "index": 422
+      },
+      "w3_error_code": "SOURCE_NOT_REGISTERED",
+      "w3_state_unchanged_after_each_path": true
+    },
     "source_authority_outage_fail_closed": true
   },
   "focused_tests": {
