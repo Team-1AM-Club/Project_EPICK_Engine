@@ -73,20 +73,25 @@ def _seed_source(session_factory: sessionmaker[Session]) -> Source:
     return source
 
 
-def _observation_event(source: Source, *, aggregate_revision: int) -> SourceEvent:
+def _observation_event(
+    source: Source,
+    *,
+    aggregate_revision: int,
+    occurred_at: datetime = NOW,
+) -> SourceEvent:
     return SourceEvent(
         event_id=uuid4(),
         event_type="source.observation.changed",
         schema_version="w2.source.v1",
         aggregate_id=source.source_id,
         aggregate_revision=aggregate_revision,
-        occurred_at=NOW,
+        occurred_at=occurred_at,
         payload=SourceObservationSnapshot(
             observation_id=uuid4(),
             source_id=source.source_id,
             source_version_id=None,
             policy_decision_id=None,
-            observed_at=NOW,
+            observed_at=occurred_at,
             access_class="public",
             acquisition_status="AVAILABLE",
             http_status=200,
@@ -190,6 +195,27 @@ def test_load_history_returns_exact_contiguous_public_events_without_delivery_mu
             )
         )
     assert delivery_states == ["pending", "delivered", "pending"]
+
+
+def test_load_history_as_of_uses_an_included_future_occurred_at(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Returning only the database timestamp would make snapshot freshness regress."""
+
+    source = _seed_source(session_factory)
+    future_occurred_at = datetime(2099, 1, 1, tzinfo=UTC)
+    _seed_outbox(
+        session_factory,
+        _observation_event(
+            source,
+            aggregate_revision=1,
+            occurred_at=future_occurred_at,
+        ),
+    )
+
+    history = _store(session_factory).load_history(source_id=source.source_id)
+
+    assert history.as_of == future_occurred_at
 
 
 def test_load_history_rejects_an_unregistered_source(

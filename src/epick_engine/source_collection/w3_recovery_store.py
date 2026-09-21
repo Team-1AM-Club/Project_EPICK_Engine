@@ -91,15 +91,19 @@ class SqlAlchemyRecoveryHistoryStore:
                     restriction_revision = payload.restriction_revision
                 events.append(source_event)
 
-            as_of = session.scalar(select(func.now()))
-            if not isinstance(as_of, datetime) or as_of.tzinfo is None:
+            snapshot_as_of = session.scalar(select(func.now()))
+            if not isinstance(snapshot_as_of, datetime) or snapshot_as_of.tzinfo is None:
                 raise W3RecoveryHistoryError("READ_FAILED")
+            as_of = max(
+                snapshot_as_of.astimezone(UTC),
+                *(source_event.occurred_at.astimezone(UTC) for source_event in events),
+            )
             return RecoveryHistory(
                 source_id=source_id,
                 high_watermark=rows[-1].aggregate_revision,
                 restriction_revision=restriction_revision,
                 events=tuple(events),
-                as_of=as_of.astimezone(UTC),
+                as_of=as_of,
             )
         except W3RecoveryHistoryError:
             raise
