@@ -123,7 +123,11 @@ def test_status_uses_authenticated_fixed_target_and_returns_validated_metadata()
             "/c01/v1/replay",
             lambda client: client.replay(
                 source_id=SOURCE_ID,
-                batch={"schema_version": "w3-c01/0.2-candidate", "events": []},
+                batch={
+                    "schema_version": "w3-c01/0.2-candidate",
+                    "source_id": str(SOURCE_ID),
+                    "events": [],
+                },
             ),
         ),
         (
@@ -132,7 +136,11 @@ def test_status_uses_authenticated_fixed_target_and_returns_validated_metadata()
             "/c01/v1/snapshot",
             lambda client: client.snapshot(
                 source_id=SOURCE_ID,
-                payload={"schema_version": "w3-c01/0.2-candidate", "complete": True},
+                payload={
+                    "schema_version": "w3-c01/0.2-candidate",
+                    "source_id": str(SOURCE_ID),
+                    "complete": True,
+                },
             ),
         ),
     ],
@@ -263,6 +271,30 @@ def test_replay_rejects_oversized_request_before_calling_transport() -> None:
     assert transport.calls == []
 
 
+@pytest.mark.parametrize("operation", ["replay", "snapshot"])
+def test_recovery_post_rejects_payload_for_different_source_before_transport(
+    operation: str,
+) -> None:
+    transport = RecordingTransport()
+    client = _client(transport)
+    wrong_source_id = uuid4()
+
+    with pytest.raises(W3RecoveryTransportError) as raised:
+        if operation == "replay":
+            client.replay(
+                source_id=SOURCE_ID,
+                batch={"source_id": str(wrong_source_id)},
+            )
+        else:
+            client.snapshot(
+                source_id=SOURCE_ID,
+                payload={"source_id": str(wrong_source_id)},
+            )
+
+    assert raised.value.code == "SOURCE_MISMATCH"
+    assert transport.calls == []
+
+
 @pytest.mark.parametrize(
     ("operation", "outcome"),
     [
@@ -276,8 +308,8 @@ def test_recovery_post_rejects_outcome_for_other_endpoint(operation: str, outcom
 
     with pytest.raises(W3RecoveryTransportError) as raised:
         if operation == "replay":
-            client.replay(source_id=SOURCE_ID, batch={})
+            client.replay(source_id=SOURCE_ID, batch={"source_id": str(SOURCE_ID)})
         else:
-            client.snapshot(source_id=SOURCE_ID, payload={})
+            client.snapshot(source_id=SOURCE_ID, payload={"source_id": str(SOURCE_ID)})
 
     assert raised.value.code == "INVALID_RESPONSE"

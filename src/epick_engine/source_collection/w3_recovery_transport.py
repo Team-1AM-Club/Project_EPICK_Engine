@@ -249,6 +249,7 @@ class W3RecoveryClient:
     ) -> W3RecoveryStatus:
         source_id = self._validate_source_id(source_id)
         body = self._serialize_payload(payload)
+        self._validate_payload_source_id(payload, source_id=source_id)
         try:
             response = self._transport.post(
                 scheme=self._endpoint.scheme,
@@ -285,6 +286,15 @@ class W3RecoveryClient:
         if len(body) > MAX_EVENT_BYTES:
             raise W3RecoveryTransportError("REQUEST_TOO_LARGE")
         return body
+
+    @staticmethod
+    def _validate_payload_source_id(payload: dict[str, object], *, source_id: UUID) -> None:
+        try:
+            payload_source_id = _strict_uuid(payload["source_id"])
+        except (KeyError, TypeError, ValueError):
+            raise W3RecoveryTransportError("INVALID_PAYLOAD") from None
+        if payload_source_id != source_id:
+            raise W3RecoveryTransportError("SOURCE_MISMATCH")
 
     @staticmethod
     def _json_object(response: object) -> dict[str, object]:
