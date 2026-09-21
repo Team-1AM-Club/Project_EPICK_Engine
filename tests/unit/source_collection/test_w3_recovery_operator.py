@@ -215,7 +215,6 @@ def test_replay_already_current_does_not_post_or_claim_index_readiness() -> None
         _status(restriction_revision=1),
         _status(required_restriction_revision=1),
         _status(reason="CONFLICT"),
-        _status(reason="UNKNOWN_SOURCE"),
     ],
 )
 def test_replay_rejects_unsafe_remote_status_before_post(remote: W3RecoveryStatus) -> None:
@@ -226,6 +225,47 @@ def test_replay_rejects_unsafe_remote_status_before_post(remote: W3RecoveryStatu
     with pytest.raises(W3RecoveryOperationError):
         _recovery(_history(1), client).recover(source_id=SOURCE_ID, mode="replay")
 
+    assert client.replay_bodies == []
+
+
+def test_empty_w3_status_replays_registered_history_after_authority_validation() -> None:
+    """UNKNOWN_SOURCE is an empty W3 state, not an immutable conflict with W2 history."""
+
+    client = RecordingClient(
+        statuses=[_status(reason="UNKNOWN_SOURCE")],
+        replay_responses=[_status(event_cursor=1, outcome="REPLAYED")],
+    )
+
+    result = _recovery(_history(1), client).recover(source_id=SOURCE_ID, mode="replay")
+
+    assert [body["after_cursor"] for body in client.replay_bodies] == [0]
+    assert result.kind == "REPLAYED"
+
+
+def test_empty_w3_status_allows_explicit_snapshot_after_authority_validation() -> None:
+    """An operator-requested snapshot may initialize W3 after its authority check."""
+
+    client = RecordingClient(
+        statuses=[_status(reason="UNKNOWN_SOURCE")],
+        snapshot_responses=[_status(event_cursor=1, outcome="SNAPSHOT_APPLIED")],
+    )
+
+    result = _recovery(_history(1), client).recover(source_id=SOURCE_ID, mode="snapshot")
+
+    assert len(client.snapshot_bodies) == 1
+    assert result.kind == "SNAPSHOT_APPLIED"
+
+
+def test_empty_local_history_never_declares_current_from_empty_w3_status() -> None:
+    """No authoritative W2 event history is never converted into ALREADY_CURRENT."""
+
+    client = RecordingClient(statuses=[_status(reason="UNKNOWN_SOURCE")])
+
+    with pytest.raises(W3RecoveryOperationError) as raised:
+        _recovery(_history(0), client).recover(source_id=SOURCE_ID, mode="replay")
+
+    assert raised.value.code == "LOCAL_HISTORY_UNSAFE"
+    assert client.status_source_ids == []
     assert client.replay_bodies == []
 
 
@@ -337,6 +377,39 @@ def test_snapshot_rejects_non_exact_receipt() -> None:
     assert raised.value.code == "SNAPSHOT_RECEIPT_UNSAFE"
 
 
+@pytest.mark.parametrize(
+    ("history_complete", "index_ack", "reason"),
+    [
+        (True, False, "INDEX_PENDING"),
+        (False, True, "READY"),
+    ],
+)
+def test_snapshot_rejects_receipt_that_claims_history_or_index_ready(
+    history_complete: bool,
+    index_ack: bool,
+    reason: str,
+) -> None:
+    """Snapshot application does not establish retained history or index readiness."""
+
+    client = RecordingClient(
+        statuses=[_status()],
+        snapshot_responses=[
+            _status(
+                event_cursor=1,
+                outcome="SNAPSHOT_APPLIED",
+                history_complete=history_complete,
+                index_ack=index_ack,
+                reason=reason,
+            )
+        ],
+    )
+
+    with pytest.raises(W3RecoveryOperationError) as raised:
+        _recovery(_history(1), client).recover(source_id=SOURCE_ID, mode="snapshot")
+
+    assert raised.value.code == "SNAPSHOT_RECEIPT_UNSAFE"
+
+
 def test_recovery_requires_uuid_source_and_known_mode() -> None:
     """The public control surface never guesses source identity or destructive mode."""
 
@@ -421,3 +494,29 @@ def test_cli_sanitizes_failure_and_disposes_created_engine(
     assert json.loads(output) == {"status": "W3_RECOVERY_FAILED"}
     assert "CANARY_SECRET" not in output
     assert engine.dispose.call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("argv", "untrusted_value"),
+    [
+        (["--source-id", "CANARY_INVALID_SOURCE"], "CANARY_INVALID_SOURCE"),
+        (
+            ["--source-id", str(SOURCE_ID), "--mode", "CANARY_INVALID_MODE"],
+            "CANARY_INVALID_MODE",
+        ),
+    ],
+)
+def test_cli_argument_failures_emit_only_constant_sanitized_json(
+    argv: list[str],
+    untrusted_value: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Argument parsing is inside the same no-diagnostics boundary as runtime failures."""
+
+    assert w3_recovery_operator.main(argv) == 1
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"status": "W3_RECOVERY_FAILED"}
+    assert captured.err == ""
+    assert untrusted_value not in captured.out
+    assert untrusted_value not in captured.err

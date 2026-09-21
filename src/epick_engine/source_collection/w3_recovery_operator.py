@@ -13,7 +13,7 @@ import os
 import ssl
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Literal, NoReturn, Protocol, cast
 from uuid import UUID
 
 from epick_engine.source_collection.persistence import (
@@ -45,6 +45,14 @@ class W3RecoveryOperationError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(f"W3 recovery operation failed: {code}")
         self.code = code
+
+
+class _RecoveryArgumentParser(argparse.ArgumentParser):
+    """Convert invalid operator arguments into the module's sanitized failure path."""
+
+    def error(self, message: str) -> NoReturn:
+        del message
+        raise ValueError("invalid recovery arguments")
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,8 +146,17 @@ class W3SourceRecovery:
             or (not response and status.outcome is not None)
         ):
             raise W3RecoveryOperationError("REMOTE_STATUS_UNSAFE")
-        if status.reason in {"CONFLICT", "UNKNOWN_SOURCE"} or status.outcome == "CONFLICT":
+        if status.reason == "CONFLICT" or status.outcome == "CONFLICT":
             raise W3RecoveryOperationError("REMOTE_CONFLICT")
+        if status.reason == "UNKNOWN_SOURCE" and (
+            status.event_cursor != 0
+            or status.required_event_cursor != 0
+            or status.restriction_revision != 0
+            or status.required_restriction_revision != 0
+            or status.history_complete
+            or status.index_ack
+        ):
+            raise W3RecoveryOperationError("REMOTE_STATUS_UNSAFE")
         if (
             status.event_cursor > history.high_watermark
             or status.required_event_cursor > history.high_watermark
@@ -227,7 +244,12 @@ class W3SourceRecovery:
         del status
         receipt = self._client.snapshot(source_id=source_id, payload=make_snapshot(history))
         self._validate_status(receipt, source_id=source_id, history=history, response=True)
-        if receipt.outcome != "SNAPSHOT_APPLIED" or not self._is_complete(receipt, history):
+        if (
+            receipt.outcome != "SNAPSHOT_APPLIED"
+            or not self._is_complete(receipt, history)
+            or receipt.history_complete is not False
+            or receipt.index_ack is not False
+        ):
             raise W3RecoveryOperationError("SNAPSHOT_RECEIPT_UNSAFE")
         return RecoveryResult(
             kind="SNAPSHOT_APPLIED",
@@ -240,13 +262,13 @@ class W3SourceRecovery:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one explicit recovery command with sanitized stdout on every failure."""
 
-    parser = argparse.ArgumentParser(description="Recover one W2 Source in W3")
+    parser = _RecoveryArgumentParser(description="Recover one W2 Source in W3")
     parser.add_argument("--source-id", type=UUID, required=True)
     parser.add_argument("--mode", choices=("replay", "snapshot"), default="replay")
-    args = parser.parse_args(argv)
 
     engine = None
     try:
+        args = parser.parse_args(argv)
         ca_file = os.environ.get("EPICK_W3_CA_FILE")
         ssl_context = ssl.create_default_context(cafile=ca_file) if ca_file else None
         client = W3RecoveryClient(
