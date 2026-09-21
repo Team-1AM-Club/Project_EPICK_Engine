@@ -142,21 +142,13 @@ class W3SourceRecovery:
             or not isinstance(status.reason, str)
             or type(status.history_complete) is not bool
             or type(status.index_ack) is not bool
+            or status.index_ack != (status.reason == "READY")
             or (status.outcome is not None and not isinstance(status.outcome, str))
             or (not response and status.outcome is not None)
         ):
             raise W3RecoveryOperationError("REMOTE_STATUS_UNSAFE")
         if status.reason == "CONFLICT" or status.outcome == "CONFLICT":
             raise W3RecoveryOperationError("REMOTE_CONFLICT")
-        if status.reason == "UNKNOWN_SOURCE" and (
-            status.event_cursor != 0
-            or status.required_event_cursor != 0
-            or status.restriction_revision != 0
-            or status.required_restriction_revision != 0
-            or status.history_complete
-            or status.index_ack
-        ):
-            raise W3RecoveryOperationError("REMOTE_STATUS_UNSAFE")
         if (
             status.event_cursor > history.high_watermark
             or status.required_event_cursor > history.high_watermark

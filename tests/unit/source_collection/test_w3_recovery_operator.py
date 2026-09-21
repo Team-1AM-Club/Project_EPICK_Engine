@@ -232,7 +232,7 @@ def test_empty_w3_status_replays_registered_history_after_authority_validation()
     """UNKNOWN_SOURCE is an empty W3 state, not an immutable conflict with W2 history."""
 
     client = RecordingClient(
-        statuses=[_status(reason="UNKNOWN_SOURCE")],
+        statuses=[_status(reason="UNKNOWN_SOURCE", history_complete=True)],
         replay_responses=[_status(event_cursor=1, outcome="REPLAYED")],
     )
 
@@ -246,7 +246,7 @@ def test_empty_w3_status_allows_explicit_snapshot_after_authority_validation() -
     """An operator-requested snapshot may initialize W3 after its authority check."""
 
     client = RecordingClient(
-        statuses=[_status(reason="UNKNOWN_SOURCE")],
+        statuses=[_status(reason="UNKNOWN_SOURCE", history_complete=True)],
         snapshot_responses=[_status(event_cursor=1, outcome="SNAPSHOT_APPLIED")],
     )
 
@@ -256,10 +256,38 @@ def test_empty_w3_status_allows_explicit_snapshot_after_authority_validation() -
     assert result.kind == "SNAPSHOT_APPLIED"
 
 
+def test_versionless_w3_status_can_advance_an_unknown_source_cursor() -> None:
+    """W3 keeps UNKNOWN_SOURCE after observation-only replay without a Source Version."""
+
+    client = RecordingClient(
+        statuses=[
+            _status(
+                event_cursor=1,
+                reason="UNKNOWN_SOURCE",
+                history_complete=True,
+            )
+        ],
+        replay_responses=[
+            _status(
+                event_cursor=2,
+                outcome="REPLAYED",
+                reason="UNKNOWN_SOURCE",
+                history_complete=True,
+            )
+        ],
+    )
+
+    result = _recovery(_history(2), client).recover(source_id=SOURCE_ID, mode="replay")
+
+    assert [body["after_cursor"] for body in client.replay_bodies] == [1]
+    assert result.kind == "REPLAYED"
+    assert result.event_cursor == 2
+
+
 def test_empty_local_history_never_declares_current_from_empty_w3_status() -> None:
     """No authoritative W2 event history is never converted into ALREADY_CURRENT."""
 
-    client = RecordingClient(statuses=[_status(reason="UNKNOWN_SOURCE")])
+    client = RecordingClient(statuses=[_status(reason="UNKNOWN_SOURCE", history_complete=True)])
 
     with pytest.raises(W3RecoveryOperationError) as raised:
         _recovery(_history(0), client).recover(source_id=SOURCE_ID, mode="replay")
