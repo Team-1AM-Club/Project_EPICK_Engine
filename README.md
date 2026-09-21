@@ -16,7 +16,7 @@ W3의 지식 색인·restriction 처리와 W4의 근거 기반 추천은 전체 
       <a href="https://github.com/romain1121">
         <img src="https://github.com/romain1121.png" width="80" alt="romain1121" /><br />
         <strong>romain1121</strong><br />
-        <img src="https://img.shields.io/badge/W3-Knowledge%20%26%20Restriction-2E8B57?style=flat&amp;logoColor=white" alt="W3 Knowledge and Restriction" />
+        <img src="https://img.shields.io/badge/W2-Source%20%26%20Collection-2E8B57?style=flat&amp;logoColor=white" alt="W2 Source Collection" />
       </a>
     </td>
     <td align="center" width="160px">
