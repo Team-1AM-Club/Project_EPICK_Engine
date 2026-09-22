@@ -20,6 +20,8 @@
 
 최종 스크립트 실행은 exit 0, `status=PASS`, `product_collection_evidence_count=15`, `product_collection_outbox_delivered=true`, `product_collection_w3_cursor=1`이었다. 결과에는 DB URL, bearer token, Source 원문 또는 raw HTTP body를 기록하지 않았다.
 
+W3 공동 재검토용 원본·비밀 제거 결과는 [결과 JSON](w2-w3-product-flow-e2e-result-2026-09-22.json)에 저장했다. 해당 실행은 W2 checkout `d99eb516c64dc16e92a5a76e528a8098024c1778`, W3 checkout `0c4f01f9537a3129c976fae5e63111a7982c5da6`에서 exit 0으로 끝났다.
+
 ## 검증과 남은 Gate
 
 - 관련 PostgreSQL 통합 테스트 3개 파일: **57 passed**. `ruff check .` 및 변경 스크립트 `ruff format --check`: 통과.
