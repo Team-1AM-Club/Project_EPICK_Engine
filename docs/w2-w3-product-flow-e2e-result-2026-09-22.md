@@ -5,6 +5,7 @@
 ## 고정 대상과 재현 경계
 
 - W2 제품 코드 SHA: `7523d757d59ed0e28c9102ebf456140e76e2c493` (`src`, `migrations` 검증). W3 분리 checkout SHA: `0c4f01f9537a3129c976fae5e63111a7982c5da6`.
+- 이 제품 경로와 복구 사례를 함께 실행하는 W2 검증 harness SHA는 `df10726cb2dfa90f1742505d76e2e03108c62b0d`다. harness 이후 변경 `ecfd5a8c11c2f4daf3ed1b238eaaabcfb2b5f67b`은 SQS preflight의 `maxReceiveCount` 숫자 문자열 허용과 단위 테스트만 포함하며, 이 E2E wire·저장 경로를 변경하지 않는다.
 - `scripts/verify_w2_w3_postgres_http.py`를 `EPICK_TEST_DATABASE_APPROVED=1`, 승인된 loopback `EPICK_TEST_DATABASE_URL`로 실행했다. 실행별 임시 PostgreSQL schema·W3 SQLite DB·로컬 HTTP 프로세스를 사용하고 종료 시 정리했다.
 - 외부 수집 I/O에는 `tests/fixtures/synthetic_sources/static_posting.html`을 반환하는 테스트 collector를 사용했다. W1 명령 조회도 테스트 응답이다. 이 두 경계를 제외한 `handle_collection_dispatch`, `SqlAlchemyCollectionInputProvider`, 정적 공고 파서, W2 DB·outbox, SourceAuthority, W3 publisher·HTTP 수락은 제품 구현이다. outbox 행을 검증 코드가 직접 삽입하지 않았다.
 
