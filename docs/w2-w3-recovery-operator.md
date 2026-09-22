@@ -1,6 +1,6 @@
 # W2 → W3 Source replay·snapshot 운영 인계
 
-상태: 로컬 합성 PostgreSQL → 고정 W3 HTTP 공동 검증 완료. 운영 배포·실제 Source 수집 연동 완료를 뜻하지 않는다.
+상태: 합성 공고 응답을 실제 W2 수집 runtime으로 처리해 PostgreSQL outbox에서 고정 W3 HTTP까지 전달했다. 운영 배포·실제 외부 Source fetch 완료를 뜻하지 않는다.
 
 ## 전제와 실행
 
@@ -30,14 +30,14 @@ Replay는 W3가 보고한 durable cursor에서 시작하고 한 페이지 최대
 ```powershell
 $env:EPICK_TEST_DATABASE_APPROVED = '1'
 # EPICK_TEST_DATABASE_URL: 승인된 격리 loopback PostgreSQL 테스트 DB로 별도 설정
-python scripts/verify_w2_w3_postgres_http.py --w3-checkout <pinned-w3-checkout> --w3-sha 0c4f01f9537a3129c976fae5e63111a7982c5da6 --w2-code-sha c27e6f318080b2a382aa93833bf3de3d87a1cb2a
+python scripts/verify_w2_w3_postgres_http.py --w3-checkout <pinned-w3-checkout> --w3-sha 0c4f01f9537a3129c976fae5e63111a7982c5da6 --w2-code-sha 7523d757d59ed0e28c9102ebf456140e76e2c493
 ```
 
-검증 결과는 [로컬 공동 E2E 결과](w2-w3-recovery-e2e-result-2026-09-21.md)에 기록한다. 합성 fixture와 실제 PostgreSQL outbox → HTTP 검증이며 실제 채용공고 수집부터의 경로는 검증하지 않았다.
+기존 replay·snapshot 결과는 [복구 공동 E2E 결과](w2-w3-recovery-e2e-result-2026-09-21.md), 수집 runtime을 포함한 결과는 [제품 경로 E2E 결과](w2-w3-product-flow-e2e-result-2026-09-22.md)에 기록한다. 합성 공고 HTML은 테스트용 collector가 제공하고, W1 조회는 테스트용 응답을 사용한다. W2 runtime·파서·PostgreSQL 저장·outbox 전송 및 W3 HTTP 수락은 제품 구현을 실행한다.
 
 ## 미완료 Gate
 
 - G-07: 보존기간·pruning·`F>0`과 authoritative 최신 상태 projection의 설계/운영 승인이 없다. 현재는 전체 공용 이력 보존 및 `F=0`만 성립한다.
 - W1 배포·IAM/SQS·자격 증명 배포와 실제 실행 위치, W3/W4 제품 사용 및 공동 운영 모니터링은 별도 연동 Gate다.
-- 실제 Source 수집 → 영속화/outbox → W3 전달의 제품 경로는 이 합성 검증 범위 밖이다.
+- 실제 외부 공식 Source의 네트워크 수집, W1의 실서비스 명령·FINALIZE, 운영 SQS/IAM·배포와 공동 테스트는 이 로컬 검증 범위 밖이다.
 - T067–T069 전체 완료 또는 W2–W3 운영 연동 완료로 표시하지 않는다. 앞선 전체 W2 테스트에는 신규 복구와 무관한 기존 실패 14건이 보고되었으며, 이 결과를 전체 suite green으로 해석하지 않는다.

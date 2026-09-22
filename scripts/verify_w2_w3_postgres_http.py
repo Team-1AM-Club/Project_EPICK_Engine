@@ -17,16 +17,42 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
-from epick_engine.source_collection.contracts import SourceEvent
-from epick_engine.source_collection.persistence import Company, OutboxEvent, Source
+from epick_engine.source_collection.collector import (
+    StaticFetchRequest,
+    StaticFetchResult,
+    StaticResponseCandidate,
+)
+from epick_engine.source_collection.contracts import SourceEvent, SourceType
+from epick_engine.source_collection.parsing import extract_static_candidate
+from epick_engine.source_collection.persistence import (
+    CollectionRuntimeAttempt,
+    Company,
+    Evidence,
+    OutboxEvent,
+    Source,
+    SourcePolicyDecision,
+    SourceVersion,
+)
+from epick_engine.source_collection.policy import Representation, UntrustedDocument, ValidatedTarget
+from epick_engine.source_collection.source_runtime import handle_collection_dispatch
+from epick_engine.source_collection.source_runtime_input import (
+    RuntimeSourceConfigFile,
+    SqlAlchemyCollectionInputProvider,
+)
+from epick_engine.source_collection.w1_transport import (
+    LookupResponse,
+    W1Dispatch,
+    parse_w1_dispatch,
+)
 from epick_engine.source_collection.w3_public_transport import source_event_to_w3_wire
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -270,6 +296,182 @@ def _states(session_factory: sessionmaker) -> list[str]:
                 select(OutboxEvent.delivery_state).order_by(OutboxEvent.aggregate_revision)
             )
         )
+
+
+def _collect_product_source(session_factory: sessionmaker[Session]) -> dict[str, object]:
+    """Run the deployed W2 collection handler with only W1 and fetch I/O substituted."""
+
+    source_id, company_id, command_id = uuid4(), uuid4(), uuid4()
+    source_url = "https://synthetic-meridian-careers.test/jobs/static-posting"
+    document = (
+        ROOT / "tests" / "fixtures" / "synthetic_sources" / "static_posting.html"
+    ).read_text(encoding="utf-8")
+    now = datetime.now(UTC)
+    with session_factory.begin() as session:
+        session.add(
+            Company(
+                company_id=company_id,
+                legal_name="Synthetic Meridian Careers Ltd.",
+                aliases=[],
+                official_domains=["synthetic-meridian-careers.test"],
+                legal_identifiers={},
+                identity_status="verified",
+                identity_evidence=["fixture:static_posting"],
+            )
+        )
+        session.add(
+            Source(
+                source_id=source_id,
+                company_id=company_id,
+                source_type=SourceType.JOB_POSTING.value,
+                canonical_url=source_url,
+                title="Synthetic static posting",
+            )
+        )
+        session.add(
+            SourcePolicyDecision(
+                policy_decision_id=uuid4(),
+                source_id=source_id,
+                revision=1,
+                official_status="verified",
+                access_class="public",
+                collection_permission="allowed",
+                excerpt_storage_permission="allowed",
+                body_storage_permission="denied",
+                redistribution_permission="unknown",
+                evidence_refs=["fixture:static_posting"],
+                checked_at=now,
+                policy_version="synthetic.product-e2e.v1",
+            )
+        )
+
+    raw_dispatch = json.loads(
+        (
+            ROOT / "tests" / "fixtures" / "w1_private_contract" / "private-w2-command-dispatch.json"
+        ).read_text(encoding="utf-8")
+    )
+    raw_dispatch["message_id"] = str(command_id)
+    raw_dispatch["payload"].update(
+        command_id=str(command_id),
+        job_id=str(uuid4()),
+        authenticated_owner_ref=str(uuid4()),
+        company_id=str(company_id),
+        source_id=str(source_id),
+    )
+    raw_dispatch["lookup_request"]["command_id"] = str(command_id)
+    raw_dispatch["core_decision_pin"].update(
+        company_id=str(company_id), source_id=str(source_id), decision_id=str(uuid4())
+    )
+    dispatch = parse_w1_dispatch(raw_dispatch)
+    config = RuntimeSourceConfigFile.model_validate(
+        {
+            "schema_version": "w2.source-runtime-config.v1",
+            "claim_lease_seconds": 120,
+            "sources": {
+                str(source_id): {
+                    "policy_revision": 1,
+                    "robots_permission": "allowed",
+                    "result_version": 1,
+                    "language": "en",
+                    "redirect_robots_permissions": [],
+                    "limits": {
+                        "site_concurrency": 1,
+                        "global_concurrency": 2,
+                        "source_ttl_seconds": 300,
+                        "max_response_bytes": 1_048_576,
+                        "max_decompressed_bytes": 2_097_152,
+                        "connect_timeout_seconds": 3.0,
+                        "read_timeout_seconds": 5.0,
+                        "max_redirects": 2,
+                        "general_retry_limit": 0,
+                        "retention_days": 7,
+                    },
+                }
+            },
+        }
+    )
+
+    class _AvailableLookup:
+        def lookup_dispatch(self, received: W1Dispatch) -> LookupResponse:
+            assert received == dispatch
+            return LookupResponse(
+                schema_version="w1.private.command-lookup.v1",
+                command_id=received.payload.command_id,
+                status="AVAILABLE",
+                reason_code=None,
+                command=received.payload,
+            )
+
+    class _FixtureCollector:
+        def __init__(self) -> None:
+            self.fetches = 0
+            self.closed = False
+
+        def fetch(
+            self, request: StaticFetchRequest, *, is_cancelled: Callable[[], bool]
+        ) -> StaticFetchResult:
+            assert not is_cancelled()
+            self.fetches += 1
+            return StaticFetchResult(
+                command_id=request.command_id,
+                candidate=StaticResponseCandidate(
+                    final_target=ValidatedTarget(
+                        url=source_url,
+                        hostname="synthetic-meridian-careers.test",
+                        port=443,
+                        resolved_addresses=frozenset({"198.51.100.20"}),
+                    ),
+                    representation=Representation.HTML,
+                    document=UntrustedDocument(text=document),
+                    http_status=200,
+                    raw_size=len(document.encode("utf-8")),
+                    decompressed_size=len(document.encode("utf-8")),
+                ),
+                failure_code=None,
+            )
+
+        def close(self) -> None:
+            self.closed = True
+
+    collector = _FixtureCollector()
+    proposal = handle_collection_dispatch(
+        dispatch,
+        session_factory=session_factory,
+        lookup_client=_AvailableLookup(),
+        input_provider=SqlAlchemyCollectionInputProvider(session_factory, config),
+        collector_factory=lambda: collector,
+        parser=extract_static_candidate,
+        runtime_config=config,
+        clock=lambda: now,
+        uuid_factory=uuid4,
+    )
+    assert collector.fetches == 1 and collector.closed
+    assert not proposal.result.failures
+    with session_factory() as session:
+        source = session.get(Source, source_id)
+        attempt = session.get(CollectionRuntimeAttempt, command_id)
+        versions = session.scalars(
+            select(SourceVersion).where(SourceVersion.source_id == source_id)
+        ).all()
+        evidence = session.scalars(
+            select(Evidence).where(Evidence.source_version_id == versions[0].source_version_id)
+        ).all()
+        events = session.scalars(
+            select(OutboxEvent).where(OutboxEvent.aggregate_id == source_id)
+        ).all()
+        assert source is not None and source.current_source_version_id is None
+        assert attempt is not None and attempt.state == "PERSISTED"
+        assert len(versions) == 1 and len(evidence) > 0 and len(events) == 1
+        assert any("AWS experience is required." in row.text_excerpt for row in evidence)
+        assert events[0].event_type == "source.version.available"
+        assert events[0].aggregate_revision == 1 and events[0].delivery_state == "pending"
+        assert str(dispatch.payload.authenticated_owner_ref) not in json.dumps(events[0].payload)
+    return {
+        "source_id": str(source_id),
+        "source_version_id": str(versions[0].source_version_id),
+        "evidence_count": len(evidence),
+        "outbox_event_id": str(events[0].event_id),
+    }
 
 
 def main() -> int:
@@ -910,6 +1112,31 @@ def main() -> int:
             assert outage_status["index_ack"] is False
             assert _states(session_factory) == states_before_recovery
 
+            product = _collect_product_source(session_factory)
+            product_source_id = product["source_id"]
+            assert isinstance(product_source_id, str)
+            product_authority = _get_json(
+                f"http://127.0.0.1:{authority_port}/internal/v1/sources/"
+                f"{product_source_id}/authority",
+                token=authority_token,
+            )
+            assert product_authority == {
+                "source_id": product_source_id,
+                "registered": True,
+            }
+            product_status_url = f"http://127.0.0.1:{w3_port}/c01/v1/status/{product_source_id}"
+            assert _get_json(product_status_url, token=w2_token)["event_cursor"] == 0
+            product_code, product_delivery = _worker(w2_env, "--limit", "25")
+            assert product_code == 0 and product_delivery == {"status": "DELIVERED", "count": 1}
+            product_status = _get_json(product_status_url, token=w2_token)
+            assert product_status["event_cursor"] == 1
+            assert product_status["required_event_cursor"] == 1
+            assert product_status["index_ack"] is False
+            with session_factory() as session:
+                product_event = session.get(OutboxEvent, UUID(str(product["outbox_event_id"])))
+                assert product_event is not None and product_event.delivery_state == "delivered"
+            assert _states(session_factory) == ["delivered"] * 11
+
             print(
                 json.dumps(
                     {
@@ -920,7 +1147,12 @@ def main() -> int:
                         "authority_outage_pending": 4,
                         "authority_registered_true": True,
                         "authority_unregistered_false": True,
-                        "outbox_delivered": 10,
+                        "outbox_delivered": 11,
+                        "product_collection_source_version_id": product["source_version_id"],
+                        "product_collection_evidence_count": product["evidence_count"],
+                        "product_collection_outbox_delivered": True,
+                        "product_collection_w3_cursor": product_status["event_cursor"],
+                        "product_collection_fixture_type": "synthetic_static_posting",
                         "unregistered_replacement_pending": True,
                         "cleared_restriction_revision": 2,
                         "gap_detected_at_cursor": gap_status["event_cursor"],
