@@ -395,12 +395,13 @@ def _queue_metadata(client: SqsClient, queue_url: str) -> tuple[str, str, str]:
         max_receive_count = redrive.get("maxReceiveCount")
         if (
             dlq_match is None
-            or dlq_arn == queue_arn
-            or dlq_match.group("region") != match.group("region")
-            or dlq_match.group("account") != match.group("account")
-            or not isinstance(max_receive_count, str)
-            or not 1 <= int(max_receive_count) <= 1000
-            or not (
+                or dlq_arn == queue_arn
+                or dlq_match.group("region") != match.group("region")
+                or dlq_match.group("account") != match.group("account")
+                or isinstance(max_receive_count, bool)
+                or not isinstance(max_receive_count, (str, int))
+                or not 1 <= int(max_receive_count) <= 1000
+                or not (
                 attributes.get("SqsManagedSseEnabled") == "true"
                 or isinstance(attributes.get("KmsMasterKeyId"), str)
                 and bool(attributes["KmsMasterKeyId"].strip())

@@ -344,6 +344,25 @@ def test_preflight_uses_dedicated_consumers_for_distinct_input_arns(
     assert {name for name, _ in sdk.calls} == {"attributes"}
 
 
+@pytest.mark.parametrize("max_receive_count", (5, "5"))
+def test_preflight_accepts_numeric_or_string_redrive_max_receive_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, max_receive_count: int | str
+) -> None:
+    _map_fixed_container_paths(monkeypatch, tmp_path)
+    values = environment()
+    sdk = _fake_sqs(values)
+    sdk.attributes[values["W1_COLLECTION_COMMAND_QUEUE_URL"]]["RedrivePolicy"] = json.dumps(
+        {
+            "deadLetterTargetArn": _QUEUE_PREFIX + "collection-dlq",
+            "maxReceiveCount": max_receive_count,
+        }
+    )
+
+    result = _symbol("preflight")(_engine(), sdk, _settings(values))
+
+    assert result["status"] == "PREFLIGHT_PASSED"
+
+
 def test_preflight_rejects_multiple_or_unknown_migration_heads(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
