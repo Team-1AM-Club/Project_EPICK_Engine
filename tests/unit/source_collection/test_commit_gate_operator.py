@@ -168,20 +168,10 @@ def test_sdk_errors_do_not_expose_payload_or_receipt() -> None:
     assert caught.value.__suppress_context__
 
 
-@pytest.mark.parametrize(
-    "migration_revision",
-    [
-        "0005_private_gate_delivery",
-        "0006_source_restriction",
-        "0007_restriction_receipt",
-    ],
-)
-def test_preflight_reads_metadata_without_consuming_or_mutating_queues(
-    migration_revision: str,
-) -> None:
+def test_preflight_accepts_only_collection_runtime_migration_head() -> None:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", migration_revision]
+    connection.scalar.side_effect = ["epick_ct15", "0008_collection_runtime"]
     sdk = FakeSqs()
     result = preflight(engine, sdk, Ct15Settings.from_environment(environment()))
     assert result["status"] == "PREFLIGHT_PASSED"
@@ -191,9 +181,15 @@ def test_preflight_reads_metadata_without_consuming_or_mutating_queues(
 
 @pytest.mark.parametrize(
     "migration_revision",
-    ["0004_private_commit_gate", "0008_unknown_future_head"],
+    [
+        "0004_private_commit_gate",
+        "0005_private_gate_delivery",
+        "0006_source_restriction",
+        "0007_restriction_receipt",
+        "0008_unknown_future_head",
+    ],
 )
-def test_preflight_does_not_claim_readiness_for_unknown_migration(
+def test_preflight_does_not_claim_readiness_for_incompatible_migration(
     migration_revision: str,
 ) -> None:
     engine = MagicMock()
@@ -215,7 +211,7 @@ def test_preflight_rejects_nonisolated_unencrypted_or_no_dlq_queue(bad_attribute
 
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0005_private_gate_delivery"]
+    connection.scalar.side_effect = ["epick_ct15", "0008_collection_runtime"]
     with pytest.raises(Ct15ConfigurationError):
         preflight(engine, BadQueue(), Ct15Settings.from_environment(environment()))
 

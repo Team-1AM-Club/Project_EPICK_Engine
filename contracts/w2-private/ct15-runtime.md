@@ -1,5 +1,12 @@
 # W2 CT15 runtime — local implementation / deployment pending
 
+2026-09-23 correction: current CT15 preflight requires the exact current
+Alembic head, `0008_collection_runtime`. Revisions `0005` through `0007` are
+forward-migration starting points only, not CT15 runtime-ready heads: the
+current commit-gate store always writes `private_commit_stages.stage_kind`,
+which is introduced by `0008`. Preflight must reject those older revisions
+before it performs any queue action.
+
 2026-09-20 follow-up: [B1 scoped inspection and transport controls](ct15-b1-controls.md)
 supersedes the historical missing-harness explanation below. The new W1 action
 harness exists at `dc3a7b45e1297d5a5a66ee6a00cbec55f073f97d`, but its exported/stored
