@@ -10,7 +10,7 @@ import multiprocessing
 import re
 import socket
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Protocol, cast
@@ -302,6 +302,7 @@ def _collector_settings(limits: ExecutionLimits) -> dict[str, object]:
         "RETRY_ENABLED": True,
         "RETRY_HTTP_CODES": list(_RETRY_HTTP_CODES),
         "RETRY_TIMES": limits.general_retry_limit,
+        "REMOTE_CONTROL_ENABLED": False,
         "ROBOTSTXT_OBEY": False,
         "STATS_DUMP": False,
         "TELNETCONSOLE_ENABLED": False,
@@ -572,7 +573,7 @@ def _run_static_child(
         class _StaticSpider(Spider):
             name = "epick_static_collector"
 
-            def start_requests(self) -> Iterator[Request]:
+            async def start(self) -> AsyncIterator[Request]:
                 yield Request(
                     initial_target.url,
                     callback=self.parse_response,

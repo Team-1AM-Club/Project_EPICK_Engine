@@ -190,6 +190,7 @@ def test_scrapy_settings_are_fail_closed_and_exclude_429() -> None:
     assert settings["LOG_ENABLED"] is False
     assert settings["HTTPPROXY_ENABLED"] is False
     assert settings["RETRY_TIMES"] == 1
+    assert settings["REMOTE_CONTROL_ENABLED"] is False
     assert 429 not in settings["RETRY_HTTP_CODES"]
     assert settings["DOWNLOAD_MAXSIZE"] == 100
     assert settings["DOWNLOAD_TIMEOUT"] == 3.0
