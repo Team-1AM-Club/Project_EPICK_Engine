@@ -28,6 +28,7 @@ from epick_engine.source_collection.persistence import (
     SourceVersion,
     lock_source_policy_scope,
 )
+from epick_engine.source_collection.private_scope import PrivateWriteScope
 from epick_engine.source_collection.w1_transport import W1WireContractError, _parse_wire
 
 
@@ -291,6 +292,7 @@ def apply_collection_commit_gate(
     *,
     ack_message_id: UUID,
     occurred_at: datetime,
+    private_scope: PrivateWriteScope | None = None,
 ) -> CommitGateAckProposal:
     """Apply private gate state and collection promotion as one savepoint."""
 
@@ -301,6 +303,7 @@ def apply_collection_commit_gate(
             ack_message_id=ack_message_id,
             occurred_at=occurred_at,
             missing_stage_kind="COLLECTION",
+            private_scope=private_scope,
         )
         stage = session.get(
             PrivateCommitStage,

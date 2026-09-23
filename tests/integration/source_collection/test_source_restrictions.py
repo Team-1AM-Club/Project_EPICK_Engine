@@ -28,6 +28,8 @@ from tests.integration.source_collection.test_static_posting_slice import (
     _limits,
     _StaticPostingSlice,
     _W1Harness,
+    commit_prepared_collection,
+    replay_committed_collection,
 )
 
 from epick_engine.source_collection.collector import (
@@ -55,7 +57,6 @@ from epick_engine.source_collection.persistence import (
     OutboxEvent,
     Source,
     SourceVersion,
-    commit_prepared_collection,
     get_current_source_restriction,
     list_source_restrictions,
     record_source_restriction,
@@ -320,6 +321,7 @@ def _observe_authorized_failure(
         session_factory=session_factory,
         lock_authority=_StaticPostingSlice._lock_authority,
         committer=commit_prepared_collection,
+        replayer=replay_committed_collection,
         clock=lambda: NOW,
     )
     result = worker.handle(command.model_dump(mode="json"))

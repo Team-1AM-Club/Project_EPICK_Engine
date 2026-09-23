@@ -18,6 +18,7 @@ from tests.integration.source_collection.test_atomic_persistence import (
     _locker,
     _policy_snapshot,
     _seed_source,
+    commit_prepared_collection,
 )
 
 from epick_engine.source_collection.contracts import SourceEvent
@@ -28,7 +29,6 @@ from epick_engine.source_collection.persistence import (
     OutboxEvent,
     ParserExecution,
     PreparedParserExecution,
-    commit_prepared_collection,
     get_current_source_version,
     get_extraction_revision,
     get_latest_source_observation,

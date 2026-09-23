@@ -21,6 +21,7 @@ from test_atomic_persistence import (
     _grant,
     _locker,
     _seed_source,
+    commit_prepared_collection,
 )
 
 from epick_engine.source_collection.contracts import (
@@ -52,7 +53,6 @@ from epick_engine.source_collection.persistence import (
     SourcePolicyDecision,
     SourceVersion,
     StaleExecution,
-    commit_prepared_collection,
     get_retained_body_for_reextraction,
     list_source_origin_evidence,
     list_source_origins,

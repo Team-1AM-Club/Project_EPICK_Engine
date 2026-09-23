@@ -21,6 +21,7 @@ from epick_engine.source_collection.collector import (
     StaticResponseCandidate,
 )
 from epick_engine.source_collection.commit_gate_contracts import (
+    CommitGateCommand,
     StagedResultProposal,
     parse_commit_gate_command,
 )
@@ -37,8 +38,13 @@ from epick_engine.source_collection.contracts import CollectionCommand, Collecti
 from epick_engine.source_collection.parsing import StaticParseResult
 from epick_engine.source_collection.persistence import (
     CollectionRuntimeAttempt,
+    bind_private_write_scope,
     commit_collection_candidate,
     replay_staged_collection,
+)
+from epick_engine.source_collection.private_scope import (
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
 )
 from epick_engine.source_collection.service import (
     StaticCollectionExecution,
@@ -91,6 +97,15 @@ class CollectionInputProvider(Protocol):
 
 class CollectorFactory(Protocol):
     def __call__(self) -> object: ...
+
+
+class PrivateWriteAuthorityProvider(Protocol):
+    """Return one decision authenticated outside the W2 wire contract."""
+
+    def __call__(
+        self,
+        subject: W1Dispatch | CommitGateCommand,
+    ) -> PrivateWriteAuthorityDecision: ...
 
 
 type SourceRuntimeMode = Literal["mixed", "collection", "gate"]
@@ -342,6 +357,7 @@ class _ClaimHeartbeat:
         lease_seconds: int,
         interval_seconds: float,
         renew_claim: Callable[..., CollectionRuntimeAttempt],
+        private_scope: PrivateWriteScope,
     ) -> None:
         self._session_factory = session_factory
         self._command_id = command_id
@@ -349,6 +365,7 @@ class _ClaimHeartbeat:
         self._lease_seconds = lease_seconds
         self._interval_seconds = interval_seconds
         self._renew_claim = renew_claim
+        self._private_scope = private_scope
         self._stop = Event()
         self._lost = Event()
         self._thread = Thread(
@@ -381,6 +398,7 @@ class _ClaimHeartbeat:
                     self._command_id,
                     claim_token=self._claim_token,
                     lease_seconds=self._lease_seconds,
+                    private_scope=self._private_scope,
                 )
             except Exception:
                 self._lost.set()
@@ -451,6 +469,7 @@ def _release_after_clean_failure(
     session_factory: SessionFactory,
     command_id: UUID,
     claim_token: UUID,
+    private_scope: PrivateWriteScope,
     store_operations: RuntimeStoreOperations,
 ) -> None:
     try:
@@ -458,6 +477,7 @@ def _release_after_clean_failure(
             session_factory,
             command_id,
             claim_token=claim_token,
+            private_scope=private_scope,
         )
     except Exception:
         # Lost, expired, or unconfirmed claims are deliberately left for
@@ -477,16 +497,32 @@ def handle_collection_dispatch(
     clock: Clock,
     uuid_factory: UUIDFactory,
     store_operations: RuntimeStoreOperations | None = None,
+    private_scope: PrivateWriteScope | None = None,
 ) -> StagedResultProposal:
     """Execute an initial POLICY dispatch through durable PERSIST, never DELIVER."""
 
     operations = _default_store_operations() if store_operations is None else store_operations
     validated = _validated_initial_dispatch(dispatch)
+    command = validated.payload
+    bind_private_write_scope(
+        private_scope,
+        owner_user_id=command.authenticated_owner_ref,
+        owner_deletion_epoch=command.owner_deletion_epoch,
+        command_id=command.command_id,
+        job_id=command.job_id,
+        project_ref=command.project_ref,
+        bind_project_ref=True,
+    )
+    assert private_scope is not None
     _require_available(validated, lookup_client)
 
     state = _load_attempt_state(session_factory, validated, operations)
     if state is not None and state[0] in {"PERSISTED", "FINALIZED"}:
-        return operations.replay_candidate(session_factory, validated)
+        return operations.replay_candidate(
+            session_factory,
+            validated,
+            private_scope=private_scope,
+        )
     if state is not None and state[0] == "INVALIDATED":
         raise RuntimeAuthorizationError("collection runtime attempt is invalidated")
 
@@ -506,6 +542,7 @@ def handle_collection_dispatch(
             input_value.policy_revision,
             _aware_now(clock),
             uuid_factory,
+            private_scope=private_scope,
         )
         attempt_id = attempt.attempt_id
         effective_policy_revision = attempt.effective_policy_revision
@@ -519,12 +556,14 @@ def handle_collection_dispatch(
         validated.payload.command_id,
         claim_token=claim_token,
         lease_seconds=runtime_config.claim_lease_seconds,
+        private_scope=private_scope,
     )
     if claimed.attempt_id != attempt_id:
         _release_after_clean_failure(
             session_factory,
             validated.payload.command_id,
             claim_token,
+            private_scope,
             operations,
         )
         raise CollectionRuntimeConflict("collection runtime attempt identity conflict")
@@ -543,6 +582,7 @@ def handle_collection_dispatch(
             lease_seconds=runtime_config.claim_lease_seconds,
             interval_seconds=runtime_config.heartbeat_interval_seconds,
             renew_claim=operations.renew_claim,
+            private_scope=private_scope,
         )
         heartbeat.start()
         heartbeat_started = True
@@ -578,6 +618,7 @@ def handle_collection_dispatch(
             validated.payload.command_id,
             claim_token=claim_token,
             lease_seconds=runtime_config.claim_lease_seconds,
+            private_scope=private_scope,
         )
         heartbeat.stop_and_join()
         heartbeat.ensure_active()
@@ -593,6 +634,7 @@ def handle_collection_dispatch(
             claim_token=claim_token,
             staged_message_id=uuid_factory(),
             occurred_at=_aware_now(clock),
+            private_scope=private_scope,
         )
     except Exception:
         if heartbeat is not None and heartbeat_started:
@@ -618,6 +660,7 @@ def handle_collection_dispatch(
                 session_factory,
                 validated.payload.command_id,
                 claim_token,
+                private_scope,
                 operations,
             )
         raise
@@ -629,8 +672,9 @@ def consume_source_runtime_once(
     expected_sender_id: str,
     *,
     mode: SourceRuntimeMode,
-    collection_handler: Callable[[W1Dispatch], object],
+    collection_handler: Callable[..., object],
     gate_applier: GateApplier = apply_collection_commit_gate,
+    authority_provider: PrivateWriteAuthorityProvider | None = None,
     clock: Clock,
     message_id_factory: Callable[[], UUID] = uuid4,
     visibility_heartbeat_seconds: float | None = None,
@@ -667,6 +711,9 @@ def consume_source_runtime_once(
     try:
         if is_collection:
             dispatch = parse_w1_dispatch(payload)
+            if authority_provider is None:
+                raise RuntimeAuthorizationError("trusted private authority provider is required")
+            private_scope = PrivateWriteScope(authority_provider(dispatch))
             extend_visibility = getattr(queue, "extend_visibility", None)
             if visibility_heartbeat_seconds is None or extend_visibility is None:
                 raise RuntimeError("source runtime visibility heartbeat is required")
@@ -677,19 +724,23 @@ def consume_source_runtime_once(
             )
             heartbeat.start()
             try:
-                collection_handler(dispatch)
+                collection_handler(dispatch, private_scope=private_scope)
             finally:
                 heartbeat.stop_and_join()
             if heartbeat.lost:
                 raise RuntimeError("source runtime receipt visibility is no longer active")
         else:
             gate = parse_commit_gate_command(payload)
+            if authority_provider is None:
+                raise RuntimeAuthorizationError("trusted private authority provider is required")
+            private_scope = PrivateWriteScope(authority_provider(gate))
             with session_factory.begin() as session:
                 ack = gate_applier(
                     session,
                     gate,
                     ack_message_id=message_id_factory(),
                     occurred_at=clock(),
+                    private_scope=private_scope,
                 )
                 persisted_ack = session.get(
                     PrivateCommitGateAck,

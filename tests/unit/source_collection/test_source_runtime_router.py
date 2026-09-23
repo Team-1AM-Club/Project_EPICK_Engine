@@ -16,6 +16,11 @@ import pytest
 from epick_engine.source_collection.commit_gate_contracts import build_staged_result
 from epick_engine.source_collection.commit_gate_runtime import QueueDelivery
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import (
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
+)
 from epick_engine.source_collection.source_runtime import (
     RuntimeAuthorizationError,
     build_collection_relay_authorizer,
@@ -119,9 +124,11 @@ class RecordingGateApplier:
         *,
         ack_message_id: UUID,
         occurred_at: datetime,
+        private_scope: PrivateWriteScope,
     ) -> object:
         assert isinstance(ack_message_id, UUID)
         assert occurred_at == NOW
+        assert private_scope.authority_ref == "test:w1-authenticated"
         self.gates.append(gate)
         session.persisted_ack = PersistedAck()
         return AppliedAck(message_id=ack_message_id)
@@ -229,13 +236,33 @@ def _consume(
     gate_applier: object = UnexpectedCallable(),
     visibility_heartbeat_seconds: float | None = 0.01,
 ) -> object:
+    def trusted_authority(subject: object) -> PrivateWriteAuthorityDecision:
+        command = getattr(subject, "payload", subject)
+        return PrivateWriteAuthorityDecision(
+            owner_user_id=command.authenticated_owner_ref,
+            owner_deletion_epoch=command.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+            authority_ref="test:w1-authenticated",
+            command_id=command.command_id,
+            job_id=command.job_id,
+        )
+
+    def bound_collection_handler(
+        dispatch: object,
+        *,
+        private_scope: PrivateWriteScope,
+    ) -> object:
+        assert private_scope.authority_ref == "test:w1-authenticated"
+        return collection_handler(dispatch)
+
     return consume_source_runtime_once(
         session_factory,
         queue,
         EXPECTED_SENDER_ID,
         mode=mode,
-        collection_handler=collection_handler,
+        collection_handler=bound_collection_handler,
         gate_applier=gate_applier,
+        authority_provider=trusted_authority,
         clock=lambda: NOW,
         visibility_heartbeat_seconds=visibility_heartbeat_seconds,
     )

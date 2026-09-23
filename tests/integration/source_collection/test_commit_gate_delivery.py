@@ -24,8 +24,10 @@ from epick_engine.source_collection.commit_gate_contracts import (
 )
 from epick_engine.source_collection.commit_gate_runtime import (
     QueueDelivery,
-    consume_once,
     relay_once,
+)
+from epick_engine.source_collection.commit_gate_runtime import (
+    consume_once as _consume_once,
 )
 from epick_engine.source_collection.commit_gate_store import (
     CommitGateRejected,
@@ -33,13 +35,22 @@ from epick_engine.source_collection.commit_gate_store import (
     PrivateCommitGateInbox,
     PrivateCommitStage,
     PrivateStagedOutbox,
-    apply_commit_gate,
     lock_private_command,
-    stage_private_result,
+)
+from epick_engine.source_collection.commit_gate_store import (
+    apply_commit_gate as _apply_commit_gate,
+)
+from epick_engine.source_collection.commit_gate_store import (
+    stage_private_result as _stage_private_result,
 )
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
 from epick_engine.source_collection.ct15_transport_controls import ControlledQueue
-from epick_engine.source_collection.persistence import Base
+from epick_engine.source_collection.persistence import Base, PrivateDeletionOwnerState
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import (
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
+)
 from epick_engine.source_collection.source_runtime import build_collection_relay_authorizer
 from epick_engine.source_collection.w1_transport import LookupRequest, LookupResponse
 
@@ -159,6 +170,45 @@ def _gate(
     if action == "PURGE":
         raw["purge_owner_deletion_epoch"] = command.owner_deletion_epoch + 1
     return parse_commit_gate_command(raw)
+
+
+def _command_scope(command: CollectionCommand) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=command.authenticated_owner_ref,
+            owner_deletion_epoch=command.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+            authority_ref="w1:test-delivery-authority",
+            command_id=command.command_id,
+            job_id=command.job_id,
+        )
+    )
+
+
+def _gate_authority(gate: CommitGateCommand) -> PrivateWriteAuthorityDecision:
+    return PrivateWriteAuthorityDecision(
+        owner_user_id=gate.authenticated_owner_ref,
+        owner_deletion_epoch=gate.owner_deletion_epoch,
+        scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+        authority_ref="w1:test-delivery-authority",
+        command_id=gate.command_id,
+        job_id=gate.job_id,
+    )
+
+
+def stage_private_result(session, command, result, **kwargs):
+    kwargs.setdefault("private_scope", _command_scope(command))
+    return _stage_private_result(session, command, result, **kwargs)
+
+
+def apply_commit_gate(session, gate, **kwargs):
+    kwargs.setdefault("private_scope", PrivateWriteScope(_gate_authority(gate)))
+    return _apply_commit_gate(session, gate, **kwargs)
+
+
+def consume_once(session_factory, queue, expected_sender_id, **kwargs):
+    kwargs.setdefault("authority_provider", _gate_authority)
+    return _consume_once(session_factory, queue, expected_sender_id, **kwargs)
 
 
 def _delivery(gate: CommitGateCommand, receipt: str = "synthetic-receipt") -> QueueDelivery:
@@ -445,48 +495,49 @@ def test_active_relay_claim_blocks_terminal_then_expired_claim_is_reclaimed(
 
 
 @pytest.mark.parametrize("action", ["ABORT", "PURGE"])
-def test_stale_session_terminal_observes_active_relay_claim_before_mutating(
+def test_terminal_gate_waits_for_owner_fenced_relay_before_mutating(
     session_factory,
     action: str,
 ) -> None:
-    """Using a stale identity-map claim view for ABORT/PURGE must fail this test."""
+    """A terminal gate cannot commit while a private send holds the owner fence."""
 
     command, result = _pair()
     _stage(session_factory, command, result)
-    stale_session = session_factory()
-    try:
-        stale_session.scalar(
-            select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
-        )
-        stale_session.commit()
-        gate = _gate(command, result, action, operation_id=uuid4(), revision=1)
-        queue = BlockingSendQueue()
+    gate = _gate(command, result, action, operation_id=uuid4(), revision=1)
+    queue = BlockingSendQueue()
+    terminal_started = Event()
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            relay_future = pool.submit(relay_once, session_factory, queue, clock=lambda: NOW)
-            assert queue.send_started.wait(timeout=5)
-            with pytest.raises(CommitGateRejected):
-                with stale_session.begin():
-                    apply_commit_gate(
-                        stale_session,
-                        gate,
-                        ack_message_id=uuid4(),
-                        occurred_at=NOW,
-                    )
-            with session_factory() as session:
-                stage = session.get(PrivateCommitStage, command.command_id)
-                staged = session.scalar(
-                    select(PrivateStagedOutbox).where(
-                        PrivateStagedOutbox.command_id == command.command_id
-                    )
-                )
-                assert stage.state not in {"ABORTED", "PURGED"}
-                assert staged.payload is not None
-                assert staged.relay_claim_token is not None
-            queue.release_send.set()
-            assert relay_future.result(timeout=5).status == "SENT"
-    finally:
-        stale_session.close()
+    def apply_terminal() -> None:
+        terminal_started.set()
+        with session_factory.begin() as session:
+            apply_commit_gate(
+                session,
+                gate,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        relay_future = pool.submit(relay_once, session_factory, queue, clock=lambda: NOW)
+        assert queue.send_started.wait(timeout=5)
+        terminal_future = pool.submit(apply_terminal)
+        assert terminal_started.wait(timeout=5)
+        assert not terminal_future.done()
+        queue.release_send.set()
+        assert relay_future.result(timeout=5).status == "SENT"
+        terminal_future.result(timeout=5)
+
+    with session_factory() as session:
+        stage = session.get(PrivateCommitStage, command.command_id)
+        staged = session.scalar(
+            select(PrivateStagedOutbox).where(
+                PrivateStagedOutbox.command_id == command.command_id
+            )
+        )
+        assert stage.state == ("ABORTED" if action == "ABORT" else "PURGED")
+        assert stage.result_payload is None
+        assert staged.payload is None
+        assert staged.delivered_at == NOW
 
 
 def test_old_failed_relay_cleanup_cannot_clear_a_newer_claim_token(session_factory) -> None:
@@ -823,8 +874,8 @@ def test_purge_before_relay_suppresses_staged_private_payload(session_factory) -
         assert staged.delivered_at is None
 
 
-def test_active_relay_claim_rejects_purge_then_allows_retry_after_send(session_factory) -> None:
-    """Blocking PURGE on network send instead of rejecting an active claim must fail."""
+def test_active_relay_holds_owner_fence_until_send_then_allows_purge(session_factory) -> None:
+    """PURGE waits for the bounded send and commits only after send completion."""
 
     command, result = _pair()
     _stage(session_factory, command, result)
@@ -855,32 +906,11 @@ def test_active_relay_claim_rejects_purge_then_allows_retry_after_send(session_f
         purge_future = pool.submit(apply_purge)
         assert purge_entered.wait(timeout=5)
         try:
-            assert purge_done.wait(timeout=1), (
-                "active relay claim must reject PURGE without waiting for send"
-            )
-            first_purge_error = purge_future.result(timeout=1)
-            assert isinstance(first_purge_error, CommitGateRejected)
-            with session_factory() as session:
-                stage = session.get(PrivateCommitStage, command.command_id)
-                staged = session.scalar(
-                    select(PrivateStagedOutbox).where(
-                        PrivateStagedOutbox.command_id == command.command_id
-                    )
-                )
-                assert stage.state != "PURGED"
-                assert staged.payload is not None
-                assert staged.relay_claim_token is not None
+            assert not purge_done.wait(timeout=0.2)
         finally:
             queue.release_send.set()
         assert relay_future.result(timeout=5).status == "SENT"
-
-    with session_factory.begin() as session:
-        apply_commit_gate(
-            session,
-            purge,
-            ack_message_id=uuid4(),
-            occurred_at=NOW + timedelta(seconds=1),
-        )
+        assert purge_future.result(timeout=5) is None
 
     with session_factory() as session:
         stage = session.get(PrivateCommitStage, command.command_id)
@@ -891,6 +921,60 @@ def test_active_relay_claim_rejects_purge_then_allows_retry_after_send(session_f
         assert stage.result_payload is None
         assert staged.payload is None
         assert staged.delivered_at == NOW
+
+
+def test_private_relay_cannot_send_after_competing_deletion_commits(session_factory) -> None:
+    first_command, first_result = _pair()
+    second_command, second_result = _pair()
+    second_command = second_command.model_copy(
+        update={"authenticated_owner_ref": first_command.authenticated_owner_ref}
+    )
+    _stage(session_factory, first_command, first_result)
+    _stage(session_factory, second_command, second_result)
+    queue = BlockingSendQueue()
+    deletion_started = Event()
+
+    def commit_deletion_tombstone() -> None:
+        deletion_started.set()
+        with session_factory.begin() as session:
+            owner_state = session.scalar(
+                select(PrivateDeletionOwnerState)
+                .where(
+                    PrivateDeletionOwnerState.owner_user_id
+                    == first_command.authenticated_owner_ref
+                )
+                .with_for_update()
+            )
+            assert owner_state is not None
+            owner_state.latest_epoch = 1
+            owner_state.account_deleted = True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        relay_future = pool.submit(
+            relay_once,
+            session_factory,
+            queue,
+            clock=lambda: NOW,
+            command_id=first_command.command_id,
+        )
+        assert queue.send_started.wait(timeout=5)
+        deletion_future = pool.submit(commit_deletion_tombstone)
+        assert deletion_started.wait(timeout=5)
+        assert not deletion_future.done()
+        queue.release_send.set()
+        assert relay_future.result(timeout=5).status == "SENT"
+        deletion_future.result(timeout=5)
+
+    after_deletion = FakeQueue()
+    assert (
+        relay_once(
+            session_factory,
+            after_deletion,
+            command_id=second_command.command_id,
+        ).status
+        == "SEND_FAILED"
+    )
+    assert after_deletion.sent == []
 
 
 def test_delivery_migration_precedes_the_forward_non_destructive_head() -> None:

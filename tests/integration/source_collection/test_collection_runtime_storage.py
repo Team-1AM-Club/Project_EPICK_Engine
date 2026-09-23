@@ -47,8 +47,10 @@ from epick_engine.source_collection.commit_gate_store import (
     CommitGateRejected,
     PrivateCommitStage,
     PrivateStagedOutbox,
-    apply_commit_gate,
     lock_private_command,
+)
+from epick_engine.source_collection.commit_gate_store import (
+    apply_commit_gate as _apply_commit_gate,
 )
 from epick_engine.source_collection.contracts import (
     AccessClass,
@@ -79,12 +81,17 @@ from epick_engine.source_collection.persistence import (
     PreparedParserExecution,
     PreparedSourceObservation,
     PreparedSourceVersion,
+    PrivateDeletionOwnerState,
     Source,
     SourceObservation,
     SourcePolicyDecision,
     SourceVersion,
-    commit_collection_candidate,
-    replay_staged_collection,
+)
+from epick_engine.source_collection.persistence import (
+    commit_collection_candidate as _commit_collection_candidate,
+)
+from epick_engine.source_collection.persistence import (
+    replay_staged_collection as _replay_staged_collection,
 )
 from epick_engine.source_collection.policy import (
     Representation as FetchRepresentation,
@@ -92,6 +99,12 @@ from epick_engine.source_collection.policy import (
 from epick_engine.source_collection.policy import (
     UntrustedDocument,
     ValidatedTarget,
+)
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import (
+    PrivateScopeRejected,
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
 )
 from epick_engine.source_collection.source_runtime import handle_collection_dispatch
 from epick_engine.source_collection.source_runtime_input import (
@@ -102,12 +115,20 @@ from epick_engine.source_collection.source_runtime_input import (
 from epick_engine.source_collection.source_runtime_store import (
     CollectionRuntimeBusy,
     CollectionRuntimeConflict,
-    claim_collection_attempt,
     dispatch_digest,
     load_bound_collection_attempt,
-    release_collection_claim,
-    renew_collection_claim,
-    reserve_collection_attempt,
+)
+from epick_engine.source_collection.source_runtime_store import (
+    claim_collection_attempt as _claim_collection_attempt,
+)
+from epick_engine.source_collection.source_runtime_store import (
+    release_collection_claim as _release_collection_claim,
+)
+from epick_engine.source_collection.source_runtime_store import (
+    renew_collection_claim as _renew_collection_claim,
+)
+from epick_engine.source_collection.source_runtime_store import (
+    reserve_collection_attempt as _reserve_collection_attempt,
 )
 from epick_engine.source_collection.w1_transport import (
     LookupResponse,
@@ -540,6 +561,162 @@ def _dispatch(
     return parse_w1_dispatch(raw)
 
 
+_TEST_PRIVATE_SCOPES: dict[UUID, PrivateWriteScope] = {}
+
+
+def _trusted_scope(dispatch: W1Dispatch) -> PrivateWriteScope:
+    command = dispatch.payload
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=command.authenticated_owner_ref,
+            owner_deletion_epoch=command.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+            authority_ref="w1:test-runtime-authority",
+            command_id=command.command_id,
+            job_id=command.job_id,
+        )
+    )
+
+
+def _gate_scope(gate: CommitGateCommand) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=gate.authenticated_owner_ref,
+            owner_deletion_epoch=gate.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+            authority_ref="w1:test-runtime-authority",
+            command_id=gate.command_id,
+            job_id=gate.job_id,
+        )
+    )
+
+
+def reserve_collection_attempt(session, dispatch, *args, **kwargs):
+    scope = kwargs.setdefault("private_scope", _trusted_scope(dispatch))
+    _TEST_PRIVATE_SCOPES[dispatch.payload.command_id] = scope
+    return _reserve_collection_attempt(session, dispatch, *args, **kwargs)
+
+
+def _scope_kwargs(command_id: UUID, kwargs: dict[str, Any]) -> None:
+    kwargs.setdefault("private_scope", _TEST_PRIVATE_SCOPES.get(command_id))
+
+
+def claim_collection_attempt(session_factory, command_id, **kwargs):
+    _scope_kwargs(command_id, kwargs)
+    return _claim_collection_attempt(session_factory, command_id, **kwargs)
+
+
+def renew_collection_claim(session_factory, command_id, **kwargs):
+    _scope_kwargs(command_id, kwargs)
+    return _renew_collection_claim(session_factory, command_id, **kwargs)
+
+
+def release_collection_claim(session_factory, command_id, **kwargs):
+    _scope_kwargs(command_id, kwargs)
+    return _release_collection_claim(session_factory, command_id, **kwargs)
+
+
+def commit_collection_candidate(session_factory, dispatch, *args, **kwargs):
+    scope = kwargs.setdefault("private_scope", _trusted_scope(dispatch))
+    _TEST_PRIVATE_SCOPES[dispatch.payload.command_id] = scope
+    return _commit_collection_candidate(session_factory, dispatch, *args, **kwargs)
+
+
+def replay_staged_collection(session_factory, dispatch, **kwargs):
+    kwargs.setdefault("private_scope", _trusted_scope(dispatch))
+    return _replay_staged_collection(session_factory, dispatch, **kwargs)
+
+
+def apply_commit_gate(session, gate, **kwargs):
+    kwargs.setdefault("private_scope", _gate_scope(gate))
+    return _apply_commit_gate(session, gate, **kwargs)
+
+
+@pytest.mark.approved_postgres
+def test_runtime_reservation_and_claim_lifecycle_require_current_trusted_scope(
+    runtime_session_factory: sessionmaker[Session],
+) -> None:
+    company_id, source_id = _seed_source(runtime_session_factory)
+    dispatch = _dispatch(
+        command_id=uuid4(),
+        job_id=uuid4(),
+        owner_ref=uuid4(),
+        company_id=company_id,
+        source_id=source_id,
+    )
+    with runtime_session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="scope"):
+            _reserve_collection_attempt(
+                session,
+                dispatch,
+                effective_policy_revision=3,
+                now=NOW,
+                uuid_factory=_uuid_factory(uuid4()),
+            )
+        attempt = reserve_collection_attempt(
+            session,
+            dispatch,
+            effective_policy_revision=3,
+            now=NOW,
+            uuid_factory=_uuid_factory(uuid4()),
+        )
+        assert attempt.private_scope_kind == "ACCOUNT"
+        assert attempt.project_id is None
+
+    command_id = dispatch.payload.command_id
+    with pytest.raises(PrivateScopeRejected, match="scope"):
+        _claim_collection_attempt(
+            runtime_session_factory,
+            command_id,
+            claim_token=uuid4(),
+            lease_seconds=30,
+        )
+    claim_token = uuid4()
+    claim_collection_attempt(
+        runtime_session_factory,
+        command_id,
+        claim_token=claim_token,
+        lease_seconds=30,
+    )
+    renew_collection_claim(
+        runtime_session_factory,
+        command_id,
+        claim_token=claim_token,
+        lease_seconds=30,
+    )
+    release_collection_claim(
+        runtime_session_factory,
+        command_id,
+        claim_token=claim_token,
+    )
+
+    stale = _dispatch(
+        command_id=uuid4(),
+        job_id=uuid4(),
+        owner_ref=uuid4(),
+        company_id=company_id,
+        source_id=source_id,
+    )
+    with runtime_session_factory.begin() as session:
+        session.add(
+            PrivateDeletionOwnerState(
+                owner_user_id=stale.payload.authenticated_owner_ref,
+                latest_epoch=1,
+                account_deleted=False,
+            )
+        )
+    with runtime_session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="current epoch"):
+            _reserve_collection_attempt(
+                session,
+                stale,
+                effective_policy_revision=3,
+                now=NOW,
+                uuid_factory=_uuid_factory(uuid4()),
+                private_scope=_trusted_scope(stale),
+            )
+
+
 def _uuid_factory(*values: UUID) -> Callable[[], UUID]:
     iterator = iter(values)
     return lambda: next(iterator)
@@ -883,7 +1060,7 @@ def test_reservation_rejects_changed_immutable_dispatch_without_consuming_order(
     )
 
     with runtime_session_factory.begin() as session:
-        with pytest.raises(CollectionRuntimeConflict):
+        with pytest.raises((CollectionRuntimeConflict, PrivateScopeRejected)):
             reserve_collection_attempt(
                 session,
                 changed_dispatch,
@@ -2204,6 +2381,7 @@ def test_full_runtime_handler_persists_candidate_after_fresh_stages_without_deli
         runtime_config=_source_runtime_config({source_id: 3}),
         clock=lambda: NOW,
         uuid_factory=uuid4,
+        private_scope=_trusted_scope(dispatch),
     )
 
     assert lookup.dispatches == [dispatch] * 5

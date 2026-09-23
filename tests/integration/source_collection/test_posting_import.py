@@ -71,15 +71,27 @@ from epick_engine.source_collection.persistence import (
     Source,
     SourcePolicyDecision,
     SourceVersion,
-    commit_prepared_collection,
     resolve_job_posting,
-    resolve_request_deduplication,
+)
+from epick_engine.source_collection.persistence import (
+    commit_prepared_collection as _commit_prepared_collection,
+)
+from epick_engine.source_collection.persistence import (
+    replay_committed_collection as _replay_committed_collection,
+)
+from epick_engine.source_collection.persistence import (
+    resolve_request_deduplication as _resolve_request_deduplication,
 )
 from epick_engine.source_collection.policy import (
     ExecutionLimits,
     Representation,
     UntrustedDocument,
     ValidatedTarget,
+)
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import (
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
 )
 from epick_engine.source_collection.service import (
     JobPostingContentRecord,
@@ -104,6 +116,45 @@ NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 OWNER_ID = UUID("00000000-0000-4000-8000-000000003601")
 COMPANY_ID = UUID("00000000-0000-4000-8000-000000003602")
 PROJECT_ID = UUID("00000000-0000-4000-8000-000000003603")
+
+
+def _trusted_scope(command: CollectionCommand) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=command.authenticated_owner_ref,
+            owner_deletion_epoch=command.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="PROJECT", project_id=PROJECT_ID),
+            authority_ref="w1:test-posting-import-authority",
+            command_id=command.command_id,
+            job_id=command.job_id,
+        )
+    )
+
+
+def commit_prepared_collection(session_factory, *, command, **kwargs):
+    kwargs.setdefault("private_scope", _trusted_scope(command))
+    return _commit_prepared_collection(session_factory, command=command, **kwargs)
+
+
+def replay_committed_collection(session_factory, *, command, **kwargs):
+    kwargs.setdefault("private_scope", _trusted_scope(command))
+    return _replay_committed_collection(session_factory, command=command, **kwargs)
+
+
+def resolve_request_deduplication(session, **kwargs):
+    owner_user_id = kwargs["owner_user_id"]
+    kwargs.setdefault(
+        "private_scope",
+        PrivateWriteScope(
+            PrivateWriteAuthorityDecision(
+                owner_user_id=owner_user_id,
+                owner_deletion_epoch=0,
+                scope=PrivateDeletionScope(kind="PROJECT", project_id=PROJECT_ID),
+                authority_ref="w1:test-posting-import-dedup-authority",
+            )
+        ),
+    )
+    return _resolve_request_deduplication(session, **kwargs)
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "synthetic_sources"
 ANNOTATIONS = cast(
     dict[str, Any],
@@ -799,6 +850,7 @@ class _PostingAssembly:
             session_factory=self._session_factory,
             lock_authority=self._lock_authority,
             committer=commit_prepared_collection,
+            replayer=replay_committed_collection,
             clock=lambda: NOW,
         )
         self.dispatches += 1
@@ -828,6 +880,7 @@ class _PostingAssembly:
             execution_fence=command.execution_fence,
             owner_deletion_epoch=command.owner_deletion_epoch,
             pointer_eligible=True,
+            private_scope=_trusted_scope(command),
         )
 
 

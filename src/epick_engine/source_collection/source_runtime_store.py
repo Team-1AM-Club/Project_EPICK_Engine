@@ -19,6 +19,12 @@ from epick_engine.source_collection.persistence import (
     CollectionRuntimeAttempt,
     Source,
     SourcePolicyDecision,
+    bind_private_write_scope,
+)
+from epick_engine.source_collection.private_scope import (
+    PrivateScopeRejected,
+    PrivateWriteScope,
+    lock_private_write_scope,
 )
 from epick_engine.source_collection.w1_transport import (
     W1CommandDispatch,
@@ -108,6 +114,7 @@ def reserve_collection_attempt(
     effective_policy_revision: int,
     now: datetime,
     uuid_factory: UUIDFactory,
+    private_scope: PrivateWriteScope | None = None,
 ) -> CollectionRuntimeAttempt:
     """Reserve one Source-local observation order in the caller-owned transaction."""
 
@@ -120,7 +127,18 @@ def reserve_collection_attempt(
         raise CollectionRuntimeConflict("effective policy revision must be positive")
     command = validated.payload
     digest = dispatch_digest(validated)
+    scope_kind, project_id = bind_private_write_scope(
+        private_scope,
+        owner_user_id=command.authenticated_owner_ref,
+        owner_deletion_epoch=command.owner_deletion_epoch,
+        command_id=command.command_id,
+        job_id=command.job_id,
+        project_ref=command.project_ref,
+        bind_project_ref=True,
+    )
 
+    assert private_scope is not None
+    lock_private_write_scope(session, private_scope)
     lock_private_command(session, command.command_id)
     terminal_stage = session.scalar(
         select(PrivateCommitStage)
@@ -143,6 +161,11 @@ def reserve_collection_attempt(
         _assert_bound_attempt(attempt, validated, digest)
         if attempt.effective_policy_revision != effective_policy_revision:
             raise CollectionRuntimeConflict("collection runtime policy binding conflict")
+        if (
+            attempt.private_scope_kind != scope_kind
+            or attempt.project_id != project_id
+        ):
+            raise PrivateScopeRejected("collection runtime private scope does not match")
         if attempt.state != "RESERVED":
             raise CollectionRuntimeConflict("collection runtime attempt is terminal")
 
@@ -174,6 +197,8 @@ def reserve_collection_attempt(
         dispatch_digest=digest,
         owner_ref=command.authenticated_owner_ref,
         job_id=command.job_id,
+        private_scope_kind=scope_kind,
+        project_id=project_id,
         source_id=command.source_id,
         company_id=command.company_id,
         observation_order=source.next_observation_order,
@@ -201,7 +226,21 @@ def _validate_lease_seconds(lease_seconds: int) -> None:
         raise CollectionRuntimeConflict("collection runtime lease must be positive")
 
 
-def _lock_reserved_attempt(session: Session, command_id: UUID) -> CollectionRuntimeAttempt:
+def _lock_reserved_attempt(
+    session: Session,
+    command_id: UUID,
+    private_scope: PrivateWriteScope | None,
+) -> CollectionRuntimeAttempt:
+    if private_scope is None or private_scope.job_id is None:
+        raise PrivateScopeRejected("a command- and job-bound private write scope is required")
+    bind_private_write_scope(
+        private_scope,
+        owner_user_id=private_scope.owner_user_id,
+        owner_deletion_epoch=private_scope.owner_deletion_epoch,
+        command_id=command_id,
+        job_id=private_scope.job_id,
+    )
+    lock_private_write_scope(session, private_scope)
     lock_private_command(session, command_id)
     attempt = session.scalar(
         select(CollectionRuntimeAttempt)
@@ -211,6 +250,13 @@ def _lock_reserved_attempt(session: Session, command_id: UUID) -> CollectionRunt
     )
     if attempt is None or attempt.state != "RESERVED":
         raise CollectionRuntimeConflict("collection runtime attempt is not reserved")
+    if (
+        attempt.owner_ref != private_scope.owner_user_id
+        or attempt.job_id != private_scope.job_id
+        or attempt.private_scope_kind != private_scope.kind
+        or attempt.project_id != private_scope.project_id
+    ):
+        raise PrivateScopeRejected("collection runtime private scope does not match")
     return attempt
 
 
@@ -236,13 +282,14 @@ def claim_collection_attempt(
     *,
     claim_token: UUID,
     lease_seconds: int,
+    private_scope: PrivateWriteScope | None = None,
 ) -> CollectionRuntimeAttempt:
     """Claim a RESERVED attempt in one self-contained DB-clock transaction."""
 
     _validate_claim_identity(command_id, claim_token)
     _validate_lease_seconds(lease_seconds)
     with session_factory() as session, session.begin():
-        attempt = _lock_reserved_attempt(session, command_id)
+        attempt = _lock_reserved_attempt(session, command_id, private_scope)
         database_now = _database_now(session)
         if (
             attempt.claim_token is not None
@@ -263,13 +310,14 @@ def renew_collection_claim(
     *,
     claim_token: UUID,
     lease_seconds: int,
+    private_scope: PrivateWriteScope | None = None,
 ) -> CollectionRuntimeAttempt:
     """Renew only the caller's active RESERVED claim using the database clock."""
 
     _validate_claim_identity(command_id, claim_token)
     _validate_lease_seconds(lease_seconds)
     with session_factory() as session, session.begin():
-        attempt = _lock_reserved_attempt(session, command_id)
+        attempt = _lock_reserved_attempt(session, command_id, private_scope)
         database_now = _database_now(session)
         if (
             attempt.claim_token != claim_token
@@ -287,12 +335,13 @@ def release_collection_claim(
     command_id: UUID,
     *,
     claim_token: UUID,
+    private_scope: PrivateWriteScope | None = None,
 ) -> CollectionRuntimeAttempt:
     """Release only the caller's active RESERVED claim in one root transaction."""
 
     _validate_claim_identity(command_id, claim_token)
     with session_factory() as session, session.begin():
-        attempt = _lock_reserved_attempt(session, command_id)
+        attempt = _lock_reserved_attempt(session, command_id, private_scope)
         database_now = _database_now(session)
         if (
             attempt.claim_token != claim_token

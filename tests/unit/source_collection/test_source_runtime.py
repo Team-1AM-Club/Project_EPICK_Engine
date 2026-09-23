@@ -15,10 +15,17 @@ import pytest
 
 import epick_engine.source_collection.source_runtime as source_runtime
 from epick_engine.source_collection.contracts import CollectionStage
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import (
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
+)
 from epick_engine.source_collection.source_runtime import (
     LookupGatedExecutionContext,
     RuntimeAuthorizationError,
-    handle_collection_dispatch,
+)
+from epick_engine.source_collection.source_runtime import (
+    handle_collection_dispatch as _handle_collection_dispatch,
 )
 from epick_engine.source_collection.source_runtime_input import RuntimeSourceConfigFile
 from epick_engine.source_collection.source_runtime_store import CollectionRuntimeConflict
@@ -40,6 +47,29 @@ def _dispatch(*, resume_stage: str = "policy", policy_revision: int | None = Non
     raw["payload"]["resume_stage"] = resume_stage
     raw["payload"]["policy_revision"] = policy_revision
     return parse_w1_dispatch(raw)
+
+
+def _trusted_scope(dispatch: W1Dispatch) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=dispatch.payload.authenticated_owner_ref,
+            owner_deletion_epoch=dispatch.payload.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+            authority_ref="test:w1-authenticated",
+            command_id=dispatch.payload.command_id,
+            job_id=dispatch.payload.job_id,
+        )
+    )
+
+
+def handle_collection_dispatch(dispatch: W1Dispatch, **kwargs: Any) -> object:
+    """Test adapter: inject one explicit trusted W1 authority decision."""
+
+    return _handle_collection_dispatch(
+        dispatch,
+        private_scope=_trusted_scope(dispatch),
+        **kwargs,
+    )
 
 
 def _runtime_config(

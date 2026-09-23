@@ -10,12 +10,14 @@ from tests.integration.source_collection.test_private_commit_gate import (
     NOW,
     _gate,
     _pair,
+    _trusted_scope,
+    apply_commit_gate,
     database_engine,
     session_factory,
+    stage_private_result,
 )
 
 from epick_engine.source_collection.commit_gate_operator import inspect_counts
-from epick_engine.source_collection.commit_gate_store import apply_commit_gate, stage_private_result
 
 __all__ = ["database_engine", "session_factory"]
 pytestmark = pytest.mark.approved_postgres
@@ -70,7 +72,11 @@ def test_synthetic_stage_accepts_result_larger_than_inbound_gate_limit(session_f
     raw["result"]["message_ko"] = "synthetic " * 2500
     input_path = tmp_path / "synthetic.json"
     input_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
-    stage_synthetic_input(session_factory, input_path)
+    stage_synthetic_input(
+        session_factory,
+        input_path,
+        authority_provider=lambda command: _trusted_scope(command).decision,
+    )
     with session_factory.begin() as session:
         counts = inspect_counts(
             session, owner_ref=command.authenticated_owner_ref, command_id=command.command_id
@@ -96,7 +102,11 @@ def test_synthetic_stage_rolls_back_when_wrapped_wire_exceeds_outbound_limit(
         json.dumps(raw, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
     )
     with pytest.raises(ValueError):
-        stage_synthetic_input(session_factory, input_path)
+        stage_synthetic_input(
+            session_factory,
+            input_path,
+            authority_provider=lambda command: _trusted_scope(command).decision,
+        )
     with session_factory.begin() as session:
         counts = inspect_counts(
             session, owner_ref=command.authenticated_owner_ref, command_id=command.command_id

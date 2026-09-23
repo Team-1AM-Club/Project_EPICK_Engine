@@ -14,6 +14,8 @@ from epick_engine.source_collection.commit_gate_runtime import (
     QueueDelivery,
     consume_once,
 )
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import PrivateWriteAuthorityDecision
 
 EXPECTED_SENDER_ID = "AROASYNTHETICROLE01"
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
@@ -88,6 +90,17 @@ class GateSessionFactory:
 
     def begin(self) -> GateSession:
         return self.session
+
+
+def _trusted_authority(gate) -> PrivateWriteAuthorityDecision:
+    return PrivateWriteAuthorityDecision(
+        owner_user_id=gate.authenticated_owner_ref,
+        owner_deletion_epoch=gate.owner_deletion_epoch,
+        scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+        authority_ref="w1:test-gate-authority",
+        command_id=gate.command_id,
+        job_id=gate.job_id,
+    )
 
 
 def _consume(delivery: QueueDelivery | None, *, receive_error: Exception | None = None):
@@ -232,6 +245,7 @@ def test_consume_once_keeps_private_gate_applier_as_its_default(monkeypatch) -> 
         *,
         ack_message_id: UUID,
         occurred_at: datetime,
+        private_scope: object,
     ) -> object:
         assert isinstance(ack_message_id, UUID)
         assert occurred_at == datetime(2026, 9, 20, tzinfo=UTC)
@@ -257,6 +271,7 @@ def test_consume_once_keeps_private_gate_applier_as_its_default(monkeypatch) -> 
         EXPECTED_SENDER_ID,
         clock=lambda: datetime(2026, 9, 20, tzinfo=UTC),
         message_id_factory=uuid4,
+        authority_provider=_trusted_authority,
     )
 
     assert result.status == "APPLIED"
@@ -288,6 +303,7 @@ def test_consume_once_allows_explicit_collection_aware_applier(monkeypatch) -> N
         *,
         ack_message_id: UUID,
         occurred_at: datetime,
+        private_scope: object,
     ) -> object:
         assert isinstance(ack_message_id, UUID)
         assert occurred_at == datetime(2026, 9, 20, tzinfo=UTC)
@@ -307,8 +323,29 @@ def test_consume_once_allows_explicit_collection_aware_applier(monkeypatch) -> N
         clock=lambda: datetime(2026, 9, 20, tzinfo=UTC),
         message_id_factory=uuid4,
         apply_gate=explicit_applier,
+        authority_provider=_trusted_authority,
     )
 
     assert result.status == "APPLIED"
     assert calls == ["collection"]
     assert queue.deleted == ["collection-aware-receipt"]
+
+
+def test_valid_gate_is_rejected_without_trusted_authority_provider() -> None:
+    body = (FIXTURES / "w1_private_contract/private-w2-commit-gate-prepare.json").read_text(
+        encoding="utf-8"
+    )
+    queue = FakeQueue(
+        [
+            QueueDelivery(
+                receipt_handle="missing-provider-receipt",
+                body=body,
+                sender_id=f"{EXPECTED_SENDER_ID}:synthetic-session",
+            )
+        ]
+    )
+
+    result = consume_once(NeverSessionFactory(), queue, EXPECTED_SENDER_ID)
+
+    assert result.status == "REJECTED"
+    assert queue.deleted == []

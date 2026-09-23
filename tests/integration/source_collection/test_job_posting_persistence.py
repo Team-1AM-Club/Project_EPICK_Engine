@@ -29,6 +29,9 @@ from tests.integration.source_collection.test_atomic_persistence import (
 from tests.integration.source_collection.test_atomic_persistence import (
     _seed_source as _atomic_seed_source,
 )
+from tests.integration.source_collection.test_atomic_persistence import (
+    commit_prepared_collection,
+)
 
 import epick_engine.source_collection.persistence as persistence_module
 from epick_engine.source_collection.contracts import (
@@ -58,7 +61,6 @@ from epick_engine.source_collection.persistence import (
     SourceObservation,
     SourcePolicyDecision,
     SourceVersion,
-    commit_prepared_collection,
     resolve_job_posting,
 )
 

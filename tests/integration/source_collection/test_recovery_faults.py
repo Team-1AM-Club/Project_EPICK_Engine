@@ -24,6 +24,8 @@ from tests.integration.source_collection.test_atomic_persistence import (
     _failure_prepared,
     _locker,
     _seed_source,
+    commit_prepared_collection,
+    replay_committed_collection,
 )
 from tests.integration.source_collection.test_source_outbox import (
     RecordingPublisher,
@@ -39,7 +41,6 @@ from epick_engine.source_collection.contracts import CollectionStage, SourceEven
 from epick_engine.source_collection.persistence import (
     Base,
     StaleExecution,
-    commit_prepared_collection,
 )
 from epick_engine.source_collection.worker import OutboxDeliveryError, SourceCollectionWorker
 
@@ -95,6 +96,7 @@ def _source_worker(
             session_factory=session_factory,
             lock_authority=lock_authority or _locker(command, pointer_eligible=True),
             committer=committer,
+            replayer=replay_committed_collection,
             clock=lambda: NOW,
         ),
         control,

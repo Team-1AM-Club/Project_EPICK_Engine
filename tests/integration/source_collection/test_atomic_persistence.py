@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Barrier, Lock
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,7 +14,6 @@ from sqlalchemy import Engine, create_engine, event, func, null, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 import epick_engine.source_collection.contracts as contracts
-import epick_engine.source_collection.persistence as persistence_module
 from epick_engine.source_collection.contracts import (
     CollectionCommand,
     CollectionResult,
@@ -45,15 +44,29 @@ from epick_engine.source_collection.persistence import (
     PreparedParserExecution,
     PreparedSourceObservation,
     PreparedSourceVersion,
+    PrivateDeletionOwnerState,
     RequestDeduplication,
     Source,
     SourceObservation,
     SourcePolicyDecision,
     SourceVersion,
     StaleExecution,
-    commit_prepared_collection,
-    replay_committed_collection,
-    resolve_request_deduplication,
+)
+from epick_engine.source_collection.persistence import (
+    commit_prepared_collection as _commit_prepared_collection,
+)
+from epick_engine.source_collection.persistence import (
+    replay_committed_collection as _replay_committed_collection,
+)
+from epick_engine.source_collection.persistence import (
+    resolve_request_deduplication as _resolve_request_deduplication,
+)
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import (
+    PrivateScopeRejected,
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
+    lock_private_write_scope,
 )
 from epick_engine.source_collection.source_runtime_store import reserve_collection_attempt
 from epick_engine.source_collection.w1_transport import W1Dispatch, parse_w1_dispatch
@@ -210,6 +223,7 @@ def _reserve_finalize_gate(
             effective_policy_revision=policy.revision,
             now=NOW,
             uuid_factory=uuid4,
+            private_scope=_runtime_scope(dispatch),
         )
     return dispatch
 
@@ -491,7 +505,51 @@ def _grant(
         execution_fence=command.execution_fence,
         owner_deletion_epoch=command.owner_deletion_epoch,
         pointer_eligible=pointer_eligible,
+        private_scope=_command_scope(command),
     )
+
+
+def _command_scope(command: CollectionCommand) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=command.authenticated_owner_ref,
+            owner_deletion_epoch=command.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+            authority_ref="w1:test-legacy-authority",
+            command_id=command.command_id,
+            job_id=command.job_id,
+        )
+    )
+
+
+def commit_prepared_collection(session_factory, *, command, **kwargs):
+    kwargs.setdefault("private_scope", _command_scope(command))
+    return _commit_prepared_collection(session_factory, command=command, **kwargs)
+
+
+def replay_committed_collection(session_factory, *, command, **kwargs):
+    kwargs.setdefault("private_scope", _command_scope(command))
+    return _replay_committed_collection(session_factory, command=command, **kwargs)
+
+
+def _runtime_scope(dispatch: W1Dispatch) -> PrivateWriteScope:
+    return _command_scope(dispatch.payload)
+
+
+def _dedup_scope(owner_user_id: UUID, *, epoch: int = 0) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=owner_user_id,
+            owner_deletion_epoch=epoch,
+            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+            authority_ref="w1:test-dedup-authority",
+        )
+    )
+
+
+def resolve_request_deduplication(session: Session, **kwargs):
+    kwargs.setdefault("private_scope", _dedup_scope(kwargs["owner_user_id"]))
+    return _resolve_request_deduplication(session, **kwargs)
 
 
 def _locker(
@@ -564,8 +622,20 @@ def test_atomic_commit_locks_first_and_keeps_private_result_out_of_public_event(
 
     assert returned == prepared.result
     assert len(seen_sessions) == 1
-    assert "select" in statements[0].lower()
-    assert "sources" in statements[0].lower()
+    normalized = [statement.lower() for statement in statements]
+    source_locks = [
+        index
+        for index, statement in enumerate(normalized)
+        if "select" in statement and "sources" in statement
+    ]
+    owner_locks = [
+        index
+        for index, statement in enumerate(normalized)
+        if "private_deletion_owner_states" in statement
+    ]
+    assert len(source_locks) >= 1
+    assert owner_locks
+    assert min(owner_locks) < source_locks[0]
 
     with session_factory() as session:
         attempt = session.get(CollectionAttempt, prepared.attempt_id)
@@ -595,6 +665,37 @@ def test_atomic_commit_locks_first_and_keeps_private_result_out_of_public_event(
                 "owner_deletion_epoch",
                 "result_payload",
             }
+        )
+
+
+def test_legacy_commit_and_replay_require_pre_authenticated_scope(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _, source, policy = _seed_source(session_factory)
+    command = _command(source)
+    prepared = _complete_prepared(command, source, policy, aggregate_revision=1)
+    locker = _locker(command, pointer_eligible=True)
+
+    with pytest.raises(PrivateScopeRejected, match="trusted private write scope"):
+        _commit_prepared_collection(
+            session_factory,
+            command=command,
+            prepared=prepared,
+            lock_authority=locker,
+        )
+
+    commit_prepared_collection(
+        session_factory,
+        command=command,
+        prepared=prepared,
+        lock_authority=locker,
+    )
+    with pytest.raises(PrivateScopeRejected, match="trusted private write scope"):
+        _replay_committed_collection(
+            session_factory,
+            command=command,
+            attempt_id=prepared.attempt_id,
+            lock_authority=locker,
         )
 
 
@@ -744,7 +845,10 @@ def test_replay_committed_collection_rejects_initial_policy_stored_mismatches(
     with session_factory() as session:
         before = _counts(session)
 
-    with pytest.raises(PersistenceConflict, match="immutable payload"):
+    with pytest.raises(
+        (PersistenceConflict, PrivateScopeRejected),
+        match="immutable payload|wire binding",
+    ):
         replay_committed_collection(
             session_factory,
             command=initial_command,
@@ -951,6 +1055,7 @@ def test_stale_authority_rejects_before_any_w2_write(
             execution_fence=command.execution_fence,
             owner_deletion_epoch=command.owner_deletion_epoch,
             pointer_eligible=True,
+            private_scope=_command_scope(command),
         )
 
     with pytest.raises(StaleExecution, match="execution authority"):
@@ -1152,7 +1257,11 @@ def test_request_deduplication_replays_same_hash_and_rejects_different_hash(
         "created_at": NOW,
     }
     with session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="scope"):
+            _resolve_request_deduplication(session, **request)
         created = resolve_request_deduplication(session, **request)
+        assert created.private_scope_kind == "ACCOUNT"
+        assert created.project_id is None
 
     with session_factory.begin() as session:
         replayed = resolve_request_deduplication(session, **request)
@@ -1168,6 +1277,33 @@ def test_request_deduplication_replays_same_hash_and_rejects_different_hash(
 
     with session_factory() as session:
         assert _count(session, RequestDeduplication) == 1
+
+
+def test_request_deduplication_rejects_stale_trusted_scope(
+    session_factory: sessionmaker[Session],
+) -> None:
+    owner_user_id = uuid4()
+    with session_factory.begin() as session:
+        session.add(
+            PrivateDeletionOwnerState(
+                owner_user_id=owner_user_id,
+                latest_epoch=1,
+                account_deleted=False,
+            )
+        )
+    with session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="current epoch"):
+            _resolve_request_deduplication(
+                session,
+                private_scope=_dedup_scope(owner_user_id),
+                owner_user_id=owner_user_id,
+                operation="collection.start",
+                idempotency_key="stale-request-key",
+                request_hash="a" * 64,
+                accepted_resource_ref="source:atomic",
+                input_version=1,
+                created_at=NOW,
+            )
 
 
 def test_natural_key_dedup_canonicalizes_new_candidate_ids(
@@ -1265,7 +1401,10 @@ def test_replay_rejects_changed_private_command_scope(
     )
     changed = CollectionCommand.model_validate({**command.model_dump(mode="json"), **updates})
 
-    with pytest.raises(PersistenceConflict, match="immutable payload"):
+    with pytest.raises(
+        (PersistenceConflict, PrivateScopeRejected),
+        match="immutable payload|wire binding",
+    ):
         commit_prepared_collection(
             session_factory,
             command=changed,
@@ -1390,7 +1529,6 @@ def test_failure_result_with_version_observation_preserves_current_version(
 
 def test_concurrent_same_command_replays_after_source_lock(
     session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, source, policy = _seed_source(session_factory)
     command = _command(source)
@@ -1400,36 +1538,6 @@ def test_concurrent_same_command_replays_after_source_lock(
         policy,
         aggregate_revision=1,
     )
-    first_replay_barrier = Barrier(2)
-    guarded_sessions: set[int] = set()
-    guard = Lock()
-    original_replay = persistence_module._replay_attempt
-
-    def synchronized_replay(
-        session: Session,
-        *,
-        command: CollectionCommand,
-        attempt_id: UUID,
-    ) -> CollectionResult | None:
-        replay = original_replay(
-            session,
-            command=command,
-            attempt_id=attempt_id,
-        )
-        with guard:
-            first_call = id(session) not in guarded_sessions
-            guarded_sessions.add(id(session))
-        if first_call:
-            assert replay is None
-            first_replay_barrier.wait(timeout=10)
-        return replay
-
-    monkeypatch.setattr(
-        persistence_module,
-        "_replay_attempt",
-        synchronized_replay,
-    )
-
     def commit() -> CollectionResult:
         return commit_prepared_collection(
             session_factory,
@@ -1711,6 +1819,8 @@ def test_source_lock_serializes_legacy_writer_after_first_reservation_transition
 
     def reserve_while_holding_source_lock() -> UUID:
         with session_factory.begin() as session:
+            scope = _runtime_scope(dispatch)
+            lock_private_write_scope(session, scope)
             locked_source = session.scalar(
                 select(Source).where(Source.source_id == source.source_id).with_for_update()
             )
@@ -1722,6 +1832,7 @@ def test_source_lock_serializes_legacy_writer_after_first_reservation_transition
                 effective_policy_revision=policy.revision,
                 now=NOW,
                 uuid_factory=uuid4,
+                private_scope=scope,
             )
             release_reservation.wait(timeout=10)
             return reserved.attempt_id

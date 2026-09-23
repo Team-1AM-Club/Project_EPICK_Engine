@@ -9,7 +9,7 @@ import json
 import os
 import re
 import signal
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from epick_engine.source_collection.commit_gate_runtime import (
     MAX_OUTBOUND_MESSAGE_BYTES,
+    PrivateWriteAuthorityProvider,
     Queue,
     QueueDelivery,
     SessionFactory,
@@ -41,6 +42,10 @@ from epick_engine.source_collection.commit_gate_store import (
 )
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
 from epick_engine.source_collection.ct15_inspection import inspect_run_counts, load_run_scope
+from epick_engine.source_collection.private_scope import (
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
+)
 from epick_engine.source_collection.w1_transport import _parse_wire
 
 _ROLE_ID = re.compile(r"AROA[A-Z0-9]{17}")
@@ -283,7 +288,13 @@ def inspect_counts(session: Session, *, owner_ref: UUID, command_id: UUID) -> di
     }
 
 
-def stage_synthetic_input(sessions: SessionFactory, input_path: Path) -> None:
+def stage_synthetic_input(
+    sessions: SessionFactory,
+    input_path: Path,
+    *,
+    authority_provider: Callable[[CollectionCommand], PrivateWriteAuthorityDecision]
+    | None = None,
+) -> None:
     """Validate the wrapped wire size before committing a synthetic staged result."""
     if input_path.stat().st_size > MAX_OUTBOUND_MESSAGE_BYTES:
         raise Ct15ConfigurationError("synthetic fixture exceeds bound")
@@ -291,9 +302,17 @@ def stage_synthetic_input(sessions: SessionFactory, input_path: Path) -> None:
     raw = _strict_json_object(data.decode("utf-8"), max_bytes=MAX_OUTBOUND_MESSAGE_BYTES)
     command = _parse_wire(raw["command"], CollectionCommand, label="synthetic command")
     result = _parse_wire(raw["result"], CollectionResult, label="synthetic result")
+    if authority_provider is None:
+        raise Ct15ConfigurationError("trusted private authority provider is required")
+    private_scope = PrivateWriteScope(authority_provider(command))
     with sessions.begin() as session:
         proposal = stage_private_result(
-            session, command, result, message_id=uuid4(), occurred_at=datetime.now(UTC)
+            session,
+            command,
+            result,
+            message_id=uuid4(),
+            occurred_at=datetime.now(UTC),
+            private_scope=private_scope,
         )
         _wire_body(proposal.model_dump(mode="json"))
 
@@ -304,11 +323,18 @@ def run_loop(
     queue: Queue,
     expected_sender_id: str,
     stop: Event,
+    *,
+    authority_provider: PrivateWriteAuthorityProvider | None = None,
 ) -> int:
     """Finish the current bounded transaction on SIGTERM, then stop receiving."""
     while not stop.is_set():
         outcome = (
-            consume_once(sessions, queue, expected_sender_id)
+            consume_once(
+                sessions,
+                queue,
+                expected_sender_id,
+                authority_provider=authority_provider,
+            )
             if action == "consume"
             else relay_once(sessions, queue)
         )

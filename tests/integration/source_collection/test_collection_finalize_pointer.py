@@ -25,7 +25,9 @@ from epick_engine.source_collection.commit_gate_store import (
     PrivateCommitStage,
     PrivateStagedOutbox,
     read_finalized_result,
-    stage_private_result,
+)
+from epick_engine.source_collection.commit_gate_store import (
+    stage_private_result as _stage_private_result,
 )
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
 from epick_engine.source_collection.persistence import (
@@ -36,9 +38,18 @@ from epick_engine.source_collection.persistence import (
     SourcePolicyDecision,
     SourceVersion,
     append_source_policy_decision,
-    commit_collection_candidate,
 )
-from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
+from epick_engine.source_collection.persistence import (
+    commit_collection_candidate as _commit_collection_candidate,
+)
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import (
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
+)
+from epick_engine.source_collection.source_runtime_gate import (
+    apply_collection_commit_gate as _apply_collection_commit_gate,
+)
 from epick_engine.source_collection.source_runtime_store import (
     claim_collection_attempt,
     reserve_collection_attempt,
@@ -47,6 +58,34 @@ from epick_engine.source_collection.source_runtime_store import (
 pytestmark = pytest.mark.approved_postgres
 NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
+
+
+def _trusted_scope(command: CollectionCommand | CommitGateCommand) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=command.authenticated_owner_ref,
+            owner_deletion_epoch=command.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+            authority_ref="w1:test-finalize-authority",
+            command_id=command.command_id,
+            job_id=command.job_id,
+        )
+    )
+
+
+def commit_collection_candidate(session_factory, dispatch, *args, **kwargs):
+    kwargs.setdefault("private_scope", _trusted_scope(dispatch.payload))
+    return _commit_collection_candidate(session_factory, dispatch, *args, **kwargs)
+
+
+def stage_private_result(session, command, result, **kwargs):
+    kwargs.setdefault("private_scope", _trusted_scope(command))
+    return _stage_private_result(session, command, result, **kwargs)
+
+
+def apply_collection_commit_gate(session, gate, **kwargs):
+    kwargs.setdefault("private_scope", _trusted_scope(gate))
+    return _apply_collection_commit_gate(session, gate, **kwargs)
 
 
 @pytest.fixture
@@ -675,6 +714,7 @@ def test_failure_finalize_advances_latest_observation_without_replacing_current_
         source_id=source.source_id,
     )
     effective_command = dispatch.payload.model_copy(update={"policy_revision": policy.revision})
+    private_scope = _trusted_scope(dispatch.payload)
     with session_factory.begin() as session:
         reserved = reserve_collection_attempt(
             session,
@@ -682,6 +722,7 @@ def test_failure_finalize_advances_latest_observation_without_replacing_current_
             effective_policy_revision=policy.revision,
             now=NOW,
             uuid_factory=uuid4,
+            private_scope=private_scope,
         )
     claim_token = uuid4()
     claim_collection_attempt(
@@ -689,6 +730,7 @@ def test_failure_finalize_advances_latest_observation_without_replacing_current_
         dispatch.payload.command_id,
         claim_token=claim_token,
         lease_seconds=30,
+        private_scope=private_scope,
     )
     failure_prepared = _failure_prepared(
         effective_command,

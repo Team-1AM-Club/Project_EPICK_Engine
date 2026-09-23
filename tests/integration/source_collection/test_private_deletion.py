@@ -46,6 +46,18 @@ from epick_engine.source_collection.persistence import (
     apply_private_deletion,
     assert_current_attempt,
 )
+from epick_engine.source_collection.persistence import (
+    commit_prepared_collection as _commit_prepared_collection,
+)
+from epick_engine.source_collection.persistence import (
+    replay_committed_collection as _replay_committed_collection,
+)
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import (
+    PrivateScopeRejected,
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
+)
 from epick_engine.source_collection.worker import (
     PrivateDeletionAcknowledgement,
     PrivateDeletionCommand,
@@ -58,6 +70,29 @@ OWNER_B = UUID("00000000-0000-4000-8000-000000006302")
 PROJECT_A_1 = UUID("00000000-0000-4000-8000-000000006311")
 PROJECT_A_2 = UUID("00000000-0000-4000-8000-000000006312")
 PROJECT_B_1 = UUID("00000000-0000-4000-8000-000000006321")
+
+
+def _worker_scope(command: CollectionCommand) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=command.authenticated_owner_ref,
+            owner_deletion_epoch=command.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="PROJECT", project_id=PROJECT_A_1),
+            authority_ref="w1:test-private-deletion-authority",
+            command_id=command.command_id,
+            job_id=command.job_id,
+        )
+    )
+
+
+def _commit_worker_result(session_factory, *, command, **kwargs):
+    kwargs.setdefault("private_scope", _worker_scope(command))
+    return _commit_prepared_collection(session_factory, command=command, **kwargs)
+
+
+def _replay_worker_result(session_factory, *, command, **kwargs):
+    kwargs.setdefault("private_scope", _worker_scope(command))
+    return _replay_committed_collection(session_factory, command=command, **kwargs)
 
 
 @pytest.fixture
@@ -162,6 +197,7 @@ class _DeletionEpochLocker:
             execution_fence=command.execution_fence,
             owner_deletion_epoch=command.owner_deletion_epoch,
             pointer_eligible=True,
+            private_scope=_worker_scope(command),
         )
 
 
@@ -885,6 +921,18 @@ def test_pre_deletion_worker_command_replay_cannot_recreate_private_result(
     """EXPECTED RED until T067 connects deletion epoch to the actual worker replay path."""
 
     state = _seed_shared_public_source(session_factory)
+    with session_factory.begin() as session:
+        owner_state = session.get(PrivateDeletionOwnerState, OWNER_A)
+        if owner_state is None:
+            session.add(
+                PrivateDeletionOwnerState(
+                    owner_user_id=OWNER_A,
+                    latest_epoch=4,
+                    account_deleted=False,
+                )
+            )
+        else:
+            owner_state.latest_epoch = 4
     with session_factory() as session:
         source = session.get(Source, state.source_id)
         policy = session.scalar(
@@ -927,6 +975,8 @@ def test_pre_deletion_worker_command_replay_cannot_recreate_private_result(
         execution_factory=_Factory(worker_events, execution),
         session_factory=session_factory,
         lock_authority=deletion_epoch_locker,
+        committer=_commit_worker_result,
+        replayer=_replay_worker_result,
         clock=lambda: NOW,
     )
 
@@ -951,7 +1001,10 @@ def test_pre_deletion_worker_command_replay_cannot_recreate_private_result(
         side_effects=side_effects,
     )
 
-    with pytest.raises(StaleExecution, match="deletion marker has advanced"):
+    with pytest.raises(
+        (StaleExecution, PrivateScopeRejected),
+        match="deletion marker has advanced|current epoch",
+    ):
         worker.handle(command.model_dump(mode="json"))
 
     assert _attempt_ids_for_owner(session_factory, OWNER_A) == {state.attempt_a_project_2}

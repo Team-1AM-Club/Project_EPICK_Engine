@@ -13,15 +13,13 @@ from tests.integration.source_collection.test_private_commit_gate import (
     NOW,
     _gate,
     _pair,
+    apply_commit_gate,
     database_engine,
     session_factory,
-)
-
-from epick_engine.source_collection.commit_gate_store import (
-    PrivateStagedOutbox,
-    apply_commit_gate,
     stage_private_result,
 )
+
+from epick_engine.source_collection.commit_gate_store import PrivateStagedOutbox
 from epick_engine.source_collection.ct15_inspection import (
     Ct15InspectionError,
     inspect_run_counts,

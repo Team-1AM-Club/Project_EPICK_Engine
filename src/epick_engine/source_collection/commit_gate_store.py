@@ -40,7 +40,12 @@ from epick_engine.source_collection.commit_gate_contracts import (
     parse_commit_gate_command,
 )
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
-from epick_engine.source_collection.persistence import Base
+from epick_engine.source_collection.persistence import Base, bind_private_write_scope
+from epick_engine.source_collection.private_scope import (
+    PrivateScopeRejected,
+    PrivateWriteScope,
+    lock_private_write_scope,
+)
 from epick_engine.source_collection.w1_transport import (
     W1WireContractError,
     _parse_wire,
@@ -277,6 +282,7 @@ def _bound_row(
     epoch: int,
     digest: str,
     stage_kind: Literal["PRIVATE_ONLY", "COLLECTION"] | None = None,
+    private_scope: PrivateWriteScope | None = None,
 ) -> None:
     if (
         row.owner_ref != owner
@@ -287,6 +293,11 @@ def _bound_row(
         or (stage_kind is not None and row.stage_kind != stage_kind)
     ):
         raise CommitGateRejected("private commit-gate binding mismatch")
+    if private_scope is not None and (
+        row.private_scope_kind != private_scope.kind
+        or row.project_id != private_scope.project_id
+    ):
+        raise PrivateScopeRejected("private commit-gate scope binding does not match")
 
 
 def _stored_ack(session: Session, message_id: UUID) -> CommitGateAckProposal:
@@ -307,6 +318,7 @@ def stage_private_result(
     message_id: UUID,
     occurred_at: datetime,
     stage_kind: Literal["PRIVATE_ONLY", "COLLECTION"] = "PRIVATE_ONLY",
+    private_scope: PrivateWriteScope | None = None,
 ) -> StagedResultProposal:
     """Store an invisible result and submission together, without committing."""
     try:
@@ -318,6 +330,17 @@ def stage_private_result(
     raw = proposal.model_dump(mode="json")
     wire_hash = _hash(raw)
     command = proposal.command
+    scope_kind, project_id = bind_private_write_scope(
+        private_scope,
+        owner_user_id=command.authenticated_owner_ref,
+        owner_deletion_epoch=command.owner_deletion_epoch,
+        command_id=command.command_id,
+        job_id=command.job_id,
+        project_ref=command.project_ref,
+        bind_project_ref=True,
+    )
+    assert private_scope is not None
+    lock_private_write_scope(session, private_scope)
     with _storage_transaction(session, command.command_id):
         row = session.get(PrivateCommitStage, command.command_id, populate_existing=True)
         delivery = session.get(PrivateStagedOutbox, message_id)
@@ -334,6 +357,7 @@ def stage_private_result(
                 epoch=command.owner_deletion_epoch,
                 digest=proposal.result_digest,
                 stage_kind=stage_kind,
+                private_scope=private_scope,
             )
             if row.state in {"ABORTED", "PURGED"}:
                 raise CommitGateRejected("private staged-result command is terminal")
@@ -355,6 +379,8 @@ def stage_private_result(
                 command_id=command.command_id,
                 owner_ref=command.authenticated_owner_ref,
                 job_id=command.job_id,
+                private_scope_kind=scope_kind,
+                project_id=project_id,
                 execution_fence=command.execution_fence,
                 owner_deletion_epoch=str(command.owner_deletion_epoch),
                 result_digest=proposal.result_digest,
@@ -386,6 +412,7 @@ def apply_commit_gate(
     ack_message_id: UUID,
     occurred_at: datetime,
     missing_stage_kind: Literal["PRIVATE_ONLY", "COLLECTION"] = "PRIVATE_ONLY",
+    private_scope: PrivateWriteScope | None = None,
 ) -> CommitGateAckProposal:
     """Apply binding/state/revision and persist the exact ACK in the same transaction."""
     try:
@@ -402,6 +429,15 @@ def apply_commit_gate(
     raw = gate.model_dump(mode="json")
     wire_hash = _hash(raw)
     content_hash = _hash({k: v for k, v in raw.items() if k not in {"message_id", "issued_at"}})
+    scope_kind, project_id = bind_private_write_scope(
+        private_scope,
+        owner_user_id=gate.authenticated_owner_ref,
+        owner_deletion_epoch=gate.owner_deletion_epoch,
+        command_id=gate.command_id,
+        job_id=gate.job_id,
+    )
+    assert private_scope is not None
+    lock_private_write_scope(session, private_scope)
     with _storage_transaction(session, gate.command_id):
         inbox = session.get(PrivateCommitGateInbox, gate.message_id)
         if inbox is not None:
@@ -417,6 +453,7 @@ def apply_commit_gate(
                 fence=str(gate.execution_fence),
                 epoch=gate.owner_deletion_epoch,
                 digest=gate.result_digest,
+                private_scope=private_scope,
             )
             if row.operation_id is not None and row.operation_id != gate.operation_id:
                 raise CommitGateRejected("private commit-gate operation conflict")
@@ -444,6 +481,8 @@ def apply_commit_gate(
                 command_id=gate.command_id,
                 owner_ref=gate.authenticated_owner_ref,
                 job_id=gate.job_id,
+                private_scope_kind=scope_kind,
+                project_id=project_id,
                 execution_fence=str(gate.execution_fence),
                 owner_deletion_epoch=str(gate.owner_deletion_epoch),
                 result_digest=gate.result_digest,

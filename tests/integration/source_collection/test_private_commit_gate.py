@@ -34,9 +34,13 @@ from epick_engine.source_collection.commit_gate_store import (
     PrivateCommitStage,
     PrivateStagedOutbox,
     _hash,
-    apply_commit_gate,
     read_finalized_result,
-    stage_private_result,
+)
+from epick_engine.source_collection.commit_gate_store import (
+    apply_commit_gate as _apply_commit_gate,
+)
+from epick_engine.source_collection.commit_gate_store import (
+    stage_private_result as _stage_private_result,
 )
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
 from epick_engine.source_collection.persistence import (
@@ -45,10 +49,21 @@ from epick_engine.source_collection.persistence import (
     Company,
     Evidence,
     OutboxEvent,
+    PrivateDeletionOwnerState,
+    PrivateDeletionProjectTombstone,
     Source,
     SourceObservation,
     SourcePolicyDecision,
     SourceVersion,
+)
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+from epick_engine.source_collection.private_scope import (
+    PrivateScopeRejected,
+    PrivateWriteAuthorityDecision,
+    PrivateWriteScope,
+)
+from epick_engine.source_collection.source_runtime_gate import (
+    apply_collection_commit_gate as _apply_collection_commit_gate,
 )
 
 pytestmark = pytest.mark.approved_postgres
@@ -120,6 +135,187 @@ def _gate(
     if action == "PURGE":
         raw["purge_owner_deletion_epoch"] = epoch or command.owner_deletion_epoch + 1
     return parse_commit_gate_command(raw)
+
+
+def _trusted_scope(
+    command: CollectionCommand,
+    *,
+    kind: str = "ACCOUNT",
+    project_id: UUID | None = None,
+    command_id: UUID | None = None,
+) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=command.authenticated_owner_ref,
+            owner_deletion_epoch=command.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind=kind, project_id=project_id),  # type: ignore[arg-type]
+            authority_ref="w1:test-private-write-authority",
+            command_id=command.command_id if command_id is None else command_id,
+            job_id=command.job_id,
+        )
+    )
+
+
+def _trusted_gate_scope(gate: CommitGateCommand) -> PrivateWriteScope:
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=gate.authenticated_owner_ref,
+            owner_deletion_epoch=gate.owner_deletion_epoch,
+            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+            authority_ref="w1:test-private-write-authority",
+            command_id=gate.command_id,
+            job_id=gate.job_id,
+        )
+    )
+
+
+def stage_private_result(
+    session: Session,
+    command: CollectionCommand,
+    result: CollectionResult,
+    **kwargs,
+):
+    kwargs.setdefault("private_scope", _trusted_scope(command))
+    return _stage_private_result(session, command, result, **kwargs)
+
+
+def apply_commit_gate(
+    session: Session,
+    gate: CommitGateCommand,
+    **kwargs,
+):
+    kwargs.setdefault("private_scope", _trusted_gate_scope(gate))
+    return _apply_commit_gate(session, gate, **kwargs)
+
+
+def apply_collection_commit_gate(
+    session: Session,
+    gate: CommitGateCommand,
+    **kwargs,
+):
+    kwargs.setdefault("private_scope", _trusted_gate_scope(gate))
+    return _apply_collection_commit_gate(session, gate, **kwargs)
+
+
+def test_stage_requires_exact_trusted_scope_and_persists_explicit_attribution(
+    session_factory,
+) -> None:
+    account_command, account_result = _pair()
+    with session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="scope"):
+            _stage_private_result(
+                session,
+                account_command,
+                account_result,
+                message_id=uuid4(),
+                occurred_at=NOW,
+            )
+        with pytest.raises(PrivateScopeRejected, match="command"):
+            stage_private_result(
+                session,
+                account_command,
+                account_result,
+                message_id=uuid4(),
+                occurred_at=NOW,
+                private_scope=_trusted_scope(account_command, command_id=uuid4()),
+            )
+        stage_private_result(
+            session,
+            account_command,
+            account_result,
+            message_id=uuid4(),
+            occurred_at=NOW,
+            private_scope=_trusted_scope(account_command),
+        )
+        account_stage = session.get(PrivateCommitStage, account_command.command_id)
+        assert account_stage.private_scope_kind == "ACCOUNT"
+        assert account_stage.project_id is None
+
+    project_id = uuid4()
+    project_command, project_result = _pair()
+    project_command = project_command.model_copy(update={"project_ref": str(project_id)})
+    with session_factory.begin() as session:
+        stage_private_result(
+            session,
+            project_command,
+            project_result,
+            message_id=uuid4(),
+            occurred_at=NOW,
+            private_scope=_trusted_scope(
+                project_command,
+                kind="PROJECT",
+                project_id=project_id,
+            ),
+        )
+        project_stage = session.get(PrivateCommitStage, project_command.command_id)
+        assert project_stage.private_scope_kind == "PROJECT"
+        assert project_stage.project_id == project_id
+
+
+def test_stage_and_missing_stage_purge_reject_stale_or_deleted_scope(session_factory) -> None:
+    stale_command, stale_result = _pair()
+    with session_factory.begin() as session:
+        session.add(
+            PrivateDeletionOwnerState(
+                owner_user_id=stale_command.authenticated_owner_ref,
+                latest_epoch=1,
+                account_deleted=False,
+            )
+        )
+    with session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="current epoch"):
+            stage_private_result(
+                session,
+                stale_command,
+                stale_result,
+                message_id=uuid4(),
+                occurred_at=NOW,
+                private_scope=_trusted_scope(stale_command),
+            )
+
+    project_id = uuid4()
+    deleted_command, deleted_result = _pair()
+    deleted_command = deleted_command.model_copy(update={"project_ref": str(project_id)})
+    with session_factory.begin() as session:
+        session.add(
+            PrivateDeletionOwnerState(
+                owner_user_id=deleted_command.authenticated_owner_ref,
+                latest_epoch=0,
+                account_deleted=False,
+            )
+        )
+        session.add(
+            PrivateDeletionProjectTombstone(
+                owner_user_id=deleted_command.authenticated_owner_ref,
+                project_id=project_id,
+                deletion_epoch=1,
+            )
+        )
+    proof = _trusted_scope(deleted_command, kind="PROJECT", project_id=project_id)
+    with session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="project tombstone"):
+            stage_private_result(
+                session,
+                deleted_command,
+                deleted_result,
+                message_id=uuid4(),
+                occurred_at=NOW,
+                private_scope=proof,
+            )
+        with pytest.raises(PrivateScopeRejected, match="project tombstone"):
+            apply_commit_gate(
+                session,
+                _gate(
+                    deleted_command,
+                    deleted_result,
+                    "PURGE",
+                    operation_id=uuid4(),
+                    revision=1,
+                ),
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+                private_scope=proof,
+            )
 
 
 def test_stage_prepare_are_invisible_and_finalize_is_owner_only(session_factory) -> None:
@@ -268,7 +464,7 @@ def test_terminal_accepts_only_newer_revision_and_increasing_max_purge_epoch(
         assert ack.outcome == "APPLIED"
         before = _state(session, command)
         for revision, epoch in [(100, 8), (100, 7), (98, 9), (99, 9)]:
-            with pytest.raises(CommitGateRejected):
+            with pytest.raises((CommitGateRejected, PrivateScopeRejected)):
                 _apply(
                     session,
                     _gate(
@@ -334,7 +530,12 @@ def test_binding_mutation_stale_and_same_revision_other_action_have_no_effect(
         _apply(session, _gate(command, result, "PREPARE", operation_id=operation, revision=2))
         before = _state(session, command)
         gate = _gate(command, result, "PREPARE", operation_id=operation, revision=2)
-        with pytest.raises(CommitGateRejected):
+        expected_error = (
+            (CommitGateRejected, PrivateScopeRejected)
+            if field == "owner_deletion_epoch"
+            else CommitGateRejected
+        )
+        with pytest.raises(expected_error):
             _apply(session, gate.model_copy(update={field: value}))
         assert _state(session, command) == before
 
@@ -406,8 +607,6 @@ def test_collection_finalize_invariant_uses_one_savepoint_for_private_gate_and_c
 ) -> None:
     """A rejected collection FINALIZE must not leave a private ACK after caller commit."""
 
-    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
-
     command, result = _pair()
     operation = uuid4()
     with session_factory.begin() as session:
@@ -454,8 +653,6 @@ def test_collection_finalize_rejects_each_gate_to_stage_binding_mismatch_without
 ) -> None:
     """The collection wrapper must preserve every private gate/stage binding check."""
 
-    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
-
     command, result = _pair()
     operation = uuid4()
     with session_factory.begin() as session:
@@ -481,7 +678,17 @@ def test_collection_finalize_rejects_each_gate_to_stage_binding_mismatch_without
         gate = _gate(command, result, "FINALIZE", operation_id=operation, revision=2).model_copy(
             update={field: values[field]}
         )
-        with pytest.raises(CommitGateRejected, match="binding mismatch"):
+        expected_error = (
+            (CommitGateRejected, PrivateScopeRejected)
+            if field == "owner_deletion_epoch"
+            else CommitGateRejected
+        )
+        expected_message = (
+            "binding mismatch|current epoch"
+            if field == "owner_deletion_epoch"
+            else "binding mismatch"
+        )
+        with pytest.raises(expected_error, match=expected_message):
             apply_collection_commit_gate(
                 session,
                 gate,
@@ -499,9 +706,8 @@ def _persisted_collection_stage(session_factory):
 
     from tests.integration.source_collection.test_collection_runtime_storage import (
         _claimed_candidate_inputs,
+        commit_collection_candidate,
     )
-
-    from epick_engine.source_collection.persistence import commit_collection_candidate
 
     dispatch, effective_command, prepared, claim_token = _claimed_candidate_inputs(session_factory)
     proposal = commit_collection_candidate(
@@ -593,8 +799,6 @@ def test_collection_finalize_rejects_every_proposal_to_candidate_identity_mismat
             field=field,
         )
 
-    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
-
     with session_factory() as session:
         with pytest.raises(CommitGateRejected, match="proposal candidate binding"):
             apply_collection_commit_gate(
@@ -625,8 +829,6 @@ def test_collection_finalize_rejects_corrupt_staged_proposal_without_ack(session
         )
         assert outbox is not None
         outbox.payload = {"schema_version": "w2.private.staged-result.proposal.v1"}
-
-    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
 
     with session_factory() as session:
         with pytest.raises((CommitGateRejected, RuntimeError), match="staged|proposal|payload"):
@@ -752,8 +954,6 @@ def test_collection_finalize_rejects_candidate_result_fk_or_policy_mismatch(
             version.policy_decision_id = policy.policy_decision_id
         else:  # pragma: no cover - parametrization is the contract surface.
             raise AssertionError(f"unexpected mismatch: {mismatch}")
-
-    from epick_engine.source_collection.source_runtime_gate import apply_collection_commit_gate
 
     with session_factory() as session:
         with pytest.raises(
@@ -1064,23 +1264,16 @@ def test_concurrent_duplicate_gate_has_one_ack_and_exact_replay(session_factory)
         assert _state(session, command)["ack_count"] == 1
 
 
-def test_wire_integers_beyond_bigint_are_preserved_without_overflow(session_factory):
+def test_private_scope_rejects_wire_epoch_beyond_signed_bigint(session_factory):
     command, result = _pair()
     huge = 2**100
     command = command.model_copy(
         update={"execution_fence": str(huge), "owner_deletion_epoch": huge}
     )
-    operation = uuid4()
     with session_factory.begin() as session:
-        _stage(session, command, result)
-        ack = _apply(
-            session,
-            _gate(command, result, "PURGE", operation_id=operation, revision=huge, epoch=huge + 1),
-        )
-        assert ack.operation_revision == huge
-        assert ack.execution_fence == huge
-        assert ack.purge_owner_deletion_epoch == huge + 1
-        assert _state(session, command)["max_purge_epoch"] == huge + 1
+        with pytest.raises(PrivateScopeRejected, match="signed 64-bit"):
+            _stage(session, command, result)
+        assert _state(session, command) is None
 
 
 def test_jsonb_nul_rejection_hides_private_data_and_preserves_caller_transaction(session_factory):

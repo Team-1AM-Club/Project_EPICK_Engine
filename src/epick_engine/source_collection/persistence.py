@@ -68,6 +68,7 @@ from epick_engine.source_collection.contracts import (
 from epick_engine.source_collection.w1_transport import W1Dispatch
 
 if TYPE_CHECKING:
+    from epick_engine.source_collection.private_scope import PrivateWriteScope
     from epick_engine.source_collection.worker import PrivateDeletionCommand
 
 NAMING_CONVENTION = {
@@ -1370,6 +1371,7 @@ class ExecutionAuthorityGrant:
     execution_fence: str
     owner_deletion_epoch: int
     pointer_eligible: bool
+    private_scope: PrivateWriteScope
 
 
 class ExecutionAuthorityLocker(Protocol):
@@ -2322,6 +2324,7 @@ def _validate_authority(
     grant: ExecutionAuthorityGrant,
     command: CollectionCommand,
     attempt_id: UUID,
+    private_scope: PrivateWriteScope,
 ) -> None:
     expected = {
         "attempt_id": attempt_id,
@@ -2336,6 +2339,42 @@ def _validate_authority(
     }
     if any(getattr(grant, field) != value for field, value in expected.items()):
         raise StaleExecution("execution authority does not match the collection command")
+    if grant.private_scope != private_scope:
+        raise StaleExecution("execution authority private scope does not match")
+
+
+def bind_private_write_scope(
+    proof: PrivateWriteScope | None,
+    *,
+    owner_user_id: UUID,
+    owner_deletion_epoch: int,
+    command_id: UUID | None = None,
+    job_id: UUID | None = None,
+    project_ref: str | None = None,
+    bind_project_ref: bool = False,
+) -> tuple[Literal["ACCOUNT", "PROJECT"], UUID | None]:
+    """Validate an authenticated proof without deriving its scope from wire data."""
+
+    from epick_engine.source_collection.private_scope import (
+        PrivateScopeRejected,
+        PrivateWriteScope,
+    )
+
+    if not isinstance(proof, PrivateWriteScope):
+        raise PrivateScopeRejected("a trusted private write scope is required")
+    proof.assert_bound_to(
+        owner_user_id=owner_user_id,
+        owner_deletion_epoch=owner_deletion_epoch,
+        command_id=command_id,
+        job_id=job_id,
+    )
+    if bind_project_ref:
+        if proof.kind == "ACCOUNT":
+            if project_ref is not None:
+                raise PrivateScopeRejected("account scope does not match Project wire binding")
+        elif project_ref != str(proof.project_id):
+            raise PrivateScopeRejected("private scope Project binding does not match")
+    return proof.kind, proof.project_id
 
 
 def _validate_result_against_command(
@@ -3519,6 +3558,7 @@ def persist_canonical_public_commit(
 def resolve_request_deduplication(
     session: Session,
     *,
+    private_scope: PrivateWriteScope | None = None,
     owner_user_id: UUID,
     operation: str,
     idempotency_key: str,
@@ -3535,12 +3575,25 @@ def resolve_request_deduplication(
         raise ValueError("input_version must be positive")
     timestamp = created_at or datetime.now(UTC)
     _require_aware(timestamp, field="created_at")
+    scope_kind, project_id = bind_private_write_scope(
+        private_scope,
+        owner_user_id=owner_user_id,
+        owner_deletion_epoch=(
+            private_scope.owner_deletion_epoch if private_scope is not None else -1
+        ),
+    )
+    from epick_engine.source_collection.private_scope import lock_private_write_scope
+
+    assert private_scope is not None
+    lock_private_write_scope(session, private_scope)
     row_id = uuid4()
     inserted_id = session.scalar(
         postgresql_insert(RequestDeduplication)
         .values(
             request_deduplication_id=row_id,
             owner_user_id=owner_user_id,
+            private_scope_kind=scope_kind,
+            project_id=project_id,
             operation=operation,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
@@ -3569,6 +3622,11 @@ def resolve_request_deduplication(
         raise RuntimeError("request deduplication conflict row was not found")
     if existing.request_hash != request_hash:
         raise PersistenceConflict("idempotency key was reused with a different request")
+    if (
+        existing.private_scope_kind != scope_kind
+        or existing.project_id != project_id
+    ):
+        raise PersistenceConflict("idempotency key private scope does not match")
     return existing
 
 
@@ -3586,13 +3644,15 @@ def _create_collection_attempt(
     *,
     command: CollectionCommand,
     prepared: PreparedCollectionCommit,
+    private_scope: PrivateWriteScope,
 ) -> CollectionAttempt:
     result_payload = prepared.result.model_dump(mode="json")
     created = CollectionAttempt(
         attempt_id=prepared.attempt_id,
         owner_user_id=command.authenticated_owner_ref,
         job_id=command.job_id,
-        project_id=_project_id(command),
+        project_id=private_scope.project_id,
+        private_scope_kind=private_scope.kind,
         command_id=command.command_id,
         input_version=command.input_version,
         target_ref=str(command.source_id),
@@ -3626,11 +3686,25 @@ def replay_committed_collection(
     command: CollectionCommand,
     attempt_id: UUID,
     lock_authority: ExecutionAuthorityLocker,
+    private_scope: PrivateWriteScope | None = None,
 ) -> CollectionResult | None:
     """Return a finalized committed result after same-transaction authority validation."""
 
+    bind_private_write_scope(
+        private_scope,
+        owner_user_id=command.authenticated_owner_ref,
+        owner_deletion_epoch=command.owner_deletion_epoch,
+        command_id=command.command_id,
+        job_id=command.job_id,
+        project_ref=command.project_ref,
+        bind_project_ref=True,
+    )
+    assert private_scope is not None
     with session_scope(session_factory) as session:
         with session.begin():
+            from epick_engine.source_collection.private_scope import lock_private_write_scope
+
+            lock_private_write_scope(session, private_scope)
             grant = lock_authority(
                 session,
                 command=command,
@@ -3640,6 +3714,7 @@ def replay_committed_collection(
                 grant=grant,
                 command=command,
                 attempt_id=attempt_id,
+                private_scope=private_scope,
             )
             return _replay_attempt(
                 session,
@@ -3674,6 +3749,7 @@ def stage_private_result(
     message_id: UUID,
     occurred_at: datetime,
     stage_kind: Literal["PRIVATE_ONLY", "COLLECTION"] = "PRIVATE_ONLY",
+    private_scope: PrivateWriteScope | None = None,
 ) -> StagedResultProposal:
     """Lazy compatibility seam for the circular private-store dependency."""
 
@@ -3688,6 +3764,7 @@ def stage_private_result(
         message_id=message_id,
         occurred_at=occurred_at,
         stage_kind=stage_kind,
+        private_scope=private_scope,
     )
 
 
@@ -3700,6 +3777,7 @@ def commit_collection_candidate(
     claim_token: UUID,
     staged_message_id: UUID,
     occurred_at: datetime,
+    private_scope: PrivateWriteScope | None = None,
 ) -> StagedResultProposal:
     """Persist public evidence and its private COLLECTION stage atomically."""
 
@@ -3714,9 +3792,22 @@ def commit_collection_candidate(
     validated_dispatch = _validated_dispatch(dispatch)
     original_command = validated_dispatch.payload
     digest = dispatch_digest(validated_dispatch)
+    bind_private_write_scope(
+        private_scope,
+        owner_user_id=original_command.authenticated_owner_ref,
+        owner_deletion_epoch=original_command.owner_deletion_epoch,
+        command_id=original_command.command_id,
+        job_id=original_command.job_id,
+        project_ref=original_command.project_ref,
+        bind_project_ref=True,
+    )
     try:
         with session_scope(session_factory) as session:
             with session.begin():
+                from epick_engine.source_collection.private_scope import lock_private_write_scope
+
+                assert private_scope is not None
+                lock_private_write_scope(session, private_scope)
                 lock_private_command(session, original_command.command_id)
                 attempt = session.scalar(
                     select(CollectionRuntimeAttempt)
@@ -3781,6 +3872,7 @@ def commit_collection_candidate(
                     message_id=staged_message_id,
                     occurred_at=occurred_at,
                     stage_kind="COLLECTION",
+                    private_scope=private_scope,
                 )
                 session.flush()
                 return proposal
@@ -3791,6 +3883,8 @@ def commit_collection_candidate(
 def replay_staged_collection(
     session_factory: Callable[[], Session],
     dispatch: W1Dispatch,
+    *,
+    private_scope: PrivateWriteScope | None = None,
 ) -> StagedResultProposal:
     """Re-arm and return the exact durable private proposal under the command lock."""
 
@@ -3814,8 +3908,21 @@ def replay_staged_collection(
     validated_dispatch = _validated_dispatch(dispatch)
     command = validated_dispatch.payload
     digest = dispatch_digest(validated_dispatch)
+    bind_private_write_scope(
+        private_scope,
+        owner_user_id=command.authenticated_owner_ref,
+        owner_deletion_epoch=command.owner_deletion_epoch,
+        command_id=command.command_id,
+        job_id=command.job_id,
+        project_ref=command.project_ref,
+        bind_project_ref=True,
+    )
     with session_scope(session_factory) as session:
         with session.begin():
+            from epick_engine.source_collection.private_scope import lock_private_write_scope
+
+            assert private_scope is not None
+            lock_private_write_scope(session, private_scope)
             lock_private_command(session, command.command_id)
             attempt = session.scalar(
                 select(CollectionRuntimeAttempt)
@@ -3939,13 +4046,27 @@ def commit_prepared_collection(
     command: CollectionCommand,
     prepared: PreparedCollectionCommit,
     lock_authority: ExecutionAuthorityLocker,
+    private_scope: PrivateWriteScope | None = None,
 ) -> CollectionResult:
     """Commit prepared W2 data after W1 authority is locked in the same transaction."""
 
     committed_result = prepared.result
+    bind_private_write_scope(
+        private_scope,
+        owner_user_id=command.authenticated_owner_ref,
+        owner_deletion_epoch=command.owner_deletion_epoch,
+        command_id=command.command_id,
+        job_id=command.job_id,
+        project_ref=command.project_ref,
+        bind_project_ref=True,
+    )
+    assert private_scope is not None
     try:
         with session_scope(session_factory) as session:
             with session.begin():
+                from epick_engine.source_collection.private_scope import lock_private_write_scope
+
+                lock_private_write_scope(session, private_scope)
                 grant = lock_authority(
                     session,
                     command=command,
@@ -3955,6 +4076,7 @@ def commit_prepared_collection(
                     grant=grant,
                     command=command,
                     attempt_id=prepared.attempt_id,
+                    private_scope=private_scope,
                 )
 
                 replay = _replay_attempt(
@@ -4005,6 +4127,7 @@ def commit_prepared_collection(
                     session,
                     command=command,
                     prepared=canonical,
+                    private_scope=private_scope,
                 )
                 session.flush()
         return committed_result

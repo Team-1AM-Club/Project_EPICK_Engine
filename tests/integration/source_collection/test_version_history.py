@@ -18,6 +18,7 @@ from tests.integration.source_collection.test_atomic_persistence import (
     _locker,
     _policy_snapshot,
     _seed_source,
+    commit_prepared_collection,
 )
 from tests.unit.source_collection.test_service_pipeline import (
     _candidate as _pipeline_candidate,
@@ -56,7 +57,6 @@ from epick_engine.source_collection.persistence import (
     Source,
     SourceObservation,
     SourceVersion,
-    commit_prepared_collection,
 )
 from epick_engine.source_collection.service import StaticCollectionExecution
 
