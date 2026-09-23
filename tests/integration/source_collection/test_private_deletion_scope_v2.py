@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -25,7 +26,9 @@ from epick_engine.source_collection.commit_gate_store import (
     PrivateCommitGateReceipt,
     PrivateCommitStage,
     PrivateStagedOutbox,
+    stage_private_result,
 )
+from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
 from epick_engine.source_collection.persistence import (
     Base,
     CollectionAttempt,
@@ -53,10 +56,12 @@ from epick_engine.source_collection.private_scope import (
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
     ScopeUnclassified,
-    lock_private_write_scope,
 )
+from epick_engine.source_collection.source_runtime_store import reserve_collection_attempt
+from epick_engine.source_collection.w1_transport import W1Dispatch, parse_w1_dispatch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
 NOW = datetime(2032, 1, 2, 3, 4, tzinfo=UTC)
 SIGNED_64_MAX = 9_223_372_036_854_775_807
 OWNER_A = UUID("00000000-0000-4000-8000-000000008401")
@@ -484,8 +489,10 @@ def _add_private_inventory(
 
 def _proof(
     *,
-    owner_user_id: UUID = OWNER_A,
-    project_id: UUID = PROJECT_A,
+    owner_user_id: UUID,
+    project_id: UUID,
+    command_id: UUID,
+    job_id: UUID,
     epoch: int = 0,
 ) -> PrivateWriteScope:
     return PrivateWriteScope(
@@ -494,7 +501,78 @@ def _proof(
             owner_deletion_epoch=epoch,
             scope=PrivateDeletionScope(kind="PROJECT", project_id=project_id),
             authority_ref="w1:test-deletion-v2",
+            command_id=command_id,
+            job_id=job_id,
         )
+    )
+
+
+def _runtime_dispatch(
+    *,
+    owner_user_id: UUID,
+    project_id: UUID,
+    public: _PublicIds,
+) -> W1Dispatch:
+    raw = json.loads(
+        (FIXTURES / "w1_private_contract/private-w2-command-dispatch.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    command_id, job_id = uuid4(), uuid4()
+    raw["message_id"] = str(command_id)
+    raw["payload"].update(
+        command_id=str(command_id),
+        job_id=str(job_id),
+        authenticated_owner_ref=str(owner_user_id),
+        project_ref=str(project_id),
+        company_id=str(public.company_id),
+        source_id=str(public.source_id),
+        owner_deletion_epoch=0,
+    )
+    raw["lookup_request"].update(
+        command_id=str(command_id),
+        owner_deletion_epoch=0,
+    )
+    raw["core_decision_pin"].update(
+        decision_id=str(uuid4()),
+        company_id=str(public.company_id),
+        source_id=str(public.source_id),
+    )
+    return parse_w1_dispatch(raw)
+
+
+def _stage_pair(
+    *,
+    owner_user_id: UUID,
+    project_id: UUID,
+    public: _PublicIds,
+) -> tuple[CollectionCommand, CollectionResult]:
+    raw = json.loads(
+        (FIXTURES / "w2_commit_gate_proposal/digest-vector.json").read_text(encoding="utf-8")
+    )
+    command_id, job_id = uuid4(), uuid4()
+    raw["command"].update(
+        command_id=str(command_id),
+        job_id=str(job_id),
+        authenticated_owner_ref=str(owner_user_id),
+        project_ref=str(project_id),
+        company_id=str(public.company_id),
+        source_id=str(public.source_id),
+        owner_deletion_epoch=0,
+    )
+    raw["result"].update(
+        command_id=str(command_id),
+        job_id=str(job_id),
+        source_id=str(public.source_id),
+    )
+    for source_ref in raw["result"]["successful_source_refs"]:
+        source_ref["source_id"] = str(public.source_id)
+    for failure in raw["result"]["failures"]:
+        failure["source_id"] = str(public.source_id)
+    for required_action in raw["result"]["required_actions"]:
+        required_action["context"]["source_id"] = str(public.source_id)
+    return CollectionCommand.model_validate(raw["command"]), CollectionResult.model_validate(
+        raw["result"]
     )
 
 
@@ -751,6 +829,105 @@ def test_v2_project_deletion_isolates_projects_owners_and_removes_stage_descenda
 
 
 @pytest.mark.approved_postgres
+def test_v2_project_stage_purge_uses_constant_bind_count_for_large_scope(
+    database_engine: Engine,
+    session_factory: sessionmaker[Session],
+) -> None:
+    stage_count = 256
+    with session_factory.begin() as session:
+        public = _seed_public(session)
+        session.add_all(
+            [
+                PrivateDeletionOwnerState(
+                    owner_user_id=OWNER_A, latest_epoch=0, account_deleted=False
+                ),
+                PrivateDeletionOwnerState(
+                    owner_user_id=OWNER_B, latest_epoch=0, account_deleted=False
+                ),
+            ]
+        )
+        selected_stage_ids = {
+            inventory.stage_command_id
+            for index in range(stage_count)
+            if (
+                inventory := _add_private_inventory(
+                    session,
+                    owner_user_id=OWNER_A,
+                    kind="PROJECT",
+                    project_id=PROJECT_A,
+                    public=public,
+                    label=f"large-project-stage-{index}",
+                    parents=("stage",),
+                )
+            ).stage_command_id
+            is not None
+        }
+        same_owner_other_project = _add_private_inventory(
+            session,
+            owner_user_id=OWNER_A,
+            kind="PROJECT",
+            project_id=PROJECT_B,
+            public=public,
+            label="large-project-preserved",
+            parents=("stage",),
+        )
+        foreign_owner = _add_private_inventory(
+            session,
+            owner_user_id=OWNER_B,
+            kind="PROJECT",
+            project_id=PROJECT_A,
+            public=public,
+            label="large-owner-preserved",
+            parents=("stage",),
+        )
+
+    stage_tables = (
+        "private_commit_gate_receipts",
+        "private_commit_gate_inbox",
+        "private_staged_outbox",
+        "private_commit_gate_acks",
+        "private_commit_stages",
+    )
+    stage_delete_bind_counts: list[int] = []
+
+    def capture_stage_delete_binds(
+        _connection, _cursor, statement, parameters, _context, _executemany
+    ) -> None:
+        normalized = statement.lower()
+        if normalized.lstrip().startswith("delete from") and any(
+            table_name in normalized for table_name in stage_tables
+        ):
+            stage_delete_bind_counts.append(len(parameters))
+
+    event.listen(database_engine, "before_cursor_execute", capture_stage_delete_binds)
+    try:
+        with session_factory.begin() as session:
+            assert (
+                _apply_v2(
+                    session,
+                    _command(kind="PROJECT", project_id=PROJECT_A),
+                )
+                == "APPLIED"
+            )
+    finally:
+        event.remove(database_engine, "before_cursor_execute", capture_stage_delete_binds)
+
+    assert len(selected_stage_ids) == stage_count
+    assert len(stage_delete_bind_counts) == len(stage_tables)
+    assert max(stage_delete_bind_counts) <= 4
+    with session_factory() as session:
+        assert not set(
+            session.scalars(
+                select(PrivateCommitStage.command_id).where(
+                    PrivateCommitStage.command_id.in_(selected_stage_ids)
+                )
+            )
+        )
+        assert _ids_exist(session, same_owner_other_project)["stage"] is True
+        assert _ids_exist(session, foreign_owner)["stage"] is True
+
+
+@pytest.mark.approved_postgres
 def test_v2_account_deletion_preserves_other_owner_and_public_history(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -941,12 +1118,63 @@ def test_v2_purge_failure_retries_same_receipt_after_restart(
 
 
 @pytest.mark.approved_postgres
+@pytest.mark.parametrize("writer_kind", ["runtime", "stage"])
 def test_v2_deletion_serializes_late_private_writers(
     database_engine: Engine,
     session_factory: sessionmaker[Session],
+    writer_kind: Literal["runtime", "stage"],
 ) -> None:
-    writer_first_stage_id = uuid4()
-    writer_first_command = _command(kind="PROJECT", project_id=PROJECT_A)
+    with session_factory.begin() as session:
+        public = _seed_public(session)
+
+    if writer_kind == "runtime":
+        writer_first_dispatch = _runtime_dispatch(
+            owner_user_id=OWNER_A,
+            project_id=PROJECT_A,
+            public=public,
+        )
+        writer_first_id = writer_first_dispatch.payload.command_id
+
+        def write_first(session: Session) -> None:
+            command = writer_first_dispatch.payload
+            reserve_collection_attempt(
+                session,
+                writer_first_dispatch,
+                effective_policy_revision=1,
+                now=NOW,
+                uuid_factory=uuid4,
+                private_scope=_proof(
+                    owner_user_id=OWNER_A,
+                    project_id=PROJECT_A,
+                    command_id=command.command_id,
+                    job_id=command.job_id,
+                ),
+            )
+
+    else:
+        staged_writer_command, staged_writer_result = _stage_pair(
+            owner_user_id=OWNER_A,
+            project_id=PROJECT_A,
+            public=public,
+        )
+        writer_first_id = staged_writer_command.command_id
+
+        def write_first(session: Session) -> None:
+            stage_private_result(
+                session,
+                staged_writer_command,
+                staged_writer_result,
+                message_id=uuid4(),
+                occurred_at=NOW,
+                private_scope=_proof(
+                    owner_user_id=OWNER_A,
+                    project_id=PROJECT_A,
+                    command_id=staged_writer_command.command_id,
+                    job_id=staged_writer_command.job_id,
+                ),
+            )
+
+    writer_first_deletion = _command(kind="PROJECT", project_id=PROJECT_A)
     deletion_ready = Event()
     deletion_pid: list[int] = []
     deletion_result: list[str] = []
@@ -957,32 +1185,13 @@ def test_v2_deletion_serializes_late_private_writers(
             with session_factory.begin() as session:
                 deletion_pid.append(int(session.scalar(text("SELECT pg_backend_pid()"))))
                 deletion_ready.set()
-                deletion_result.append(_apply_v2(session, writer_first_command))
+                deletion_result.append(_apply_v2(session, writer_first_deletion))
         except BaseException as exc:  # pragma: no cover - surfaced below
             deletion_errors.append(exc)
 
     with session_factory() as writer_session:
         with writer_session.begin():
-            lock_private_write_scope(writer_session, _proof())
-            writer_session.add(
-                PrivateCommitStage(
-                    command_id=writer_first_stage_id,
-                    owner_ref=OWNER_A,
-                    job_id=uuid4(),
-                    private_scope_kind="PROJECT",
-                    project_id=PROJECT_A,
-                    execution_fence="0",
-                    owner_deletion_epoch="0",
-                    result_digest="sha256:" + "2" * 64,
-                    operation_id=uuid4(),
-                    operation_revision="1",
-                    max_purge_epoch="0",
-                    state="STAGED",
-                    stage_kind="PRIVATE_ONLY",
-                    result_payload={"private": "writer-first"},
-                )
-            )
-            writer_session.flush()
+            write_first(writer_session)
             thread = Thread(target=delete_after_writer, daemon=True)
             thread.start()
             assert deletion_ready.wait(timeout=1)
@@ -992,7 +1201,8 @@ def test_v2_deletion_serializes_late_private_writers(
     assert deletion_errors == []
     assert deletion_result == ["APPLIED"]
     with session_factory() as session:
-        assert session.get(PrivateCommitStage, writer_first_stage_id) is None
+        writer_model = CollectionRuntimeAttempt if writer_kind == "runtime" else PrivateCommitStage
+        assert session.get(writer_model, writer_first_id) is None
 
     deletion_first_command = _command(
         owner_user_id=OWNER_B,
@@ -1003,15 +1213,57 @@ def test_v2_deletion_serializes_late_private_writers(
     writer_pid: list[int] = []
     writer_errors: list[BaseException] = []
 
+    if writer_kind == "runtime":
+        late_dispatch = _runtime_dispatch(
+            owner_user_id=OWNER_B,
+            project_id=PROJECT_FOREIGN,
+            public=public,
+        )
+
+        def write_late(session: Session) -> None:
+            command = late_dispatch.payload
+            reserve_collection_attempt(
+                session,
+                late_dispatch,
+                effective_policy_revision=1,
+                now=NOW,
+                uuid_factory=uuid4,
+                private_scope=_proof(
+                    owner_user_id=OWNER_B,
+                    project_id=PROJECT_FOREIGN,
+                    command_id=command.command_id,
+                    job_id=command.job_id,
+                ),
+            )
+
+    else:
+        late_command, late_result = _stage_pair(
+            owner_user_id=OWNER_B,
+            project_id=PROJECT_FOREIGN,
+            public=public,
+        )
+
+        def write_late(session: Session) -> None:
+            stage_private_result(
+                session,
+                late_command,
+                late_result,
+                message_id=uuid4(),
+                occurred_at=NOW,
+                private_scope=_proof(
+                    owner_user_id=OWNER_B,
+                    project_id=PROJECT_FOREIGN,
+                    command_id=late_command.command_id,
+                    job_id=late_command.job_id,
+                ),
+            )
+
     def write_after_deletion() -> None:
         try:
             with session_factory.begin() as session:
                 writer_pid.append(int(session.scalar(text("SELECT pg_backend_pid()"))))
                 writer_ready.set()
-                lock_private_write_scope(
-                    session,
-                    _proof(owner_user_id=OWNER_B, project_id=PROJECT_FOREIGN),
-                )
+                write_late(session)
         except BaseException as exc:  # pragma: no cover - asserted below
             writer_errors.append(exc)
 

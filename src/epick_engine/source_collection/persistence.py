@@ -1479,25 +1479,20 @@ def apply_private_deletion_v2(
         runtime_scope = CollectionRuntimeAttempt.owner_ref == command.owner_user_id
         stage_scope = PrivateCommitStage.owner_ref == command.owner_user_id
 
-    stage_ids = tuple(session.scalars(select(PrivateCommitStage.command_id).where(stage_scope)))
-    if stage_ids:
-        session.execute(
-            delete(PrivateCommitGateReceipt).where(
-                PrivateCommitGateReceipt.command_id.in_(stage_ids)
-            )
-        )
-        session.execute(
-            delete(PrivateCommitGateInbox).where(PrivateCommitGateInbox.command_id.in_(stage_ids))
-        )
-        session.execute(
-            delete(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id.in_(stage_ids))
-        )
-        session.execute(
-            delete(PrivateCommitGateAck).where(PrivateCommitGateAck.command_id.in_(stage_ids))
-        )
-        session.execute(
-            delete(PrivateCommitStage).where(PrivateCommitStage.command_id.in_(stage_ids))
-        )
+    stage_ids = select(PrivateCommitStage.command_id).where(stage_scope)
+    session.execute(
+        delete(PrivateCommitGateReceipt).where(PrivateCommitGateReceipt.command_id.in_(stage_ids))
+    )
+    session.execute(
+        delete(PrivateCommitGateInbox).where(PrivateCommitGateInbox.command_id.in_(stage_ids))
+    )
+    session.execute(
+        delete(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id.in_(stage_ids))
+    )
+    session.execute(
+        delete(PrivateCommitGateAck).where(PrivateCommitGateAck.command_id.in_(stage_ids))
+    )
+    session.execute(delete(PrivateCommitStage).where(stage_scope))
 
     session.execute(delete(CollectionAttempt).where(attempt_scope))
     session.execute(delete(RequestDeduplication).where(deduplication_scope))
