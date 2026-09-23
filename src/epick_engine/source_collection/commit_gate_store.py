@@ -18,6 +18,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     String,
     Text,
     UniqueConstraint,
@@ -64,11 +65,30 @@ class PrivateCommitStage(Base):
             "stage_kind IN ('PRIVATE_ONLY', 'COLLECTION')",
             name="valid_stage_kind",
         ),
+        CheckConstraint(
+            "(private_scope_kind = 'PROJECT' AND project_id IS NOT NULL) OR "
+            "(private_scope_kind = 'ACCOUNT' AND project_id IS NULL) OR "
+            "private_scope_kind = 'UNKNOWN'",
+            name="valid_private_scope",
+        ),
+        Index(
+            "ix_private_commit_stages_owner_private_scope",
+            "owner_ref",
+            "private_scope_kind",
+            "project_id",
+        ),
     )
 
     command_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
     owner_ref: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     job_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    private_scope_kind: Mapped[str] = mapped_column(
+        String(16),
+        default="UNKNOWN",
+        server_default=text("'UNKNOWN'"),
+        nullable=False,
+    )
+    project_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=True)
     # Wire integers have no upper bound: canonical decimal text avoids bigint overflow.
     execution_fence: Mapped[str] = mapped_column(Text, nullable=False)
     owner_deletion_epoch: Mapped[str] = mapped_column(Text, nullable=False)

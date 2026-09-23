@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Engine,
@@ -948,6 +949,12 @@ class CollectionAttempt(Base):
             name="policy_revision_required_after_policy",
         ),
         CheckConstraint("owner_deletion_epoch >= 0", name="nonnegative_deletion_epoch"),
+        CheckConstraint(
+            "(private_scope_kind = 'PROJECT' AND project_id IS NOT NULL) OR "
+            "(private_scope_kind = 'ACCOUNT' AND project_id IS NULL) OR "
+            "private_scope_kind = 'UNKNOWN'",
+            name="valid_private_scope",
+        ),
         CheckConstraint("length(btrim(execution_fence)) > 0", name="nonempty_execution_fence"),
         CheckConstraint(
             "(result_payload IS NULL) = (finalized_at IS NULL)",
@@ -963,12 +970,24 @@ class CollectionAttempt(Base):
             "ix_collection_attempts_parser_execution_id",
             "parser_execution_id",
         ),
+        Index(
+            "ix_collection_attempts_owner_private_scope",
+            "owner_user_id",
+            "private_scope_kind",
+            "project_id",
+        ),
     )
 
     attempt_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
     owner_user_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     job_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     project_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=True)
+    private_scope_kind: Mapped[str] = mapped_column(
+        String(16),
+        default="UNKNOWN",
+        server_default=text("'UNKNOWN'"),
+        nullable=False,
+    )
     command_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     input_version: Mapped[int] = mapped_column(Integer, nullable=False)
     target_ref: Mapped[str] = mapped_column(Text, nullable=False)
@@ -978,7 +997,7 @@ class CollectionAttempt(Base):
     policy_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     result_version: Mapped[int] = mapped_column(Integer, nullable=False)
     execution_fence: Mapped[str] = mapped_column(String(256), nullable=False)
-    owner_deletion_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_deletion_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     parser_execution_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         ForeignKey(
@@ -1040,8 +1059,20 @@ class CollectionRuntimeAttempt(Base):
             "state = 'RESERVED' OR (claim_token IS NULL AND claim_expires_at IS NULL)",
             name="claim_fields_reserved_only",
         ),
+        CheckConstraint(
+            "(private_scope_kind = 'PROJECT' AND project_id IS NOT NULL) OR "
+            "(private_scope_kind = 'ACCOUNT' AND project_id IS NULL) OR "
+            "private_scope_kind = 'UNKNOWN'",
+            name="valid_private_scope",
+        ),
         Index("ix_collection_runtime_attempts_owner_ref", "owner_ref"),
         Index("ix_collection_runtime_attempts_job_id", "job_id"),
+        Index(
+            "ix_collection_runtime_attempts_owner_private_scope",
+            "owner_ref",
+            "private_scope_kind",
+            "project_id",
+        ),
     )
 
     command_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
@@ -1049,6 +1080,13 @@ class CollectionRuntimeAttempt(Base):
     dispatch_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     owner_ref: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     job_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    private_scope_kind: Mapped[str] = mapped_column(
+        String(16),
+        default="UNKNOWN",
+        server_default=text("'UNKNOWN'"),
+        nullable=False,
+    )
+    project_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=True)
     source_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     company_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     observation_order: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -1084,6 +1122,18 @@ class RequestDeduplication(Base):
             name="uq_request_deduplications_owner_operation_key",
         ),
         CheckConstraint("input_version > 0", name="positive_input_version"),
+        CheckConstraint(
+            "(private_scope_kind = 'PROJECT' AND project_id IS NOT NULL) OR "
+            "(private_scope_kind = 'ACCOUNT' AND project_id IS NULL) OR "
+            "private_scope_kind = 'UNKNOWN'",
+            name="valid_private_scope",
+        ),
+        Index(
+            "ix_request_deduplications_owner_private_scope",
+            "owner_user_id",
+            "private_scope_kind",
+            "project_id",
+        ),
     )
 
     request_deduplication_id: Mapped[UUID] = mapped_column(
@@ -1091,6 +1141,13 @@ class RequestDeduplication(Base):
         primary_key=True,
     )
     owner_user_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    private_scope_kind: Mapped[str] = mapped_column(
+        String(16),
+        default="UNKNOWN",
+        server_default=text("'UNKNOWN'"),
+        nullable=False,
+    )
+    project_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=True)
     operation: Mapped[str] = mapped_column(String(256), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -1107,6 +1164,31 @@ class PrivateDeletionOwnerState(Base):
         primary_key=True,
     )
     latest_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_deleted: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+
+
+class PrivateDeletionProjectTombstone(Base):
+    __tablename__ = "private_deletion_project_tombstones"
+    __table_args__ = (CheckConstraint("deletion_epoch > 0", name="positive_deletion_epoch"),)
+
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(
+            "private_deletion_owner_states.owner_user_id",
+            name="fk_private_deletion_project_tombstones_owner_state",
+        ),
+        primary_key=True,
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+    )
+    deletion_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class PrivateDeletionReceipt(Base):
@@ -1126,6 +1208,12 @@ class PrivateDeletionReceipt(Base):
     )
     owner_user_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     deletion_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    contract_version: Mapped[str] = mapped_column(
+        String(32),
+        default="w2.private-deletion.v1",
+        server_default=text("'w2.private-deletion.v1'"),
+        nullable=False,
+    )
     command_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     outcome: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

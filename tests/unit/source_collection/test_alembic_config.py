@@ -26,7 +26,10 @@ def test_source_collection_migration_is_the_only_head() -> None:
 
     assert head is not None
     assert len(head) <= 32
-    assert scripts.get_heads() == ["0009_private_deletion_receipt"]
+    assert scripts.get_heads() == ["0010_private_deletion_scope_v2"]
+    assert scripts.get_revision("0010_private_deletion_scope_v2").down_revision == (
+        "0009_private_deletion_receipt"
+    )
     assert scripts.get_revision("0009_private_deletion_receipt").down_revision == (
         "0008_collection_runtime"
     )
@@ -123,3 +126,10 @@ def test_private_deletion_receipt_migration_downgrade_is_unsupported() -> None:
 
     with pytest.raises(RuntimeError, match="Destructive downgrade"):
         scripts.get_revision("0009_private_deletion_receipt").module.downgrade()
+
+
+def test_private_deletion_scope_v2_migration_downgrade_is_unsupported() -> None:
+    scripts = ScriptDirectory.from_config(_alembic_config())
+
+    with pytest.raises(RuntimeError, match="Destructive downgrade"):
+        scripts.get_revision("0010_private_deletion_scope_v2").module.downgrade()
