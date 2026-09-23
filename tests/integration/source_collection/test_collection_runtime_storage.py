@@ -201,6 +201,7 @@ def test_collection_runtime_metadata_uses_durable_internal_ordering() -> None:
         "ck_collection_runtime_attempts_valid_state",
         "ck_collection_runtime_attempts_claim_fields_together",
         "ck_collection_runtime_attempts_claim_fields_reserved_only",
+        "ck_collection_runtime_attempts_valid_private_scope",
     }
     assert all(len(str(constraint.name)) <= 63 for constraint in attempts.constraints)
     attempt_checks = {
@@ -226,6 +227,10 @@ def test_collection_runtime_metadata_uses_durable_internal_ordering() -> None:
     assert {(index.name, _column_names(index)) for index in attempts.indexes} == {
         ("ix_collection_runtime_attempts_owner_ref", ("owner_ref",)),
         ("ix_collection_runtime_attempts_job_id", ("job_id",)),
+        (
+            "ix_collection_runtime_attempts_owner_private_scope",
+            ("owner_ref", "private_scope_kind", "project_id"),
+        ),
     }
 
 
@@ -336,14 +341,14 @@ def test_collection_runtime_migration_backfills_0007_and_matches_metadata(
                 (item["name"], tuple(item["column_names"]))
                 for item in inspector.get_indexes("collection_runtime_attempts")
                 if not item.get("duplicates_constraint")
-                } == {
-                    ("ix_collection_runtime_attempts_owner_ref", ("owner_ref",)),
-                    ("ix_collection_runtime_attempts_job_id", ("job_id",)),
-                    (
-                        "ix_collection_runtime_attempts_owner_private_scope",
-                        ("owner_ref", "private_scope_kind", "project_id"),
-                    ),
-                }
+            } == {
+                ("ix_collection_runtime_attempts_owner_ref", ("owner_ref",)),
+                ("ix_collection_runtime_attempts_job_id", ("job_id",)),
+                (
+                    "ix_collection_runtime_attempts_owner_private_scope",
+                    ("owner_ref", "private_scope_kind", "project_id"),
+                ),
+            }
             assert {
                 (
                     item["name"],
