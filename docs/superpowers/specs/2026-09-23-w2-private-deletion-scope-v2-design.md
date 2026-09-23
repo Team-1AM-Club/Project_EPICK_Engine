@@ -144,7 +144,8 @@ preflight to that new migration. Old v1 receipts remain distinguishable from
 v2 receipts through a persisted contract-version column, backfilled as v1
 for existing records. The migration also widens
 `collection_attempts.owner_deletion_epoch` to signed 64-bit and validates
-collection/runtime epochs at the private write fence against that range. A v1
+collection/runtime write epochs in `0..9223372036854775807`; zero is the
+valid pre-deletion epoch, unlike the strictly positive deletion command. A v1
 receipt must not be interpreted as proof that W2-owned
 scope enumeration completed. New production dispatch remains disabled until
 W1 pins the v2 schemas/manifest, adds its W2 deletion target and durable
