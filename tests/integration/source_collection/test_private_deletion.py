@@ -1110,3 +1110,62 @@ def test_duplicate_deletion_delivery_is_idempotent_and_cannot_regress_epoch(
         ("purge", (OWNER_A, frozenset({"a-project-1"}))),
         ("acknowledge", (current_deletion_id, 7)),
     ]
+
+
+@pytest.mark.approved_postgres
+def test_stale_epoch_skips_purge_and_ack(
+    session_factory: sessionmaker[Session],
+) -> None:
+    state = _seed_shared_public_source(session_factory)
+    side_effects = _PrivateDeletionSideEffects()
+    first_id = uuid4()
+
+    _process_private_deletion(
+        session_factory=session_factory,
+        owner_user_id=OWNER_A,
+        deletion_id=first_id,
+        deletion_epoch=7,
+        attempt_ids=frozenset({state.attempt_a_project_1}),
+        request_deduplication_ids=frozenset({state.dedup_a_project_1}),
+        private_reference_keys=frozenset({"a-project-1"}),
+        side_effects=side_effects,
+    )
+    _process_private_deletion(
+        session_factory=session_factory,
+        owner_user_id=OWNER_A,
+        deletion_id=uuid4(),
+        deletion_epoch=6,
+        attempt_ids=frozenset({state.attempt_a_project_2}),
+        request_deduplication_ids=frozenset({state.dedup_a_project_2}),
+        private_reference_keys=frozenset({"a-project-2"}),
+        side_effects=side_effects,
+    )
+
+    assert side_effects.events == [
+        ("purge", (OWNER_A, frozenset({"a-project-1"}))),
+        ("acknowledge", (first_id, 7)),
+    ]
+
+
+@pytest.mark.approved_postgres
+def test_foreign_attempt_identifier_rolls_back_without_side_effects(
+    session_factory: sessionmaker[Session],
+) -> None:
+    state = _seed_shared_public_source(session_factory)
+    side_effects = _PrivateDeletionSideEffects()
+
+    with pytest.raises(
+        PersistenceConflict, match="private deletion candidate belongs to another owner"
+    ):
+        _process_private_deletion(
+            session_factory=session_factory,
+            owner_user_id=OWNER_A,
+            deletion_id=uuid4(),
+            deletion_epoch=7,
+            attempt_ids=frozenset({state.attempt_b_project_1}),
+            request_deduplication_ids=frozenset(),
+            private_reference_keys=frozenset({"b-project-1"}),
+            side_effects=side_effects,
+        )
+
+    assert side_effects.events == []

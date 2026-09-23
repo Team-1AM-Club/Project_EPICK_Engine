@@ -16,7 +16,7 @@ from typing import Literal, Protocol, Self, cast
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from epick_engine.source_collection.contracts import (
     CollectionCommand,
@@ -32,6 +32,7 @@ from epick_engine.source_collection.persistence import (
     ExecutionAuthorityLocker,
     OutboxEvent,
     PreparedCollectionCommit,
+    apply_private_deletion,
     commit_prepared_collection,
     replay_committed_collection,
 )
@@ -223,6 +224,53 @@ class PrivateDeletionAcknowledgement:
             deletion_epoch=_require_private_deletion_epoch(raw),
             outcome=cast(PrivateDeletionOutcome, outcome),
         )
+
+
+class PrivateDeletionSideEffects(Protocol):
+    """W1-owned private purge and acknowledgement boundary."""
+
+    def purge_private_references(
+        self,
+        *,
+        owner_user_id: UUID,
+        private_reference_keys: frozenset[str],
+    ) -> None:
+        """Purge W1-private references after the W2 transaction commits."""
+
+    def acknowledge(self, *, deletion_id: UUID, deletion_epoch: int) -> None:
+        """Acknowledge a successfully purged deletion delivery."""
+
+
+def process_private_deletion(
+    *,
+    session_factory: sessionmaker[Session],
+    command: PrivateDeletionCommand,
+    side_effects: PrivateDeletionSideEffects,
+) -> PrivateDeletionAcknowledgement:
+    """Commit one private deletion before invoking its W1-owned side effects."""
+
+    with session_factory() as session:
+        with session.begin():
+            outcome = apply_private_deletion(session, command)
+
+    acknowledgement = PrivateDeletionAcknowledgement(
+        deletion_id=command.deletion_id,
+        owner_user_id=command.owner_user_id,
+        deletion_epoch=command.deletion_epoch,
+        outcome=outcome,
+    )
+    if outcome == "STALE":
+        return acknowledgement
+
+    side_effects.purge_private_references(
+        owner_user_id=command.owner_user_id,
+        private_reference_keys=command.private_reference_keys,
+    )
+    side_effects.acknowledge(
+        deletion_id=command.deletion_id,
+        deletion_epoch=command.deletion_epoch,
+    )
+    return acknowledgement
 
 
 class OutboxDeliveryError(RuntimeError):
