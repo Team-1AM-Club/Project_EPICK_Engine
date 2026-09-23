@@ -78,6 +78,8 @@ def _assert_bound_attempt(
     attempt: CollectionRuntimeAttempt,
     dispatch: W1Dispatch,
     digest: str,
+    *,
+    private_scope: PrivateWriteScope | None = None,
 ) -> None:
     command = dispatch.payload
     if (
@@ -88,6 +90,11 @@ def _assert_bound_attempt(
         or attempt.company_id != command.company_id
     ):
         raise CollectionRuntimeConflict("collection runtime dispatch binding conflict")
+    if private_scope is not None and (
+        attempt.private_scope_kind != private_scope.kind
+        or attempt.project_id != private_scope.project_id
+    ):
+        raise PrivateScopeRejected("collection runtime private scope does not match")
 
 
 def load_bound_collection_attempt(
@@ -158,14 +165,14 @@ def reserve_collection_attempt(
         .execution_options(populate_existing=True)
     )
     if attempt is not None:
-        _assert_bound_attempt(attempt, validated, digest)
+        _assert_bound_attempt(
+            attempt,
+            validated,
+            digest,
+            private_scope=private_scope,
+        )
         if attempt.effective_policy_revision != effective_policy_revision:
             raise CollectionRuntimeConflict("collection runtime policy binding conflict")
-        if (
-            attempt.private_scope_kind != scope_kind
-            or attempt.project_id != project_id
-        ):
-            raise PrivateScopeRejected("collection runtime private scope does not match")
         if attempt.state != "RESERVED":
             raise CollectionRuntimeConflict("collection runtime attempt is terminal")
 

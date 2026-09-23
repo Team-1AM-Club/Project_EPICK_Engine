@@ -507,6 +507,28 @@ def test_exact_replay_and_new_message_same_revision_reuse_ack_without_reapply(se
         assert _state(session, command)["stage_payloads"] == [None]
 
 
+def test_exact_inbox_replay_rejects_a_different_trusted_scope(session_factory) -> None:
+    command, result = _pair()
+    gate = _gate(command, result, "PREPARE", operation_id=uuid4(), revision=1)
+    with session_factory.begin() as session:
+        _stage(session, command, result)
+        _apply(session, gate)
+
+    with session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="scope binding"):
+            _apply_commit_gate(
+                session,
+                gate,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+                private_scope=_trusted_scope(
+                    command,
+                    kind="PROJECT",
+                    project_id=UUID("00000000-0000-4000-8000-000000000299"),
+                ),
+            )
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -726,6 +748,38 @@ def _persisted_collection_stage(session_factory):
             session, _gate(command, proposal.result, "PREPARE", operation_id=operation, revision=1)
         )
     return command, proposal.result, operation
+
+
+def test_collection_gate_rejects_candidate_to_stage_scope_mismatch_without_ack(
+    session_factory,
+) -> None:
+    command, result, operation = _persisted_collection_stage(session_factory)
+    other_project_id = UUID("00000000-0000-4000-8000-000000000299")
+    with session_factory.begin() as session:
+        candidate = session.get(CollectionRuntimeAttempt, command.command_id)
+        assert candidate is not None
+        candidate.private_scope_kind = "PROJECT"
+        candidate.project_id = other_project_id
+
+    with session_factory() as session:
+        with pytest.raises(PrivateScopeRejected, match="candidate private scope"):
+            apply_collection_commit_gate(
+                session,
+                _gate(command, result, "FINALIZE", operation_id=operation, revision=2),
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+            )
+        session.commit()
+
+    with session_factory() as session:
+        candidate = session.get(CollectionRuntimeAttempt, command.command_id)
+        assert candidate is not None
+        assert candidate.state == "PERSISTED"
+        assert candidate.private_scope_kind == "PROJECT"
+        assert candidate.project_id == other_project_id
+        state = _state(session, command)
+        assert state["state"] == "PREPARED"
+        assert state["ack_count"] == 1
 
 
 def _mutate_collection_stage_proposal(

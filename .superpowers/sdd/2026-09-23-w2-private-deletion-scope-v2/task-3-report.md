@@ -148,3 +148,64 @@ relay deletion race regression은 network send와 deletion commit 사이에 owne
 - relay send가 owner lock transaction 안에서 수행되므로 느린 queue는 같은 owner 삭제를 지연시킨다. 이는 “삭제 commit 이후 send 금지” 규칙을 만족하기 위한 의도적 직렬화다. queue의 at-least-once 특성상 send 성공 뒤 DB commit 실패 시 재전송 가능성은 기존과 동일하다.
 - production W1 adapter는 외부 handoff이며 이 repository에서 검증할 수 없다. W1 adapter가 배포 composition에 연결되기 전에는 의도대로 private runtime이 fail-closed 한다.
 - full suite의 16건은 위 두 기존/중간 묶음뿐이며, Task3가 소유하지 않는 파일을 고쳐 숨기지 않았다.
+
+## 8. Review fix round 1 — persisted scope exact binding
+
+기준 commit: `566681e19162372f9f5e2dee5d6d7d19607b269f`
+
+### 검토 결과와 원인
+
+리뷰 지적을 현재 코드에서 확인했다. trusted proof 자체와 owner epoch은 검증되고 있었지만, 일부 replay/transition helper가 이미 저장된 `private_scope_kind/project_id`를 현재 proof 또는 관련 parent row와 exact compare하지 않았다.
+
+- legacy `CollectionAttempt` replay는 nullable command project만 비교하고 scope kind를 비교하지 않았다.
+- candidate commit/staged replay의 `_assert_bound_attempt`는 runtime attempt의 scope attribution을 비교하지 않았다.
+- staged replay의 `_bound_row` 호출은 현재 proof를 전달하지 않았다.
+- collection gate transition은 candidate와 stage scope를 비교하지 않았다.
+- commit-gate inbox exact replay는 stage scope 검사보다 먼저 stored ACK를 반환했다.
+
+따라서 historical `UNKNOWN` 또는 다른 PROJECT attribution row가 현재 ACCOUNT proof로 re-arm/finalize될 수 있었다. 이 row들을 재분류하거나 backfill하지 않고, 현재 trusted proof와 exact match하지 않으면 거부하도록 수정했다.
+
+### RED
+
+승인된 격리 PostgreSQL 환경변수는 process-local로만 설정하고 다음 focused command를 실행했다.
+
+```text
+uv run python -m pytest -q tests/integration/source_collection/test_atomic_persistence.py::test_legacy_replay_rejects_historical_unknown_scope_without_reclassifying_it tests/integration/source_collection/test_collection_runtime_storage.py::test_candidate_commit_rejects_historical_unknown_runtime_scope_without_writes tests/integration/source_collection/test_collection_runtime_storage.py::test_collection_replay_rejects_other_project_persisted_scope tests/integration/source_collection/test_private_commit_gate.py::test_exact_inbox_replay_rejects_a_different_trusted_scope tests/integration/source_collection/test_private_commit_gate.py::test_collection_gate_rejects_candidate_to_stage_scope_mismatch_without_ack
+```
+
+결과: `6 failed`. 여섯 케이스 모두 예상한 `Failed: DID NOT RAISE PrivateScopeRejected`로 실패했다.
+
+- finalized legacy parent를 `UNKNOWN`으로 seed한 replay
+- reserved runtime attempt를 `UNKNOWN`으로 seed한 candidate commit
+- runtime attempt를 다른 PROJECT로 seed한 staged replay
+- private stage를 다른 PROJECT로 seed한 staged replay
+- 동일 inbox message를 다른 authenticated PROJECT proof로 exact replay
+- candidate와 stage가 서로 다른 scope인 FINALIZE transition
+
+### GREEN 구현
+
+- `_replay_attempt`에 trusted proof를 필수 전달하고 persisted kind/project를 exact compare한다.
+- `_assert_bound_attempt`가 writer call에서 proof를 받아 runtime attribution을 exact compare한다.
+- staged replay `_bound_row`에 proof를 전달한다.
+- collection transition은 stage↔proof 및 candidate↔stage scope를 mutation 전에 비교한다.
+- inbox/receipt replay보다 먼저 persisted stage binding/scope를 검사한다. exact inbox가 있는데 stage가 없으면 fail-closed 한다.
+- historical `UNKNOWN` row는 `UNKNOWN` 상태로 남으며 ACCOUNT/PROJECT로 자동 분류하지 않는다.
+
+동일 focused command 결과: `6 passed in 2.34s`.
+
+### 회귀 및 정적 검증
+
+- 기존 unfinalized replay fixture는 현재 ACCOUNT row를 의도하므로 `private_scope_kind="ACCOUNT"`를 명시했다. 별도 focused 결과: `1 passed`.
+- covering integration 3개 파일: `134 passed, 3 failed`
+  - 실패 3건은 기존 Task5 metadata/migration-head assertion이다.
+- source_collection integration 전체: `378 passed, 15 failed, 1 skipped`
+  - 기존 `RenderedCollector` 8건 + Task5 schema/head 7건만 실패했다.
+- project full suite 1회: `1896 passed, 16 failed, 1 skipped`
+  - 기존 `RenderedCollector` 8건 + Task5 schema/head 8건만 실패했다.
+- `uv run ruff check .`: PASS
+- `uv run mypy`: PASS — `Success: no issues found in 34 source files`
+- `git diff --check`: PASS (Windows checkout LF→CRLF warning만 존재)
+
+### 잔여 우려
+
+새 backfill이나 자동 classification은 추가하지 않았다. 따라서 v1 historical `UNKNOWN` row는 private replay/write 경로에서 명시적으로 거부되며 원래 attribution을 유지한다. 해당 row를 다시 처리하려면 W1의 인증된 별도 재승인/재생성 절차가 필요하고, W2가 nullable wire 값으로 승격해서는 안 된다.

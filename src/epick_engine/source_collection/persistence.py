@@ -2621,6 +2621,7 @@ def _replay_attempt(
     *,
     command: CollectionCommand,
     attempt_id: UUID,
+    private_scope: PrivateWriteScope,
     allow_deliver_resume_stage: bool = False,
     allow_initial_policy_revision: bool = False,
 ) -> CollectionResult | None:
@@ -2634,10 +2635,17 @@ def _replay_attempt(
     )
     if attempt is None:
         return None
+    if (
+        attempt.private_scope_kind != private_scope.kind
+        or attempt.project_id != private_scope.project_id
+    ):
+        from epick_engine.source_collection.private_scope import PrivateScopeRejected
+
+        raise PrivateScopeRejected("collection attempt private scope does not match")
     expected = {
         "attempt_id": attempt_id,
         "job_id": command.job_id,
-        "project_id": _project_id(command),
+        "project_id": private_scope.project_id,
         "input_version": command.input_version,
         "target_ref": str(command.source_id),
         "purpose_ref": str(command.purpose_ref),
@@ -3720,6 +3728,7 @@ def replay_committed_collection(
                 session,
                 command=command,
                 attempt_id=attempt_id,
+                private_scope=private_scope,
                 allow_deliver_resume_stage=True,
                 allow_initial_policy_revision=True,
             )
@@ -3817,7 +3826,12 @@ def commit_collection_candidate(
                 )
                 if attempt is None:
                     raise CollectionRuntimeConflict("collection runtime attempt is unavailable")
-                _assert_bound_attempt(attempt, validated_dispatch, digest)
+                _assert_bound_attempt(
+                    attempt,
+                    validated_dispatch,
+                    digest,
+                    private_scope=private_scope,
+                )
                 if attempt.state != "RESERVED":
                     raise CollectionRuntimeConflict("collection runtime attempt is not reserved")
                 if attempt.attempt_id != prepared.attempt_id:
@@ -3932,7 +3946,12 @@ def replay_staged_collection(
             )
             if attempt is None:
                 raise CollectionRuntimeConflict("collection runtime attempt is unavailable")
-            _assert_bound_attempt(attempt, validated_dispatch, digest)
+            _assert_bound_attempt(
+                attempt,
+                validated_dispatch,
+                digest,
+                private_scope=private_scope,
+            )
             if attempt.state not in {"PERSISTED", "FINALIZED"}:
                 raise CollectionRuntimeConflict("collection runtime attempt is not replayable")
             if attempt.claim_token is not None or attempt.claim_expires_at is not None:
@@ -4031,6 +4050,7 @@ def replay_staged_collection(
                 epoch=command.owner_deletion_epoch,
                 digest=proposal.result_digest,
                 stage_kind="COLLECTION",
+                private_scope=private_scope,
             )
             if stage.result_payload != proposal.result.model_dump(mode="json"):
                 raise CommitGateRejected("private staged-result payload is inconsistent")
@@ -4083,6 +4103,7 @@ def commit_prepared_collection(
                     session,
                     command=command,
                     attempt_id=prepared.attempt_id,
+                    private_scope=private_scope,
                 )
                 if replay is not None:
                     return replay
@@ -4097,6 +4118,7 @@ def commit_prepared_collection(
                     session,
                     command=command,
                     attempt_id=prepared.attempt_id,
+                    private_scope=private_scope,
                 )
                 if replay is not None:
                     return replay

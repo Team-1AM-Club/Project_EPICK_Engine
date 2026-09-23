@@ -28,7 +28,10 @@ from epick_engine.source_collection.persistence import (
     SourceVersion,
     lock_source_policy_scope,
 )
-from epick_engine.source_collection.private_scope import PrivateWriteScope
+from epick_engine.source_collection.private_scope import (
+    PrivateScopeRejected,
+    PrivateWriteScope,
+)
 from epick_engine.source_collection.w1_transport import W1WireContractError, _parse_wire
 
 
@@ -50,6 +53,7 @@ def _require_exact_integer_wire_types(raw: object, parsed: object) -> None:
 def _assert_gate_stage_binding(
     gate: CommitGateAckProposal,
     stage: PrivateCommitStage,
+    private_scope: PrivateWriteScope,
 ) -> None:
     if (
         stage.owner_ref != gate.authenticated_owner_ref
@@ -60,6 +64,11 @@ def _assert_gate_stage_binding(
         or stage.stage_kind != "COLLECTION"
     ):
         raise CommitGateRejected("collection commit-gate binding mismatch")
+    if (
+        stage.private_scope_kind != private_scope.kind
+        or stage.project_id != private_scope.project_id
+    ):
+        raise PrivateScopeRejected("collection stage private scope does not match")
 
 
 def _lock_candidate(
@@ -212,16 +221,23 @@ def apply_collection_candidate_transition(
     session: Session,
     gate: CommitGateAckProposal,
     stage: PrivateCommitStage,
+    *,
+    private_scope: PrivateWriteScope,
 ) -> None:
     """Apply the public half of a collection gate while its command lock is held."""
 
-    _assert_gate_stage_binding(gate, stage)
+    _assert_gate_stage_binding(gate, stage, private_scope)
+    candidate = _lock_candidate(session, gate.command_id)
+    if candidate is not None and (
+        candidate.private_scope_kind != stage.private_scope_kind
+        or candidate.project_id != stage.project_id
+    ):
+        raise PrivateScopeRejected("collection candidate private scope does not match stage")
     if gate.action == "PREPARE":
         return
     if gate.action == "FINALIZE" and stage.state == "PURGED":
         return
 
-    candidate = _lock_candidate(session, gate.command_id)
     if gate.action in {"ABORT", "PURGE"}:
         if candidate is None:
             return
@@ -305,6 +321,7 @@ def apply_collection_commit_gate(
             missing_stage_kind="COLLECTION",
             private_scope=private_scope,
         )
+        assert private_scope is not None
         stage = session.get(
             PrivateCommitStage,
             ack.command_id,
@@ -312,6 +329,11 @@ def apply_collection_commit_gate(
         )
         if stage is None or stage.stage_kind == "PRIVATE_ONLY":
             return ack
-        apply_collection_candidate_transition(session, ack, stage)
+        apply_collection_candidate_transition(
+            session,
+            ack,
+            stage,
+            private_scope=private_scope,
+        )
         session.flush()
         return ack

@@ -439,11 +439,6 @@ def apply_commit_gate(
     assert private_scope is not None
     lock_private_write_scope(session, private_scope)
     with _storage_transaction(session, gate.command_id):
-        inbox = session.get(PrivateCommitGateInbox, gate.message_id)
-        if inbox is not None:
-            if inbox.wire_hash != wire_hash or inbox.command_id != gate.command_id:
-                raise CommitGateRejected("private commit-gate message conflict")
-            return _stored_ack(session, inbox.ack_message_id)
         row = session.get(PrivateCommitStage, gate.command_id, populate_existing=True)
         if row is not None:
             _bound_row(
@@ -455,6 +450,14 @@ def apply_commit_gate(
                 digest=gate.result_digest,
                 private_scope=private_scope,
             )
+        inbox = session.get(PrivateCommitGateInbox, gate.message_id)
+        if inbox is not None:
+            if inbox.wire_hash != wire_hash or inbox.command_id != gate.command_id:
+                raise CommitGateRejected("private commit-gate message conflict")
+            if row is None:
+                raise CommitGateRejected("private commit-gate staged result unavailable")
+            return _stored_ack(session, inbox.ack_message_id)
+        if row is not None:
             if row.operation_id is not None and row.operation_id != gate.operation_id:
                 raise CommitGateRejected("private commit-gate operation conflict")
         receipt = session.get(

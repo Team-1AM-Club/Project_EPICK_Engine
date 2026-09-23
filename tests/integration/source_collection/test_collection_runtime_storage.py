@@ -1842,6 +1842,38 @@ def test_candidate_commit_persists_atomic_stage_without_pointer_mutation_and_cle
 
 
 @pytest.mark.approved_postgres
+def test_candidate_commit_rejects_historical_unknown_runtime_scope_without_writes(
+    runtime_session_factory: sessionmaker[Session],
+) -> None:
+    dispatch, effective_command, prepared, claim_token = _claimed_candidate_inputs(
+        runtime_session_factory
+    )
+    with runtime_session_factory.begin() as session:
+        attempt = session.get(CollectionRuntimeAttempt, dispatch.payload.command_id)
+        assert attempt is not None
+        attempt.private_scope_kind = "UNKNOWN"
+        attempt.project_id = None
+
+    with pytest.raises(PrivateScopeRejected, match="runtime private scope"):
+        commit_collection_candidate(
+            runtime_session_factory,
+            dispatch,
+            effective_command,
+            prepared,
+            claim_token=claim_token,
+            staged_message_id=uuid4(),
+            occurred_at=NOW,
+        )
+
+    with runtime_session_factory() as session:
+        attempt = session.get(CollectionRuntimeAttempt, dispatch.payload.command_id)
+        assert attempt is not None
+        assert attempt.state == "RESERVED"
+        assert attempt.private_scope_kind == "UNKNOWN"
+        assert session.get(PrivateCommitStage, dispatch.payload.command_id) is None
+
+
+@pytest.mark.approved_postgres
 def test_terminal_gate_before_collection_replay_prevents_revival_or_public_writes(
     runtime_session_factory: sessionmaker[Session],
 ) -> None:
@@ -2035,6 +2067,49 @@ def test_collection_replay_returns_exact_staged_identity_without_public_revision
         assert source is not None
         assert source.next_observation_order == next_order_before
         assert events_after == events_before
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize("mismatched_row", ["runtime", "stage"])
+def test_collection_replay_rejects_other_project_persisted_scope(
+    runtime_session_factory: sessionmaker[Session],
+    mismatched_row: str,
+) -> None:
+    dispatch, effective_command, prepared, claim_token = _claimed_candidate_inputs(
+        runtime_session_factory
+    )
+    commit_collection_candidate(
+        runtime_session_factory,
+        dispatch,
+        effective_command,
+        prepared,
+        claim_token=claim_token,
+        staged_message_id=uuid4(),
+        occurred_at=NOW,
+    )
+    other_project_id = UUID("00000000-0000-4000-8000-000000000299")
+    with runtime_session_factory.begin() as session:
+        row = (
+            session.get(CollectionRuntimeAttempt, dispatch.payload.command_id)
+            if mismatched_row == "runtime"
+            else session.get(PrivateCommitStage, dispatch.payload.command_id)
+        )
+        assert row is not None
+        row.private_scope_kind = "PROJECT"
+        row.project_id = other_project_id
+
+    with pytest.raises(PrivateScopeRejected):
+        replay_staged_collection(runtime_session_factory, dispatch)
+
+    with runtime_session_factory() as session:
+        row = (
+            session.get(CollectionRuntimeAttempt, dispatch.payload.command_id)
+            if mismatched_row == "runtime"
+            else session.get(PrivateCommitStage, dispatch.payload.command_id)
+        )
+        assert row is not None
+        assert row.private_scope_kind == "PROJECT"
+        assert row.project_id == other_project_id
 
 
 @pytest.mark.approved_postgres

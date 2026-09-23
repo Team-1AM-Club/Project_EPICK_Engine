@@ -766,6 +766,39 @@ def test_replay_committed_collection_returns_finalized_result_without_appending_
         assert _counts(session) == before
 
 
+def test_legacy_replay_rejects_historical_unknown_scope_without_reclassifying_it(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _, source, policy = _seed_source(session_factory)
+    command = _command(source)
+    prepared = _complete_prepared(command, source, policy, aggregate_revision=1)
+    commit_prepared_collection(
+        session_factory,
+        command=command,
+        prepared=prepared,
+        lock_authority=_locker(command, pointer_eligible=True),
+    )
+    with session_factory.begin() as session:
+        attempt = session.get(CollectionAttempt, prepared.attempt_id)
+        assert attempt is not None
+        attempt.private_scope_kind = "UNKNOWN"
+        attempt.project_id = None
+
+    with pytest.raises(PrivateScopeRejected, match="collection attempt private scope"):
+        replay_committed_collection(
+            session_factory,
+            command=command,
+            attempt_id=prepared.attempt_id,
+            lock_authority=_locker(command, pointer_eligible=True),
+        )
+
+    with session_factory() as session:
+        attempt = session.get(CollectionAttempt, prepared.attempt_id)
+        assert attempt is not None
+        assert attempt.private_scope_kind == "UNKNOWN"
+        assert attempt.project_id is None
+
+
 def test_replay_committed_collection_reuses_bound_policy_result_for_initial_command(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -998,11 +1031,12 @@ def test_replay_committed_collection_rejects_unfinalized_attempt(
     attempt_id = uuid4()
     with session_factory.begin() as session:
         session.add(
-            CollectionAttempt(
-                attempt_id=attempt_id,
-                owner_user_id=command.authenticated_owner_ref,
-                job_id=command.job_id,
-                project_id=None,
+                CollectionAttempt(
+                    attempt_id=attempt_id,
+                    owner_user_id=command.authenticated_owner_ref,
+                    job_id=command.job_id,
+                    private_scope_kind="ACCOUNT",
+                    project_id=None,
                 command_id=command.command_id,
                 input_version=command.input_version,
                 target_ref=str(command.source_id),
