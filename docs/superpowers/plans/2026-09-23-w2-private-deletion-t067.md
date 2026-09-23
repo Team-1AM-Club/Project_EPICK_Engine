@@ -131,17 +131,46 @@ Expected: PASS; valid payload round-trips and each invalid fixture fails both sc
 - [ ] **Step 1: Write failing durable-state tests**
 
     def test_same_deletion_id_with_different_private_scope_is_rejected(session_factory) -> None:
-        _apply(session_factory, deletion_id=DELETE_ID, epoch=7, attempt_ids=frozenset({A1}))
+        state = _seed_shared_public_source(session_factory)
+        first = PrivateDeletionCommand(
+            deletion_id=uuid4(), owner_user_id=OWNER_A, deletion_epoch=7,
+            attempt_ids=frozenset({state.attempt_a_project_1}),
+            request_deduplication_ids=frozenset({state.dedup_a_project_1}),
+            private_reference_keys=frozenset({"a-project-1"}),
+        )
+        with session_factory.begin() as session:
+            assert apply_private_deletion(session, first) == "APPLIED"
         with pytest.raises(PersistenceConflict, match="deletion receipt does not match command"):
-            _apply(session_factory, deletion_id=DELETE_ID, epoch=7, attempt_ids=frozenset({A2}))
+            with session_factory.begin() as session:
+                apply_private_deletion(
+                    session,
+                    replace(first, attempt_ids=frozenset({state.attempt_a_project_2})),
+                )
 
     def test_private_deletion_receipt_is_owner_scoped_and_monotonic(session_factory) -> None:
-        assert _apply(session_factory, deletion_id=FIRST, epoch=7).outcome == "APPLIED"
-        assert _apply(session_factory, deletion_id=LATE, epoch=6).outcome == "STALE"
+        state = _seed_shared_public_source(session_factory)
+        first = PrivateDeletionCommand(
+            deletion_id=uuid4(), owner_user_id=OWNER_A, deletion_epoch=7,
+            attempt_ids=frozenset({state.attempt_a_project_1}),
+            request_deduplication_ids=frozenset({state.dedup_a_project_1}),
+            private_reference_keys=frozenset({"a-project-1"}),
+        )
+        with session_factory.begin() as session:
+            assert apply_private_deletion(session, first) == "APPLIED"
+        late = replace(
+            first, deletion_id=uuid4(), deletion_epoch=6,
+            attempt_ids=frozenset({state.attempt_a_project_2}),
+            request_deduplication_ids=frozenset({state.dedup_a_project_2}),
+            private_reference_keys=frozenset({"a-project-2"}),
+        )
+        with session_factory.begin() as session:
+            assert apply_private_deletion(session, late) == "STALE"
+
+Import replace from dataclasses, PrivateDeletionCommand from worker, and apply_private_deletion from persistence in this test module.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: python -m pytest tests/integration/source_collection/test_private_deletion.py -q
+Run: python -m pytest tests/integration/source_collection/test_private_deletion.py -q -k receipt
 
 Expected: FAIL because no receipt table/model or owner epoch lock exists.
 
@@ -168,7 +197,7 @@ Create the owner state row with INSERT ON CONFLICT DO NOTHING, then lock that ro
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: python -m pytest tests/integration/source_collection/test_private_deletion.py tests/unit/source_collection/test_alembic_config.py -q
+Run: python -m pytest tests/integration/source_collection/test_private_deletion.py tests/unit/source_collection/test_alembic_config.py -q -k 'receipt or head'
 
 Expected: New persistence-focused tests PASS; the previously RED worker consumer scenarios remain RED until Task 3. The Alembic branch has only 0009_private_deletion_receipt as head.
 
