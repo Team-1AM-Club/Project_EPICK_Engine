@@ -1,11 +1,12 @@
 # W2 CT15 runtime — local implementation / deployment pending
 
-2026-09-23 correction: current CT15 preflight requires the exact current
-Alembic head, `0008_collection_runtime`. Revisions `0005` through `0007` are
-forward-migration starting points only, not CT15 runtime-ready heads: the
-current commit-gate store always writes `private_commit_stages.stage_kind`,
-which is introduced by `0008`. Preflight must reject those older revisions
-before it performs any queue action.
+2026-09-23 T067 correction: current CT15 preflight requires the exact current
+Alembic head, `0009_private_deletion_receipt`. Revisions `0005` through `0008`
+are forward-migration starting points only, not CT15 runtime-ready heads: the
+current commit-gate store writes `private_commit_stages.stage_kind`, introduced
+by `0008`, and the private-deletion consumer requires the durable receipt and
+owner-epoch tables introduced by `0009`. Preflight must reject every older
+revision before it performs any queue action.
 
 2026-09-20 follow-up: [B1 scoped inspection and transport controls](ct15-b1-controls.md)
 supersedes the historical missing-harness explanation below. The new W1 action
@@ -18,6 +19,41 @@ independently implemented `0006_source_restriction` and `0007_restriction_receip
 Updated: 2026-09-19. Deployment and infrastructure belong to W1. The joint
 environment is not selected. No image was published and no AWS message was sent
 as part of this implementation. This is not a joint CT15 completion receipt.
+
+## T067 private-deletion handoff (2026-09-23)
+
+W2 publishes two private payload contracts under `contracts/w2-private/`:
+
+- `private-deletion-command.schema.json` defines
+  `w2.private-deletion.v1`.
+- `private-deletion-ack.schema.json` defines
+  `w2.private-deletion-ack.v1`, whose outcomes are `APPLIED`, `DUPLICATE`, and
+  `STALE`.
+
+The W2 consumer seam is
+`epick_engine.source_collection.worker.process_private_deletion`. W1 passes a
+validated `PrivateDeletionCommand`, a W2 database `session_factory`, and its
+private side-effect adapter. The consumer finishes and commits the W2 database
+transaction first, then calls `purge_private_references`, and only after that
+purge succeeds calls `acknowledge`. A `STALE` result performs neither purge nor
+ACK. A purge failure therefore leaves the transport unacknowledged; W1 retries
+that transport/ACK failure with the same `deletion_id` so W2 can reuse the
+durable deletion receipt without recreating private data. Migration
+`migrations/versions/0009_private_deletion_receipt.py` must be applied before
+either runtime preflight can pass.
+
+W1 owns authenticated dispatch, its private outer envelope and channel, binding
+the authenticated owner to the W2 payload, AWS/SQS/IAM configuration, retry
+scheduling, and ACK publication/transport. Those items, the W1 dispatcher, and
+a joint T067 end-to-end run are outside W2 completion claims.
+
+The earlier W1 CT15 report was pinned to W2 database head
+`0008_collection_runtime`, W2 source SHA
+`11c005db5f94fe26c60314aec9b61764c166e379`, and a W1-reported image digest.
+W2 confirmed only that the source object exists locally; it did not independently
+verify that deployed image, ECR/SQS, the deployed database, or same-run restart
+and count evidence. Because current runtime readiness now requires `0009`, that
+historical 0008 CT15 observation must not be presented as current READY evidence.
 
 ## Local verification (2026-09-19)
 

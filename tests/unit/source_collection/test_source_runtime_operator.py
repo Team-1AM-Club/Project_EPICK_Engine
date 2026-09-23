@@ -189,7 +189,7 @@ def _queue_attributes(*, arn_name: str, encrypted: bool = True, dlq: bool = True
     return attributes
 
 
-def _engine(*, revisions: tuple[str, ...] = ("0008_collection_runtime",)) -> MagicMock:
+def _engine(*, revisions: tuple[str, ...] = ("0009_private_deletion_receipt",)) -> MagicMock:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
     connection.scalar.return_value = "epick"
@@ -372,7 +372,24 @@ def test_preflight_rejects_multiple_or_unknown_migration_heads(
 
     with pytest.raises(_configuration_error()):
         _symbol("preflight")(
-            _engine(revisions=("0008_collection_runtime", "9999_unknown")),
+            _engine(revisions=("0009_private_deletion_receipt", "9999_unknown")),
+            sdk,
+            _settings(values),
+        )
+
+    assert sdk.calls == []
+
+
+def test_preflight_requires_private_deletion_receipt_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _map_fixed_container_paths(monkeypatch, tmp_path)
+    values = environment()
+    sdk = _fake_sqs(values)
+
+    with pytest.raises(_configuration_error()):
+        _symbol("preflight")(
+            _engine(revisions=("0008_collection_runtime",)),
             sdk,
             _settings(values),
         )

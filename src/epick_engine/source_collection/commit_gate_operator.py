@@ -201,7 +201,7 @@ def preflight(engine: Engine, client: SqsClient, settings: Ct15Settings) -> dict
         if not _isolated_name(connection.scalar(text("SELECT current_database()")) or ""):
             raise Ct15ConfigurationError("isolated CT15 database required")
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-        if revision != "0008_collection_runtime":
+        if revision != "0009_private_deletion_receipt":
             raise Ct15ConfigurationError("CT15 collection runtime migration required")
         for table in (PrivateStagedOutbox, PrivateCommitGateAck):
             connection.execute(select(table.delivered_at).limit(0))

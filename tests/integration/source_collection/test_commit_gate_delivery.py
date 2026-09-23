@@ -900,8 +900,10 @@ def test_delivery_migration_precedes_the_forward_non_destructive_head() -> None:
     restriction_revision = scripts.get_revision("0006_source_restriction")
     receipt_revision = scripts.get_revision("0007_restriction_receipt")
     runtime_revision = scripts.get_revision("0008_collection_runtime")
+    deletion_revision = scripts.get_revision("0009_private_deletion_receipt")
 
-    assert scripts.get_heads() == [runtime_revision.revision]
+    assert scripts.get_heads() == [deletion_revision.revision]
+    assert deletion_revision.down_revision == runtime_revision.revision
     assert runtime_revision.down_revision == receipt_revision.revision
     assert receipt_revision.down_revision == restriction_revision.revision
     assert restriction_revision.down_revision == revision.revision

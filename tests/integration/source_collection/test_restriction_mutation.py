@@ -493,7 +493,7 @@ def test_migration_upgrades_0006_through_0007_to_head_and_matches_complete_metad
 ) -> None:
     root = Path(__file__).resolve().parents[3]
     scripts = ScriptDirectory.from_config(Config(root / "alembic.ini"))
-    assert scripts.get_heads() == ["0008_collection_runtime"]
+    assert scripts.get_heads() == ["0009_private_deletion_receipt"]
     assert scripts.get_revision("0007_restriction_receipt").down_revision == (
         "0006_source_restriction"
     )
@@ -525,7 +525,7 @@ def test_migration_upgrades_0006_through_0007_to_head_and_matches_complete_metad
         with admin.begin() as connection:
             connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
             assert MigrationContext.configure(connection).get_current_revision() == (
-                "0008_collection_runtime"
+                "0009_private_deletion_receipt"
             )
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
     finally:

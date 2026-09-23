@@ -213,7 +213,7 @@ def test_collection_runtime_migration_backfills_0007_and_matches_metadata(
     approved_postgres_url: URL,
 ) -> None:
     scripts = ScriptDirectory.from_config(Config(PROJECT_ROOT / "alembic.ini"))
-    assert scripts.get_heads() == ["0008_collection_runtime"]
+    assert scripts.get_heads() == ["0009_private_deletion_receipt"]
     admin = create_engine(approved_postgres_url)
     schema = f"epick_w2_collection_runtime_{uuid4().hex}"
     command_id = uuid4()
@@ -270,7 +270,7 @@ def test_collection_runtime_migration_backfills_0007_and_matches_metadata(
             inspector = inspect(connection)
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0008_collection_runtime"
+                == "0009_private_deletion_receipt"
             )
 
             source_columns = {column["name"]: column for column in inspector.get_columns("sources")}

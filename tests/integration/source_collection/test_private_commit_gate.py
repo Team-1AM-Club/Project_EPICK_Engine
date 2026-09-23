@@ -1195,7 +1195,7 @@ def test_postgres_statement_rejection_hides_private_data_and_preserves_caller_tr
 def test_migration_upgrade_matches_private_metadata_in_isolated_postgres(approved_postgres_url):
     root = Path(__file__).resolve().parents[3]
     scripts = ScriptDirectory.from_config(Config(root / "alembic.ini"))
-    assert scripts.get_heads() == ["0008_collection_runtime"]
+    assert scripts.get_heads() == ["0009_private_deletion_receipt"]
     admin = create_engine(approved_postgres_url)
     schema = f"epick_w2_gate_migration_{uuid4().hex}"
     with admin.begin() as connection:
@@ -1223,7 +1223,7 @@ def test_migration_upgrade_matches_private_metadata_in_isolated_postgres(approve
             connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("0008_collection_runtime")
+            ).scalar_one() == ("0009_private_deletion_receipt")
             private_names = {name for name in Base.metadata.tables if name.startswith("private_")}
 
             def include_object(obj, name, type_, reflected, compare_to):

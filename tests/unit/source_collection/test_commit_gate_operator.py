@@ -168,10 +168,10 @@ def test_sdk_errors_do_not_expose_payload_or_receipt() -> None:
     assert caught.value.__suppress_context__
 
 
-def test_preflight_accepts_only_collection_runtime_migration_head() -> None:
+def test_preflight_accepts_only_private_deletion_receipt_migration_head() -> None:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0008_collection_runtime"]
+    connection.scalar.side_effect = ["epick_ct15", "0009_private_deletion_receipt"]
     sdk = FakeSqs()
     result = preflight(engine, sdk, Ct15Settings.from_environment(environment()))
     assert result["status"] == "PREFLIGHT_PASSED"
@@ -186,6 +186,7 @@ def test_preflight_accepts_only_collection_runtime_migration_head() -> None:
         "0005_private_gate_delivery",
         "0006_source_restriction",
         "0007_restriction_receipt",
+        "0008_collection_runtime",
         "0008_unknown_future_head",
     ],
 )
@@ -211,7 +212,7 @@ def test_preflight_rejects_nonisolated_unencrypted_or_no_dlq_queue(bad_attribute
 
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0008_collection_runtime"]
+    connection.scalar.side_effect = ["epick_ct15", "0009_private_deletion_receipt"]
     with pytest.raises(Ct15ConfigurationError):
         preflight(engine, BadQueue(), Ct15Settings.from_environment(environment()))
 
