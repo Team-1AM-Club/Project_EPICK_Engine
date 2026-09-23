@@ -9,7 +9,7 @@ source history is intentionally not part of the command's deletion scope.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from threading import Event, Thread
 from uuid import UUID, uuid4
@@ -33,15 +33,17 @@ from epick_engine.source_collection.persistence import (
     Evidence,
     ExecutionAuthorityGrant,
     OutboxEvent,
+    PersistenceConflict,
     RequestDeduplication,
     RetainedBody,
     Source,
     SourcePolicyDecision,
     SourceVersion,
     StaleExecution,
+    apply_private_deletion,
     assert_current_attempt,
 )
-from epick_engine.source_collection.worker import SourceCollectionWorker
+from epick_engine.source_collection.worker import PrivateDeletionCommand, SourceCollectionWorker
 
 NOW = datetime(2031, 6, 1, 9, 0, tzinfo=UTC)
 OWNER_A = UUID("00000000-0000-4000-8000-000000006301")
@@ -478,6 +480,109 @@ def test_isolated_postgres_timeouts_survive_rollback_and_pool_reuse(
     with database_engine.connect() as second_connection:
         assert second_connection.scalar(text("SHOW lock_timeout")) == "1500ms"
         assert second_connection.scalar(text("SHOW statement_timeout")) == "5s"
+
+
+@pytest.mark.approved_postgres
+def test_same_deletion_id_with_different_private_scope_is_rejected(
+    session_factory: sessionmaker[Session],
+) -> None:
+    state = _seed_shared_public_source(session_factory)
+    first = PrivateDeletionCommand(
+        deletion_id=uuid4(),
+        owner_user_id=OWNER_A,
+        deletion_epoch=7,
+        attempt_ids=frozenset({state.attempt_a_project_1}),
+        request_deduplication_ids=frozenset({state.dedup_a_project_1}),
+        private_reference_keys=frozenset({"a-project-1"}),
+    )
+
+    with session_factory.begin() as session:
+        assert apply_private_deletion(session, first) == "APPLIED"
+
+    with pytest.raises(PersistenceConflict, match="deletion receipt does not match command"):
+        with session_factory.begin() as session:
+            apply_private_deletion(
+                session,
+                replace(first, attempt_ids=frozenset({state.attempt_a_project_2})),
+            )
+
+
+@pytest.mark.approved_postgres
+def test_private_deletion_receipt_is_owner_scoped_and_monotonic(
+    session_factory: sessionmaker[Session],
+) -> None:
+    state = _seed_shared_public_source(session_factory)
+    first = PrivateDeletionCommand(
+        deletion_id=uuid4(),
+        owner_user_id=OWNER_A,
+        deletion_epoch=7,
+        attempt_ids=frozenset({state.attempt_a_project_1}),
+        request_deduplication_ids=frozenset({state.dedup_a_project_1}),
+        private_reference_keys=frozenset({"a-project-1"}),
+    )
+
+    with session_factory.begin() as session:
+        assert apply_private_deletion(session, first) == "APPLIED"
+
+    late = replace(
+        first,
+        deletion_id=uuid4(),
+        deletion_epoch=6,
+        attempt_ids=frozenset({state.attempt_a_project_2}),
+        request_deduplication_ids=frozenset({state.dedup_a_project_2}),
+        private_reference_keys=frozenset({"a-project-2"}),
+    )
+    with session_factory.begin() as session:
+        assert apply_private_deletion(session, late) == "STALE"
+
+    assert _attempt_ids_for_owner(session_factory, OWNER_A) == {state.attempt_a_project_2}
+    assert _dedup_ids_for_owner(session_factory, OWNER_A) == {state.dedup_a_project_2}
+    assert _attempt_ids_for_owner(session_factory, OWNER_B) == {state.attempt_b_project_1}
+    assert _dedup_ids_for_owner(session_factory, OWNER_B) == {state.dedup_b_project_1}
+
+
+@pytest.mark.approved_postgres
+def test_private_deletion_receipt_returns_duplicate_for_the_same_command(
+    session_factory: sessionmaker[Session],
+) -> None:
+    state = _seed_shared_public_source(session_factory)
+    command = PrivateDeletionCommand(
+        deletion_id=uuid4(),
+        owner_user_id=OWNER_A,
+        deletion_epoch=7,
+        attempt_ids=frozenset({state.attempt_a_project_1}),
+        request_deduplication_ids=frozenset({state.dedup_a_project_1}),
+        private_reference_keys=frozenset({"a-project-1"}),
+    )
+
+    with session_factory.begin() as session:
+        assert apply_private_deletion(session, command) == "APPLIED"
+    with session_factory.begin() as session:
+        assert apply_private_deletion(session, command) == "DUPLICATE"
+
+
+@pytest.mark.approved_postgres
+def test_private_deletion_receipt_rejects_rows_owned_by_another_owner(
+    session_factory: sessionmaker[Session],
+) -> None:
+    state = _seed_shared_public_source(session_factory)
+    command = PrivateDeletionCommand(
+        deletion_id=uuid4(),
+        owner_user_id=OWNER_A,
+        deletion_epoch=7,
+        attempt_ids=frozenset({state.attempt_b_project_1}),
+        request_deduplication_ids=frozenset({state.dedup_b_project_1}),
+        private_reference_keys=frozenset({"b-project-1"}),
+    )
+
+    with pytest.raises(
+        PersistenceConflict, match="private deletion candidate belongs to another owner"
+    ):
+        with session_factory.begin() as session:
+            apply_private_deletion(session, command)
+
+    assert _attempt_ids_for_owner(session_factory, OWNER_B) == {state.attempt_b_project_1}
+    assert _dedup_ids_for_owner(session_factory, OWNER_B) == {state.dedup_b_project_1}
 
 
 @pytest.mark.approved_postgres

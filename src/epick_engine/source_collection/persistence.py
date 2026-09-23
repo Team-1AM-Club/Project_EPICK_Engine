@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -63,6 +65,9 @@ from epick_engine.source_collection.contracts import (
     PostingSection as PostingSectionValue,
 )
 from epick_engine.source_collection.w1_transport import W1Dispatch
+
+if TYPE_CHECKING:
+    from epick_engine.source_collection.worker import PrivateDeletionCommand
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -1094,6 +1099,38 @@ class RequestDeduplication(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class PrivateDeletionOwnerState(Base):
+    __tablename__ = "private_deletion_owner_states"
+
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+    )
+    latest_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class PrivateDeletionReceipt(Base):
+    __tablename__ = "private_deletion_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_user_id",
+            "deletion_epoch",
+            name="uq_private_deletion_receipts_owner_epoch",
+        ),
+        CheckConstraint("deletion_epoch > 0", name="positive_deletion_epoch"),
+    )
+
+    deletion_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    deletion_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    command_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class OutboxEvent(Base):
     __tablename__ = "outbox_events"
     __table_args__ = (
@@ -1131,6 +1168,98 @@ class StaleExecution(RuntimeError):
 
 class PersistenceConflict(RuntimeError):
     """Raised when an idempotency key or immutable persisted value changes payload."""
+
+
+def _private_deletion_command_digest(command: PrivateDeletionCommand) -> str:
+    payload = {
+        "deletion_id": str(command.deletion_id),
+        "owner_user_id": str(command.owner_user_id),
+        "deletion_epoch": command.deletion_epoch,
+        "attempt_ids": sorted(str(attempt_id) for attempt_id in command.attempt_ids),
+        "request_deduplication_ids": sorted(
+            str(request_id) for request_id in command.request_deduplication_ids
+        ),
+        "private_reference_keys": sorted(command.private_reference_keys),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def apply_private_deletion(
+    session: Session,
+    command: PrivateDeletionCommand,
+) -> Literal["APPLIED", "DUPLICATE", "STALE"]:
+    """Delete one owner's named private rows and persist monotonic receipt state."""
+
+    command_digest = _private_deletion_command_digest(command)
+    session.execute(
+        postgresql_insert(PrivateDeletionOwnerState)
+        .values(owner_user_id=command.owner_user_id, latest_epoch=0)
+        .on_conflict_do_nothing(index_elements=["owner_user_id"])
+    )
+    owner_state = session.scalar(
+        select(PrivateDeletionOwnerState)
+        .where(PrivateDeletionOwnerState.owner_user_id == command.owner_user_id)
+        .with_for_update()
+    )
+    if owner_state is None:
+        raise RuntimeError("private deletion owner state row was not found")
+
+    receipt = session.get(PrivateDeletionReceipt, command.deletion_id)
+    if receipt is not None:
+        if receipt.command_digest != command_digest:
+            raise PersistenceConflict("deletion receipt does not match command")
+        return "DUPLICATE"
+
+    if command.deletion_epoch <= owner_state.latest_epoch:
+        return "STALE"
+
+    attempts = list(
+        session.scalars(
+            select(CollectionAttempt).where(CollectionAttempt.attempt_id.in_(command.attempt_ids))
+        )
+    )
+    request_deduplications = list(
+        session.scalars(
+            select(RequestDeduplication).where(
+                RequestDeduplication.request_deduplication_id.in_(command.request_deduplication_ids)
+            )
+        )
+    )
+    if any(
+        attempt.attempt_id not in command.attempt_ids
+        or attempt.owner_user_id != command.owner_user_id
+        for attempt in attempts
+    ) or any(
+        request.request_deduplication_id not in command.request_deduplication_ids
+        or request.owner_user_id != command.owner_user_id
+        for request in request_deduplications
+    ):
+        raise PersistenceConflict("private deletion candidate belongs to another owner")
+
+    for attempt in attempts:
+        session.delete(attempt)
+    for request in request_deduplications:
+        session.delete(request)
+
+    owner_state.latest_epoch = command.deletion_epoch
+    session.add(
+        PrivateDeletionReceipt(
+            deletion_id=command.deletion_id,
+            owner_user_id=command.owner_user_id,
+            deletion_epoch=command.deletion_epoch,
+            command_digest=command_digest,
+            outcome="APPLIED",
+            created_at=datetime.now(UTC),
+        )
+    )
+    return "APPLIED"
 
 
 class InvalidPreparedCollection(ValueError):
