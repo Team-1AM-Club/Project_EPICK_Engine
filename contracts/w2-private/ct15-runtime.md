@@ -55,29 +55,35 @@ verify that deployed image, ECR/SQS, the deployed database, or same-run restart
 and count evidence. Because current runtime readiness now requires `0009`, that
 historical 0008 CT15 observation must not be presented as current READY evidence.
 
-## Local verification (2026-09-19)
+## Historical local verification snapshots (2026-09-19 through 2026-09-20)
+
+Everything in this section is a dated historical snapshot, not current operator
+guidance. Current preflight and deployment instructions require the exact
+`0009_private_deletion_receipt` head described above and under Operator commands.
 
 T095 local-service update (2026-09-20): full regression is now **1286 passed,
 15 failed, 1 skipped, 4 warnings** after aligning three obsolete restriction
 test cases. Remaining failures are deletion (6), rendering (8), and actual
 public restriction outbox emission (1). Internal authority/dedup service tests
-passed; no real authority adapter or collection/queue caller is connected.
-The exact supported heads remain 0005, 0006 and `0007_restriction_receipt`.
+passed; no real authority adapter or collection/queue caller was connected.
+At that snapshot, the supported heads were 0005, 0006 and
+`0007_restriction_receipt`.
 Task/whole-change final review status is recorded in the feature validation log.
 
-Latest storage-stage update (2026-09-20, T095 Task 1): the new additive head is
+At the 2026-09-20 T095 Task 1 snapshot, the new additive head was
 `0007_restriction_receipt` (file `0007_restriction_mutation_receipt.py`). CT15
-preflight accepts the known compatible 0005, 0006 and this exact 0007 head,
-retains required delivery-column checks, and rejects unknown future heads.
+preflight then accepted the known compatible 0005, 0006 and that exact 0007
+head, retained required delivery-column checks, and rejected unknown future
+heads.
 Task 1 verification: 130 focused tests passed; full suite **1238 passed,
 18 failed, 1 skipped**. The service stage remains in progress. No deployment
 migration or actual AWS execution was performed. The dated results below are
 historical snapshots, not the current head or a full integration receipt.
 
-Update (2026-09-20): the additive restriction-storage migration is
-`0006_source_restriction`. Preflight explicitly accepts both
-`0005_private_gate_delivery` and `0006_source_restriction`, retaining required
-delivery-column checks and rejecting unknown future heads. The isolated local
+At the earlier 2026-09-20 snapshot, the additive restriction-storage migration
+was `0006_source_restriction`. Preflight then accepted both
+`0005_private_gate_delivery` and `0006_source_restriction`, retained required
+delivery-column checks, and rejected unknown future heads. The isolated local
 suite now reports **1229 passed, 18 failed, 1 skipped**; the obsolete W2 retry
 route test was corrected to the W1-owned boundary. Remaining failures are
 deletion (6), rendering (8), and restriction service/worker integration (4).
@@ -192,9 +198,11 @@ rendering Compose with secret interpolation into saved logs.
 ## Operator commands
 
 Run from the Engine checkout with `uv run --no-sync epick-w2-ct15 <action>`, or
-the image entrypoint with the same action. A W1 operator applies Alembic
-`0004_private_commit_gate` → `0005_private_gate_delivery` to the approved W2 DB
-before starting the runtime. Preflight never migrates the database.
+the image entrypoint with the same action.
+A W1 operator applies Alembic through `0009_private_deletion_receipt` to the
+approved W2 DB before starting the runtime. Revisions `0004` through `0008` are
+forward-migration starting points, not runtime-ready heads. Preflight never
+migrates the database.
 
 | Action | Behavior |
 | --- | --- |
@@ -249,11 +257,15 @@ counts and W2's counts; neither side's local result substitutes for the other.
 - Canonical CT15-01~09 harness and actual queue execution remain incomplete.
 - Real collection/direct-registration multiplexing and authenticated lookup
   connection remain outside this gate-only test operator.
-- T067 account/Project deletion remains open; operation-local PURGE has no
-  `project_ref` and cannot implement account/Project-wide deletion orchestration.
-- T064~T066 SourceRestriction persistence/service/events remain open. Their future
-  migration is `0006_source_restriction`, after this delivery migration.
-- No full image digest/source delivery pin can be supplied for uncommitted code.
+- W2 local T067 payload, consumer, and migration work is complete at this source
+  revision. W1 authenticated dispatcher, AWS/SQS/IAM deployment, and joint T067
+  end-to-end validation remain incomplete.
+- Revisions `0006_source_restriction`, `0007_restriction_receipt`, and
+  `0008_collection_runtime` are migration history below the required 0009 head,
+  not future migrations or runtime-ready alternatives.
+- No current 0009 deployed-image digest or deployment evidence has been
+  independently verified. The prior W1-reported 0008 image evidence does not
+  establish current READY at 0009.
 - W3 deployment, retention/monitoring policy and full-app/W4 integration remain
   separate responsibilities and are not completed by these local tests.
 

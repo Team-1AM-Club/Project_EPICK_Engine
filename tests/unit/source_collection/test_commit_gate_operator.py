@@ -172,6 +172,7 @@ def test_preflight_accepts_only_private_deletion_receipt_migration_head() -> Non
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
     connection.scalar.side_effect = ["epick_ct15", "0009_private_deletion_receipt"]
+    connection.scalars.return_value.all.return_value = ["0009_private_deletion_receipt"]
     sdk = FakeSqs()
     result = preflight(engine, sdk, Ct15Settings.from_environment(environment()))
     assert result["status"] == "PREFLIGHT_PASSED"
@@ -180,22 +181,27 @@ def test_preflight_accepts_only_private_deletion_receipt_migration_head() -> Non
 
 
 @pytest.mark.parametrize(
-    "migration_revision",
+    "migration_revisions",
     [
-        "0004_private_commit_gate",
-        "0005_private_gate_delivery",
-        "0006_source_restriction",
-        "0007_restriction_receipt",
-        "0008_collection_runtime",
-        "0008_unknown_future_head",
+        ("0004_private_commit_gate",),
+        ("0005_private_gate_delivery",),
+        ("0006_source_restriction",),
+        ("0007_restriction_receipt",),
+        ("0008_collection_runtime",),
+        (),
+        ("9999_unknown",),
+        ("0009_private_deletion_receipt", "9999_unknown"),
+        ("0009_private_deletion_receipt", "0009_private_deletion_receipt"),
     ],
 )
 def test_preflight_does_not_claim_readiness_for_incompatible_migration(
-    migration_revision: str,
+    migration_revisions: tuple[str, ...],
 ) -> None:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", migration_revision]
+    first_revision = migration_revisions[0] if migration_revisions else None
+    connection.scalar.side_effect = ["epick_ct15", first_revision]
+    connection.scalars.return_value.all.return_value = list(migration_revisions)
     sdk = FakeSqs()
     with pytest.raises(Ct15ConfigurationError, match="migration required"):
         preflight(engine, sdk, Ct15Settings.from_environment(environment()))
@@ -213,6 +219,7 @@ def test_preflight_rejects_nonisolated_unencrypted_or_no_dlq_queue(bad_attribute
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
     connection.scalar.side_effect = ["epick_ct15", "0009_private_deletion_receipt"]
+    connection.scalars.return_value.all.return_value = ["0009_private_deletion_receipt"]
     with pytest.raises(Ct15ConfigurationError):
         preflight(engine, BadQueue(), Ct15Settings.from_environment(environment()))
 

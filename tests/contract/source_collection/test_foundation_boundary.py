@@ -59,10 +59,16 @@ def _load_json(name: str) -> dict[str, Any]:
 
 def test_ct15_contract_mentions_t067_schema_and_forward_head() -> None:
     document = (ENGINE_ROOT / "contracts/w2-private/ct15-runtime.md").read_text(encoding="utf-8")
+    normalized_document = " ".join(document.split())
 
-    assert "0009_private_deletion_receipt" in document
-    assert "private-deletion-command.schema.json" in document
-    assert "private-deletion-ack.schema.json" in document
+    assert "0009_private_deletion_receipt" in normalized_document
+    assert "private-deletion-command.schema.json" in normalized_document
+    assert "private-deletion-ack.schema.json" in normalized_document
+    assert "Historical local verification snapshots" in normalized_document
+    assert "applies Alembic through `0009_private_deletion_receipt`" in normalized_document
+    assert "W2 local T067 payload, consumer, and migration work is complete" in normalized_document
+    assert "joint T067 end-to-end validation remain incomplete" in normalized_document
+    assert "does not establish current READY" in normalized_document
 
 
 EXAMPLES_BY_NAME = {
