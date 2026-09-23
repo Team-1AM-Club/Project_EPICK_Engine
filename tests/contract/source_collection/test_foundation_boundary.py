@@ -48,7 +48,7 @@ from epick_engine.source_collection.contracts import (
 
 ENGINE_ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_DIR = ENGINE_ROOT.parent / "specs" / "001-official-source-collection" / "contracts"
-MIGRATION_HEAD = "0009_private_deletion_receipt"
+MIGRATION_HEAD = "0010_private_deletion_scope_v2"
 
 
 def _load_json(name: str) -> dict[str, Any]:
@@ -61,7 +61,7 @@ def test_ct15_contract_mentions_t067_schema_and_forward_head() -> None:
     document = (ENGINE_ROOT / "contracts/w2-private/ct15-runtime.md").read_text(encoding="utf-8")
     normalized_document = " ".join(document.split())
 
-    assert "0009_private_deletion_receipt" in normalized_document
+    assert "0010_private_deletion_scope_v2" in normalized_document
     assert "private-deletion-command.schema.json" in normalized_document
     assert "private-deletion-ack.schema.json" in normalized_document
     assert "Historical local verification snapshots" in normalized_document

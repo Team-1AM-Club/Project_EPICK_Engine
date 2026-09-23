@@ -168,11 +168,11 @@ def test_sdk_errors_do_not_expose_payload_or_receipt() -> None:
     assert caught.value.__suppress_context__
 
 
-def test_preflight_accepts_only_private_deletion_receipt_migration_head() -> None:
+def test_preflight_accepts_only_private_deletion_scope_v2_migration_head() -> None:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0009_private_deletion_receipt"]
-    connection.scalars.return_value.all.return_value = ["0009_private_deletion_receipt"]
+    connection.scalar.side_effect = ["epick_ct15", "0010_private_deletion_scope_v2"]
+    connection.scalars.return_value.all.return_value = ["0010_private_deletion_scope_v2"]
     sdk = FakeSqs()
     result = preflight(engine, sdk, Ct15Settings.from_environment(environment()))
     assert result["status"] == "PREFLIGHT_PASSED"
@@ -188,10 +188,11 @@ def test_preflight_accepts_only_private_deletion_receipt_migration_head() -> Non
         ("0006_source_restriction",),
         ("0007_restriction_receipt",),
         ("0008_collection_runtime",),
+        ("0009_private_deletion_receipt",),
         (),
         ("9999_unknown",),
-        ("0009_private_deletion_receipt", "9999_unknown"),
-        ("0009_private_deletion_receipt", "0009_private_deletion_receipt"),
+        ("0010_private_deletion_scope_v2", "9999_unknown"),
+        ("0010_private_deletion_scope_v2", "0010_private_deletion_scope_v2"),
     ],
 )
 def test_preflight_does_not_claim_readiness_for_incompatible_migration(
@@ -218,8 +219,8 @@ def test_preflight_rejects_nonisolated_unencrypted_or_no_dlq_queue(bad_attribute
 
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0009_private_deletion_receipt"]
-    connection.scalars.return_value.all.return_value = ["0009_private_deletion_receipt"]
+    connection.scalar.side_effect = ["epick_ct15", "0010_private_deletion_scope_v2"]
+    connection.scalars.return_value.all.return_value = ["0010_private_deletion_scope_v2"]
     with pytest.raises(Ct15ConfigurationError):
         preflight(engine, BadQueue(), Ct15Settings.from_environment(environment()))
 

@@ -1,12 +1,13 @@
 # W2 CT15 runtime — local implementation / deployment pending
 
-2026-09-23 T067 correction: current CT15 preflight requires the exact current
-Alembic head, `0009_private_deletion_receipt`. Revisions `0005` through `0008`
-are forward-migration starting points only, not CT15 runtime-ready heads: the
-current commit-gate store writes `private_commit_stages.stage_kind`, introduced
-by `0008`, and the private-deletion consumer requires the durable receipt and
-owner-epoch tables introduced by `0009`. Preflight must reject every older
-revision before it performs any queue action.
+2026-09-24 private-deletion scope-v2 correction: current CT15 preflight requires
+exactly one Alembic head, `0010_private_deletion_scope_v2`. Revisions `0005`
+through `0009` are forward-migration starting points only, not CT15
+runtime-ready heads. The `0010` migration adds explicit private-scope
+attribution, account/Project tombstones, signed-64-bit writer epochs, and
+versioned deletion receipts required by the v2 write fence and deletion
+consumer. Preflight rejects older, unknown, multiple, and duplicate heads before
+it reads any queue metadata.
 
 2026-09-20 follow-up: [B1 scoped inspection and transport controls](ct15-b1-controls.md)
 supersedes the historical missing-harness explanation below. The new W1 action
@@ -20,7 +21,37 @@ Updated: 2026-09-19. Deployment and infrastructure belong to W1. The joint
 environment is not selected. No image was published and no AWS message was sent
 as part of this implementation. This is not a joint CT15 completion receipt.
 
-## T067 private-deletion handoff (2026-09-23)
+## Private-deletion scope v2 handoff (2026-09-24)
+
+W2 publishes the current scope-owned payload contracts under
+`contracts/w2-private/`:
+
+- `private-deletion-command-v2.schema.json` defines
+  `w2.private-deletion.v2` with an explicit ACCOUNT or PROJECT scope.
+- `private-deletion-ack-v2.schema.json` defines
+  `w2.private-deletion-ack.v2` and echoes the exact owner, epoch, and scope.
+
+The W2 consumer seam is
+`epick_engine.source_collection.private_deletion_v2.process_private_deletion_v2`.
+W2 commits its owner-locked scope deletion and durable receipt before calling
+W1's scope purge and ACK side effects. A stale command invokes neither side
+effect. An exact current-epoch replay returns `DUPLICATE` and retries the W1
+scope purge and ACK without repeating destructive database work.
+
+W1 must add the W2 v2 deletion target and `0010_private_deletion_scope_v2`
+migration, provide authenticated explicit scope proof for every collection and
+commit-gate private write, bind outer-envelope owner/target/epoch/scope to the
+inner v2 command, dispatch and apply the v2 ACK, purge W1 private references by
+scope, and serialize each owner's deletion epochs until purge and ACK complete.
+The production W1 authority adapter, outer envelope, dispatcher, ACK application,
+AWS/SQS/IAM deployment, and joint account/Project run remain outside this local
+W2 evidence. No current READY claim follows from the local contracts or tests.
+
+## Historical T067 private-deletion v1 handoff (2026-09-23)
+
+This section records the implemented v1 baseline only. W1 must not dispatch v1
+on the current production deletion seam or interpret a v1 receipt as v2 scope
+completion.
 
 W2 publishes two private payload contracts under `contracts/w2-private/`:
 
@@ -38,14 +69,19 @@ transaction first, then calls `purge_private_references`, and only after that
 purge succeeds calls `acknowledge`. A `STALE` result performs neither purge nor
 ACK. A purge failure therefore leaves the transport unacknowledged; W1 retries
 that transport/ACK failure with the same `deletion_id` so W2 can reuse the
-durable deletion receipt without recreating private data. Migration
-`migrations/versions/0009_private_deletion_receipt.py` must be applied before
-either runtime preflight can pass.
+durable deletion receipt without recreating private data. At this historical v1
+snapshot, `migrations/versions/0009_private_deletion_receipt.py` was the exact
+head required before either runtime preflight could pass.
+At that time, a W1 operator applies Alembic through
+`0009_private_deletion_receipt` before starting the runtime.
 
 W1 owns authenticated dispatch, its private outer envelope and channel, binding
 the authenticated owner to the W2 payload, AWS/SQS/IAM configuration, retry
 scheduling, and ACK publication/transport. Those items, the W1 dispatcher, and
 a joint T067 end-to-end run are outside W2 completion claims.
+At that historical snapshot, W2 local T067 payload, consumer, and migration work
+is complete; W1 authenticated dispatcher, AWS/SQS/IAM deployment, and joint T067
+end-to-end validation remain incomplete.
 
 The earlier W1 CT15 report was pinned to W2 database head
 `0008_collection_runtime`, W2 source SHA
@@ -59,7 +95,8 @@ historical 0008 CT15 observation must not be presented as current READY evidence
 
 Everything in this section is a dated historical snapshot, not current operator
 guidance. Current preflight and deployment instructions require the exact
-`0009_private_deletion_receipt` head described above and under Operator commands.
+`0010_private_deletion_scope_v2` head described above and under Operator
+commands.
 
 T095 local-service update (2026-09-20): full regression is now **1286 passed,
 15 failed, 1 skipped, 4 warnings** after aligning three obsolete restriction
@@ -199,8 +236,8 @@ rendering Compose with secret interpolation into saved logs.
 
 Run from the Engine checkout with `uv run --no-sync epick-w2-ct15 <action>`, or
 the image entrypoint with the same action.
-A W1 operator applies Alembic through `0009_private_deletion_receipt` to the
-approved W2 DB before starting the runtime. Revisions `0004` through `0008` are
+A W1 operator applies Alembic through `0010_private_deletion_scope_v2` to the
+approved W2 DB before starting the runtime. Revisions `0004` through `0009` are
 forward-migration starting points, not runtime-ready heads. Preflight never
 migrates the database.
 
@@ -257,15 +294,18 @@ counts and W2's counts; neither side's local result substitutes for the other.
 - Canonical CT15-01~09 harness and actual queue execution remain incomplete.
 - Real collection/direct-registration multiplexing and authenticated lookup
   connection remain outside this gate-only test operator.
-- W2 local T067 payload, consumer, and migration work is complete at this source
-  revision. W1 authenticated dispatcher, AWS/SQS/IAM deployment, and joint T067
-  end-to-end validation remain incomplete.
+- W2 local private-deletion scope-v2 payload, consumer, migration, write fences,
+  and exact-head preflight work is complete at this source revision. The W1
+  authenticated scope-proof adapter, outer envelope/dispatcher/ACK, scope purge,
+  per-owner epoch serialization, AWS/SQS/IAM deployment, and joint account/Project
+  validation remain incomplete.
 - Revisions `0006_source_restriction`, `0007_restriction_receipt`, and
-  `0008_collection_runtime` are migration history below the required 0009 head,
-  not future migrations or runtime-ready alternatives.
-- No current 0009 deployed-image digest or deployment evidence has been
+  `0008_collection_runtime`, and `0009_private_deletion_receipt` are migration
+  history below the required 0010 head, not future migrations or runtime-ready
+  alternatives.
+- No current 0010 deployed-image digest or deployment evidence has been
   independently verified. The prior W1-reported 0008 image evidence does not
-  establish current READY at 0009.
+  establish current READY at 0010.
 - W3 deployment, retention/monitoring policy and full-app/W4 integration remain
   separate responsibilities and are not completed by these local tests.
 

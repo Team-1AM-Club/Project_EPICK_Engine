@@ -234,7 +234,7 @@ def test_collection_runtime_migration_backfills_0007_and_matches_metadata(
     approved_postgres_url: URL,
 ) -> None:
     scripts = ScriptDirectory.from_config(Config(PROJECT_ROOT / "alembic.ini"))
-    assert scripts.get_heads() == ["0009_private_deletion_receipt"]
+    assert scripts.get_heads() == ["0010_private_deletion_scope_v2"]
     admin = create_engine(approved_postgres_url)
     schema = f"epick_w2_collection_runtime_{uuid4().hex}"
     command_id = uuid4()
@@ -291,7 +291,7 @@ def test_collection_runtime_migration_backfills_0007_and_matches_metadata(
             inspector = inspect(connection)
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0009_private_deletion_receipt"
+                == "0010_private_deletion_scope_v2"
             )
 
             source_columns = {column["name"]: column for column in inspector.get_columns("sources")}
@@ -336,10 +336,14 @@ def test_collection_runtime_migration_backfills_0007_and_matches_metadata(
                 (item["name"], tuple(item["column_names"]))
                 for item in inspector.get_indexes("collection_runtime_attempts")
                 if not item.get("duplicates_constraint")
-            } == {
-                ("ix_collection_runtime_attempts_owner_ref", ("owner_ref",)),
-                ("ix_collection_runtime_attempts_job_id", ("job_id",)),
-            }
+                } == {
+                    ("ix_collection_runtime_attempts_owner_ref", ("owner_ref",)),
+                    ("ix_collection_runtime_attempts_job_id", ("job_id",)),
+                    (
+                        "ix_collection_runtime_attempts_owner_private_scope",
+                        ("owner_ref", "private_scope_kind", "project_id"),
+                    ),
+                }
             assert {
                 (
                     item["name"],

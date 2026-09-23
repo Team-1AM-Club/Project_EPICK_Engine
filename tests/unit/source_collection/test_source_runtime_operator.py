@@ -189,7 +189,7 @@ def _queue_attributes(*, arn_name: str, encrypted: bool = True, dlq: bool = True
     return attributes
 
 
-def _engine(*, revisions: tuple[str, ...] = ("0009_private_deletion_receipt",)) -> MagicMock:
+def _engine(*, revisions: tuple[str, ...] = ("0010_private_deletion_scope_v2",)) -> MagicMock:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
     connection.scalar.return_value = "epick"
@@ -363,7 +363,23 @@ def test_preflight_accepts_numeric_or_string_redrive_max_receive_count(
     assert result["status"] == "PREFLIGHT_PASSED"
 
 
-def test_preflight_rejects_multiple_or_unknown_migration_heads(
+@pytest.mark.parametrize(
+    "migration_revisions",
+    [
+        pytest.param(("0009_private_deletion_receipt",), id="previous-head"),
+        pytest.param(("9999_unknown",), id="unknown-head"),
+        pytest.param(
+            ("0010_private_deletion_scope_v2", "9999_unknown"),
+            id="multiple-heads",
+        ),
+        pytest.param(
+            ("0010_private_deletion_scope_v2", "0010_private_deletion_scope_v2"),
+            id="duplicate-head",
+        ),
+    ],
+)
+def test_preflight_rejects_incompatible_migration_heads_before_sqs_metadata(
+    migration_revisions: tuple[str, ...],
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _map_fixed_container_paths(monkeypatch, tmp_path)
@@ -372,7 +388,7 @@ def test_preflight_rejects_multiple_or_unknown_migration_heads(
 
     with pytest.raises(_configuration_error()):
         _symbol("preflight")(
-            _engine(revisions=("0009_private_deletion_receipt", "9999_unknown")),
+            _engine(revisions=migration_revisions),
             sdk,
             _settings(values),
         )
@@ -380,7 +396,7 @@ def test_preflight_rejects_multiple_or_unknown_migration_heads(
     assert sdk.calls == []
 
 
-def test_preflight_requires_private_deletion_receipt_head(
+def test_preflight_rejects_pre_scope_migration_head(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _map_fixed_container_paths(monkeypatch, tmp_path)

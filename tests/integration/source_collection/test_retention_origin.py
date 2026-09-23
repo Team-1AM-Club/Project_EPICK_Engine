@@ -61,7 +61,7 @@ from epick_engine.source_collection.persistence import (
 pytestmark = pytest.mark.approved_postgres
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_HEAD = "0009_private_deletion_receipt"
+MIGRATION_HEAD = "0010_private_deletion_scope_v2"
 
 
 @pytest.fixture

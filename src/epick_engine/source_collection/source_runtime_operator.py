@@ -56,7 +56,7 @@ _QUEUE_ARN = re.compile(
     r"^arn:(?P<partition>aws(?:-us-gov|-cn)?):sqs:(?P<region>[a-z0-9-]+):"
     r"(?P<account>[0-9]{12}):(?P<name>[A-Za-z0-9_-]+)$"
 )
-_MIGRATION_HEAD = "0009_private_deletion_receipt"
+_MIGRATION_HEAD = "0010_private_deletion_scope_v2"
 _RUNTIME_CONFIG_PATH = "/run/epick/source-runtime/config.json"
 _LOOKUP_CA_PATH = "/run/epick/source-runtime/w1-ca.pem"
 _STATIC_AWS_CONFIGURATION = frozenset(
@@ -425,13 +425,13 @@ def preflight(
     try:
         with engine.connect() as connection:
             database_name = connection.scalar(text("SELECT current_database()"))
-            revisions = set(
+            revisions = tuple(
                 connection.scalars(text("SELECT version_num FROM alembic_version")).all()
             )
             if (
                 not isinstance(database_name, str)
                 or not database_name
-                or revisions != {_MIGRATION_HEAD}
+                or revisions != (_MIGRATION_HEAD,)
             ):
                 raise ValueError
     except SourceRuntimeConfigurationError:
