@@ -8,11 +8,11 @@ authority lock.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from inspect import Parameter, signature
-from typing import Protocol
+from typing import Literal, Protocol, Self, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -47,6 +47,173 @@ class WorkerAuthorizationError(WorkerExecutionError):
 
 class WorkerContractViolation(WorkerExecutionError):
     """Raised when a runner or committer returns data outside the W2 contract."""
+
+
+PrivateDeletionOutcome = Literal["APPLIED", "DUPLICATE", "STALE"]
+
+_PRIVATE_DELETION_COMMAND_KEYS = frozenset(
+    {
+        "schema_version",
+        "deletion_id",
+        "owner_user_id",
+        "deletion_epoch",
+        "attempt_ids",
+        "request_deduplication_ids",
+        "private_reference_keys",
+    }
+)
+_PRIVATE_DELETION_ACK_KEYS = frozenset(
+    {"schema_version", "deletion_id", "owner_user_id", "deletion_epoch", "outcome"}
+)
+_PRIVATE_DELETION_OUTCOMES = frozenset({"APPLIED", "DUPLICATE", "STALE"})
+
+
+def _require_private_deletion_keys(
+    raw: Mapping[str, object], *, expected: frozenset[str], payload_name: str
+) -> None:
+    if frozenset(raw) != expected:
+        raise WorkerContractViolation(f"{payload_name} fields are invalid")
+
+
+def _require_private_deletion_uuid(raw: Mapping[str, object], field: str) -> UUID:
+    value = raw[field]
+    if not isinstance(value, str):
+        raise WorkerContractViolation(f"{field} must be a UUID string")
+    try:
+        parsed = UUID(value)
+    except ValueError as error:
+        raise WorkerContractViolation(f"{field} must be a UUID string") from error
+    if str(parsed) != value:
+        raise WorkerContractViolation(f"{field} must use canonical UUID text")
+    return parsed
+
+
+def _require_private_deletion_epoch(raw: Mapping[str, object]) -> int:
+    value = raw["deletion_epoch"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise WorkerContractViolation("deletion_epoch must be a positive integer")
+    return value
+
+
+def _require_private_deletion_uuid_set(raw: Mapping[str, object], field: str) -> frozenset[UUID]:
+    value = raw[field]
+    if not isinstance(value, list):
+        raise WorkerContractViolation(f"{field} must be a UUID array")
+    parsed = tuple(_require_private_deletion_uuid({field: item}, field) for item in value)
+    if len(parsed) != len(frozenset(parsed)):
+        raise WorkerContractViolation(f"{field} must contain unique UUIDs")
+    return frozenset(parsed)
+
+
+def _require_private_reference_keys(raw: Mapping[str, object]) -> frozenset[str]:
+    value = raw["private_reference_keys"]
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+        raise WorkerContractViolation("private_reference_keys must contain non-empty strings")
+    if len(value) != len(frozenset(value)):
+        raise WorkerContractViolation("private_reference_keys must contain unique strings")
+    return frozenset(value)
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateDeletionCommand:
+    """Validated private-only deletion payload after the W1 transport boundary."""
+
+    deletion_id: UUID
+    owner_user_id: UUID
+    deletion_epoch: int
+    attempt_ids: frozenset[UUID]
+    request_deduplication_ids: frozenset[UUID]
+    private_reference_keys: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.deletion_id, UUID):
+            raise WorkerContractViolation("deletion_id must be a UUID")
+        if not isinstance(self.owner_user_id, UUID):
+            raise WorkerContractViolation("owner_user_id must be a UUID")
+        if (
+            isinstance(self.deletion_epoch, bool)
+            or not isinstance(self.deletion_epoch, int)
+            or self.deletion_epoch < 1
+        ):
+            raise WorkerContractViolation("deletion_epoch must be a positive integer")
+        if not isinstance(self.attempt_ids, frozenset) or any(
+            not isinstance(attempt_id, UUID) for attempt_id in self.attempt_ids
+        ):
+            raise WorkerContractViolation("attempt_ids must be a frozenset of UUIDs")
+        if not isinstance(self.request_deduplication_ids, frozenset) or any(
+            not isinstance(request_id, UUID) for request_id in self.request_deduplication_ids
+        ):
+            raise WorkerContractViolation("request_deduplication_ids must be a frozenset of UUIDs")
+        if not isinstance(self.private_reference_keys, frozenset) or any(
+            not isinstance(reference, str) or not reference
+            for reference in self.private_reference_keys
+        ):
+            raise WorkerContractViolation(
+                "private_reference_keys must be a frozenset of non-empty strings"
+            )
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, object]) -> Self:
+        _require_private_deletion_keys(
+            raw,
+            expected=_PRIVATE_DELETION_COMMAND_KEYS,
+            payload_name="private deletion command",
+        )
+        if raw["schema_version"] != "w2.private-deletion.v1":
+            raise WorkerContractViolation("private deletion schema version is invalid")
+        return cls(
+            deletion_id=_require_private_deletion_uuid(raw, "deletion_id"),
+            owner_user_id=_require_private_deletion_uuid(raw, "owner_user_id"),
+            deletion_epoch=_require_private_deletion_epoch(raw),
+            attempt_ids=_require_private_deletion_uuid_set(raw, "attempt_ids"),
+            request_deduplication_ids=_require_private_deletion_uuid_set(
+                raw, "request_deduplication_ids"
+            ),
+            private_reference_keys=_require_private_reference_keys(raw),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateDeletionAcknowledgement:
+    """Validated private ACK returned for one private deletion command."""
+
+    deletion_id: UUID
+    owner_user_id: UUID
+    deletion_epoch: int
+    outcome: PrivateDeletionOutcome
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.deletion_id, UUID):
+            raise WorkerContractViolation("deletion_id must be a UUID")
+        if not isinstance(self.owner_user_id, UUID):
+            raise WorkerContractViolation("owner_user_id must be a UUID")
+        if (
+            isinstance(self.deletion_epoch, bool)
+            or not isinstance(self.deletion_epoch, int)
+            or self.deletion_epoch < 1
+        ):
+            raise WorkerContractViolation("deletion_epoch must be a positive integer")
+        if not isinstance(self.outcome, str) or self.outcome not in _PRIVATE_DELETION_OUTCOMES:
+            raise WorkerContractViolation("private deletion ACK outcome is invalid")
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, object]) -> Self:
+        _require_private_deletion_keys(
+            raw,
+            expected=_PRIVATE_DELETION_ACK_KEYS,
+            payload_name="private deletion acknowledgement",
+        )
+        if raw["schema_version"] != "w2.private-deletion-ack.v1":
+            raise WorkerContractViolation("private deletion ACK schema version is invalid")
+        outcome = raw["outcome"]
+        if not isinstance(outcome, str) or outcome not in _PRIVATE_DELETION_OUTCOMES:
+            raise WorkerContractViolation("private deletion ACK outcome is invalid")
+        return cls(
+            deletion_id=_require_private_deletion_uuid(raw, "deletion_id"),
+            owner_user_id=_require_private_deletion_uuid(raw, "owner_user_id"),
+            deletion_epoch=_require_private_deletion_epoch(raw),
+            outcome=cast(PrivateDeletionOutcome, outcome),
+        )
 
 
 class OutboxDeliveryError(RuntimeError):
