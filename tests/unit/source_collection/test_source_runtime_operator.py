@@ -379,8 +379,7 @@ def test_preflight_accepts_numeric_or_string_redrive_max_receive_count(
     ],
 )
 def test_preflight_rejects_incompatible_migration_heads_before_sqs_metadata(
-    migration_revisions: tuple[str, ...],
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    migration_revisions: tuple[str, ...], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _map_fixed_container_paths(monkeypatch, tmp_path)
     values = environment()

@@ -294,8 +294,7 @@ def _bound_row(
     ):
         raise CommitGateRejected("private commit-gate binding mismatch")
     if private_scope is not None and (
-        row.private_scope_kind != private_scope.kind
-        or row.project_id != private_scope.project_id
+        row.private_scope_kind != private_scope.kind or row.project_id != private_scope.project_id
     ):
         raise PrivateScopeRejected("private commit-gate scope binding does not match")
 

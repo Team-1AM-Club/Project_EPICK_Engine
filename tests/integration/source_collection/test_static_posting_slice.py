@@ -144,6 +144,8 @@ def commit_prepared_collection(session_factory, *, command, **kwargs):
 def replay_committed_collection(session_factory, *, command, **kwargs):
     kwargs.setdefault("private_scope", _trusted_scope(command))
     return _replay_committed_collection(session_factory, command=command, **kwargs)
+
+
 SOURCE_URL = "https://synthetic-meridian-careers.test/jobs/static-posting"
 FIXTURE_PATH = (
     Path(__file__).resolve().parents[2] / "fixtures" / "synthetic_sources" / "static_posting.html"

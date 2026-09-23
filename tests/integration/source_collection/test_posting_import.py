@@ -155,6 +155,8 @@ def resolve_request_deduplication(session, **kwargs):
         ),
     )
     return _resolve_request_deduplication(session, **kwargs)
+
+
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "synthetic_sources"
 ANNOTATIONS = cast(
     dict[str, Any],

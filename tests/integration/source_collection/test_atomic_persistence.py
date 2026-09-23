@@ -1031,12 +1031,12 @@ def test_replay_committed_collection_rejects_unfinalized_attempt(
     attempt_id = uuid4()
     with session_factory.begin() as session:
         session.add(
-                CollectionAttempt(
-                    attempt_id=attempt_id,
-                    owner_user_id=command.authenticated_owner_ref,
-                    job_id=command.job_id,
-                    private_scope_kind="ACCOUNT",
-                    project_id=None,
+            CollectionAttempt(
+                attempt_id=attempt_id,
+                owner_user_id=command.authenticated_owner_ref,
+                job_id=command.job_id,
+                private_scope_kind="ACCOUNT",
+                project_id=None,
                 command_id=command.command_id,
                 input_version=command.input_version,
                 target_ref=str(command.source_id),
@@ -1572,6 +1572,7 @@ def test_concurrent_same_command_replays_after_source_lock(
         policy,
         aggregate_revision=1,
     )
+
     def commit() -> CollectionResult:
         return commit_prepared_collection(
             session_factory,

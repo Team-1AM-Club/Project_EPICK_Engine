@@ -292,8 +292,7 @@ def stage_synthetic_input(
     sessions: SessionFactory,
     input_path: Path,
     *,
-    authority_provider: Callable[[CollectionCommand], PrivateWriteAuthorityDecision]
-    | None = None,
+    authority_provider: Callable[[CollectionCommand], PrivateWriteAuthorityDecision] | None = None,
 ) -> None:
     """Validate the wrapped wire size before committing a synthetic staged result."""
     if input_path.stat().st_size > MAX_OUTBOUND_MESSAGE_BYTES:

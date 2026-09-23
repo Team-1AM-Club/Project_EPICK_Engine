@@ -530,9 +530,7 @@ def test_terminal_gate_waits_for_owner_fenced_relay_before_mutating(
     with session_factory() as session:
         stage = session.get(PrivateCommitStage, command.command_id)
         staged = session.scalar(
-            select(PrivateStagedOutbox).where(
-                PrivateStagedOutbox.command_id == command.command_id
-            )
+            select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
         )
         assert stage.state == ("ABORTED" if action == "ABORT" else "PURGED")
         assert stage.result_payload is None
@@ -940,8 +938,7 @@ def test_private_relay_cannot_send_after_competing_deletion_commits(session_fact
             owner_state = session.scalar(
                 select(PrivateDeletionOwnerState)
                 .where(
-                    PrivateDeletionOwnerState.owner_user_id
-                    == first_command.authenticated_owner_ref
+                    PrivateDeletionOwnerState.owner_user_id == first_command.authenticated_owner_ref
                 )
                 .with_for_update()
             )
