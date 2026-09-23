@@ -28,6 +28,7 @@ from sqlalchemy import (
     UniqueConstraint,
     and_,
     create_engine,
+    delete,
     func,
     or_,
     select,
@@ -68,6 +69,7 @@ from epick_engine.source_collection.contracts import (
 from epick_engine.source_collection.w1_transport import W1Dispatch
 
 if TYPE_CHECKING:
+    from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionCommandV2
     from epick_engine.source_collection.private_scope import PrivateWriteScope
     from epick_engine.source_collection.worker import PrivateDeletionCommand
 
@@ -1345,6 +1347,192 @@ def apply_private_deletion(
             deletion_id=command.deletion_id,
             owner_user_id=command.owner_user_id,
             deletion_epoch=command.deletion_epoch,
+            command_digest=command_digest,
+            outcome="APPLIED",
+            created_at=datetime.now(UTC),
+        )
+    )
+    return "APPLIED"
+
+
+def apply_private_deletion_v2(
+    session: Session,
+    command: PrivateDeletionCommandV2,
+) -> Literal["APPLIED", "DUPLICATE", "STALE"]:
+    """Delete every W2-private row in an authenticated account or Project scope."""
+
+    from epick_engine.source_collection.commit_gate_store import (  # noqa: PLC0415
+        PrivateCommitGateAck,
+        PrivateCommitGateInbox,
+        PrivateCommitGateReceipt,
+        PrivateCommitStage,
+        PrivateStagedOutbox,
+    )
+    from epick_engine.source_collection.private_deletion_v2 import (  # noqa: PLC0415
+        command_digest_v2,
+    )
+    from epick_engine.source_collection.private_scope import (  # noqa: PLC0415
+        ScopeUnclassified,
+    )
+
+    command_digest = command_digest_v2(command)
+    session.execute(
+        postgresql_insert(PrivateDeletionOwnerState)
+        .values(
+            owner_user_id=command.owner_user_id,
+            latest_epoch=0,
+            account_deleted=False,
+        )
+        .on_conflict_do_nothing(index_elements=["owner_user_id"])
+    )
+    owner_state = session.scalar(
+        select(PrivateDeletionOwnerState)
+        .where(PrivateDeletionOwnerState.owner_user_id == command.owner_user_id)
+        .with_for_update()
+    )
+    if owner_state is None:
+        raise RuntimeError("private deletion owner state row was not found")
+
+    receipt = session.scalar(
+        select(PrivateDeletionReceipt)
+        .where(PrivateDeletionReceipt.deletion_id == command.deletion_id)
+        .with_for_update()
+    )
+    if receipt is not None:
+        if receipt.contract_version != "w2.private-deletion.v2":
+            raise PersistenceConflict("deletion receipt contract version does not match command")
+        if receipt.command_digest != command_digest:
+            raise PersistenceConflict("deletion receipt does not match command")
+        if command.deletion_epoch < owner_state.latest_epoch:
+            return "STALE"
+        if command.deletion_epoch > owner_state.latest_epoch:
+            raise PersistenceConflict("deletion receipt is ahead of owner state")
+        return "DUPLICATE"
+
+    if command.deletion_epoch < owner_state.latest_epoch:
+        return "STALE"
+    if command.deletion_epoch == owner_state.latest_epoch:
+        raise PersistenceConflict("deletion epoch is already bound to another command")
+
+    if command.scope.kind == "PROJECT":
+        unknown_rows = (
+            session.scalar(
+                select(CollectionAttempt.attempt_id)
+                .where(
+                    CollectionAttempt.owner_user_id == command.owner_user_id,
+                    CollectionAttempt.private_scope_kind == "UNKNOWN",
+                )
+                .limit(1)
+            ),
+            session.scalar(
+                select(RequestDeduplication.request_deduplication_id)
+                .where(
+                    RequestDeduplication.owner_user_id == command.owner_user_id,
+                    RequestDeduplication.private_scope_kind == "UNKNOWN",
+                )
+                .limit(1)
+            ),
+            session.scalar(
+                select(CollectionRuntimeAttempt.command_id)
+                .where(
+                    CollectionRuntimeAttempt.owner_ref == command.owner_user_id,
+                    CollectionRuntimeAttempt.private_scope_kind == "UNKNOWN",
+                )
+                .limit(1)
+            ),
+            session.scalar(
+                select(PrivateCommitStage.command_id)
+                .where(
+                    PrivateCommitStage.owner_ref == command.owner_user_id,
+                    PrivateCommitStage.private_scope_kind == "UNKNOWN",
+                )
+                .limit(1)
+            ),
+        )
+        if any(row_id is not None for row_id in unknown_rows):
+            raise ScopeUnclassified("Project deletion found owner-private unclassified state")
+
+        assert command.scope.project_id is not None
+        attempt_scope = and_(
+            CollectionAttempt.owner_user_id == command.owner_user_id,
+            CollectionAttempt.private_scope_kind == "PROJECT",
+            CollectionAttempt.project_id == command.scope.project_id,
+        )
+        deduplication_scope = and_(
+            RequestDeduplication.owner_user_id == command.owner_user_id,
+            RequestDeduplication.private_scope_kind == "PROJECT",
+            RequestDeduplication.project_id == command.scope.project_id,
+        )
+        runtime_scope = and_(
+            CollectionRuntimeAttempt.owner_ref == command.owner_user_id,
+            CollectionRuntimeAttempt.private_scope_kind == "PROJECT",
+            CollectionRuntimeAttempt.project_id == command.scope.project_id,
+        )
+        stage_scope = and_(
+            PrivateCommitStage.owner_ref == command.owner_user_id,
+            PrivateCommitStage.private_scope_kind == "PROJECT",
+            PrivateCommitStage.project_id == command.scope.project_id,
+        )
+    else:
+        attempt_scope = CollectionAttempt.owner_user_id == command.owner_user_id
+        deduplication_scope = RequestDeduplication.owner_user_id == command.owner_user_id
+        runtime_scope = CollectionRuntimeAttempt.owner_ref == command.owner_user_id
+        stage_scope = PrivateCommitStage.owner_ref == command.owner_user_id
+
+    stage_ids = tuple(session.scalars(select(PrivateCommitStage.command_id).where(stage_scope)))
+    if stage_ids:
+        session.execute(
+            delete(PrivateCommitGateReceipt).where(
+                PrivateCommitGateReceipt.command_id.in_(stage_ids)
+            )
+        )
+        session.execute(
+            delete(PrivateCommitGateInbox).where(PrivateCommitGateInbox.command_id.in_(stage_ids))
+        )
+        session.execute(
+            delete(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id.in_(stage_ids))
+        )
+        session.execute(
+            delete(PrivateCommitGateAck).where(PrivateCommitGateAck.command_id.in_(stage_ids))
+        )
+        session.execute(
+            delete(PrivateCommitStage).where(PrivateCommitStage.command_id.in_(stage_ids))
+        )
+
+    session.execute(delete(CollectionAttempt).where(attempt_scope))
+    session.execute(delete(RequestDeduplication).where(deduplication_scope))
+    session.execute(delete(CollectionRuntimeAttempt).where(runtime_scope))
+
+    owner_state.latest_epoch = command.deletion_epoch
+    if command.scope.kind == "ACCOUNT":
+        owner_state.account_deleted = True
+    else:
+        assert command.scope.project_id is not None
+        tombstone = session.scalar(
+            select(PrivateDeletionProjectTombstone)
+            .where(
+                PrivateDeletionProjectTombstone.owner_user_id == command.owner_user_id,
+                PrivateDeletionProjectTombstone.project_id == command.scope.project_id,
+            )
+            .with_for_update()
+        )
+        if tombstone is None:
+            session.add(
+                PrivateDeletionProjectTombstone(
+                    owner_user_id=command.owner_user_id,
+                    project_id=command.scope.project_id,
+                    deletion_epoch=command.deletion_epoch,
+                )
+            )
+        else:
+            tombstone.deletion_epoch = command.deletion_epoch
+
+    session.add(
+        PrivateDeletionReceipt(
+            deletion_id=command.deletion_id,
+            owner_user_id=command.owner_user_id,
+            deletion_epoch=command.deletion_epoch,
+            contract_version="w2.private-deletion.v2",
             command_digest=command_digest,
             outcome="APPLIED",
             created_at=datetime.now(UTC),
@@ -3630,10 +3818,7 @@ def resolve_request_deduplication(
         raise RuntimeError("request deduplication conflict row was not found")
     if existing.request_hash != request_hash:
         raise PersistenceConflict("idempotency key was reused with a different request")
-    if (
-        existing.private_scope_kind != scope_kind
-        or existing.project_id != project_id
-    ):
+    if existing.private_scope_kind != scope_kind or existing.project_id != project_id:
         raise PersistenceConflict("idempotency key private scope does not match")
     return existing
 

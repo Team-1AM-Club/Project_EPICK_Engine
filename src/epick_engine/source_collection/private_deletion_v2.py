@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, Self, cast
+from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
 from uuid import UUID
 
 from epick_engine.source_collection.worker import (
@@ -15,6 +15,9 @@ from epick_engine.source_collection.worker import (
     _require_private_deletion_keys,
     _require_private_deletion_uuid,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session, sessionmaker
 
 type PrivateDeletionScopeKind = Literal["ACCOUNT", "PROJECT"]
 type PrivateDeletionAckOutcomeV2 = Literal["APPLIED", "DUPLICATE"]
@@ -189,3 +192,51 @@ def command_digest_v2(command: PrivateDeletionCommandV2) -> str:
             ensure_ascii=False,
         ).encode("utf-8")
     ).hexdigest()
+
+
+class PrivateDeletionSideEffectsV2(Protocol):
+    """W1-owned scope purge and acknowledgement boundary for v2."""
+
+    def purge_private_scope(
+        self,
+        *,
+        owner_user_id: UUID,
+        scope: PrivateDeletionScope,
+    ) -> None:
+        """Purge W1-private references only after the W2 transaction commits."""
+
+    def acknowledge(self, *, deletion_id: UUID, deletion_epoch: int) -> None:
+        """Acknowledge the exact owner deletion epoch after a successful purge."""
+
+
+def process_private_deletion_v2(
+    session_factory: sessionmaker[Session],
+    command: PrivateDeletionCommandV2,
+    side_effects: PrivateDeletionSideEffectsV2,
+) -> PrivateDeletionAckV2 | None:
+    """Commit W2 scope deletion before W1 purge and publish no stale ACK."""
+
+    from epick_engine.source_collection.persistence import (  # noqa: PLC0415
+        apply_private_deletion_v2,
+    )
+
+    with session_factory.begin() as session:
+        outcome = apply_private_deletion_v2(session, command)
+    if outcome == "STALE":
+        return None
+
+    side_effects.purge_private_scope(
+        owner_user_id=command.owner_user_id,
+        scope=command.scope,
+    )
+    side_effects.acknowledge(
+        deletion_id=command.deletion_id,
+        deletion_epoch=command.deletion_epoch,
+    )
+    return PrivateDeletionAckV2(
+        deletion_id=command.deletion_id,
+        owner_user_id=command.owner_user_id,
+        deletion_epoch=command.deletion_epoch,
+        scope=command.scope,
+        outcome=outcome,
+    )
