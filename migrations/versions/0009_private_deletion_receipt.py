@@ -20,7 +20,7 @@ def upgrade() -> None:
     op.create_table(
         "private_deletion_owner_states",
         sa.Column("owner_user_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("latest_epoch", sa.Integer(), nullable=False),
+        sa.Column("latest_epoch", sa.BigInteger(), nullable=False),
         sa.PrimaryKeyConstraint(
             "owner_user_id",
             name=op.f("pk_private_deletion_owner_states"),
@@ -30,7 +30,7 @@ def upgrade() -> None:
         "private_deletion_receipts",
         sa.Column("deletion_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("owner_user_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("deletion_epoch", sa.Integer(), nullable=False),
+        sa.Column("deletion_epoch", sa.BigInteger(), nullable=False),
         sa.Column("command_digest", sa.String(length=64), nullable=False),
         sa.Column("outcome", sa.String(length=16), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),

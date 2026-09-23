@@ -66,6 +66,7 @@ _PRIVATE_DELETION_ACK_KEYS = frozenset(
     {"schema_version", "deletion_id", "owner_user_id", "deletion_epoch", "outcome"}
 )
 _PRIVATE_DELETION_OUTCOMES = frozenset({"APPLIED", "DUPLICATE", "STALE"})
+_MAX_PRIVATE_DELETION_EPOCH = 9_223_372_036_854_775_807
 
 
 def _require_private_deletion_keys(
@@ -92,6 +93,13 @@ def _require_private_deletion_epoch(raw: Mapping[str, object]) -> int:
     value = raw["deletion_epoch"]
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise WorkerContractViolation("deletion_epoch must be a positive integer")
+    return value
+
+
+def _require_private_deletion_command_epoch(raw: Mapping[str, object]) -> int:
+    value = _require_private_deletion_epoch(raw)
+    if value > _MAX_PRIVATE_DELETION_EPOCH:
+        raise WorkerContractViolation("deletion_epoch exceeds the signed 64-bit maximum")
     return value
 
 
@@ -134,8 +142,9 @@ class PrivateDeletionCommand:
             isinstance(self.deletion_epoch, bool)
             or not isinstance(self.deletion_epoch, int)
             or self.deletion_epoch < 1
+            or self.deletion_epoch > _MAX_PRIVATE_DELETION_EPOCH
         ):
-            raise WorkerContractViolation("deletion_epoch must be a positive integer")
+            raise WorkerContractViolation("deletion_epoch must be a positive signed 64-bit integer")
         if not isinstance(self.attempt_ids, frozenset) or any(
             not isinstance(attempt_id, UUID) for attempt_id in self.attempt_ids
         ):
@@ -164,7 +173,7 @@ class PrivateDeletionCommand:
         return cls(
             deletion_id=_require_private_deletion_uuid(raw, "deletion_id"),
             owner_user_id=_require_private_deletion_uuid(raw, "owner_user_id"),
-            deletion_epoch=_require_private_deletion_epoch(raw),
+            deletion_epoch=_require_private_deletion_command_epoch(raw),
             attempt_ids=_require_private_deletion_uuid_set(raw, "attempt_ids"),
             request_deduplication_ids=_require_private_deletion_uuid_set(
                 raw, "request_deduplication_ids"

@@ -11,7 +11,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
+from time import monotonic, sleep
 from uuid import UUID, uuid4
 
 import pytest
@@ -34,6 +35,8 @@ from epick_engine.source_collection.persistence import (
     ExecutionAuthorityGrant,
     OutboxEvent,
     PersistenceConflict,
+    PrivateDeletionOwnerState,
+    PrivateDeletionReceipt,
     RequestDeduplication,
     RetainedBody,
     Source,
@@ -467,6 +470,20 @@ def _assert_shared_public_history_survives(
         assert session.get(OutboxEvent, state.public_event_id) is not None
 
 
+def _wait_for_postgres_lock(database_engine: Engine, backend_pid: int) -> None:
+    deadline = monotonic() + 1.0
+    with database_engine.connect() as connection:
+        while monotonic() < deadline:
+            wait_event_type = connection.scalar(
+                text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :backend_pid"),
+                {"backend_pid": backend_pid},
+            )
+            if wait_event_type == "Lock":
+                return
+            sleep(0.01)
+    raise AssertionError("concurrent private deletion never waited on the owner state lock")
+
+
 @pytest.mark.approved_postgres
 def test_isolated_postgres_timeouts_survive_rollback_and_pool_reuse(
     database_engine: Engine,
@@ -559,6 +576,143 @@ def test_private_deletion_receipt_returns_duplicate_for_the_same_command(
         assert apply_private_deletion(session, command) == "APPLIED"
     with session_factory.begin() as session:
         assert apply_private_deletion(session, command) == "DUPLICATE"
+
+
+@pytest.mark.approved_postgres
+def test_private_deletion_receipt_round_trips_signed_64_bit_maximum_epoch(
+    session_factory: sessionmaker[Session],
+) -> None:
+    deletion_id = uuid4()
+    command = PrivateDeletionCommand(
+        deletion_id=deletion_id,
+        owner_user_id=OWNER_A,
+        deletion_epoch=9_223_372_036_854_775_807,
+        attempt_ids=frozenset(),
+        request_deduplication_ids=frozenset(),
+        private_reference_keys=frozenset({"signed-64-bit-maximum"}),
+    )
+
+    with session_factory.begin() as session:
+        assert apply_private_deletion(session, command) == "APPLIED"
+
+    with session_factory() as session:
+        owner_state = session.get(PrivateDeletionOwnerState, OWNER_A)
+        receipt = session.get(PrivateDeletionReceipt, deletion_id)
+        assert owner_state is not None
+        assert receipt is not None
+        assert owner_state.latest_epoch == 9_223_372_036_854_775_807
+        assert receipt.deletion_epoch == 9_223_372_036_854_775_807
+
+
+@pytest.mark.approved_postgres
+def test_concurrent_first_private_deletion_receipts_serialize_on_owner_state(
+    database_engine: Engine,
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as session:
+        assert session.get(PrivateDeletionOwnerState, OWNER_A) is None
+
+    newer = PrivateDeletionCommand(
+        deletion_id=uuid4(),
+        owner_user_id=OWNER_A,
+        deletion_epoch=7,
+        attempt_ids=frozenset(),
+        request_deduplication_ids=frozenset(),
+        private_reference_keys=frozenset({"concurrent-newer"}),
+    )
+    older = replace(
+        newer,
+        deletion_id=uuid4(),
+        deletion_epoch=6,
+        private_reference_keys=frozenset({"concurrent-older"}),
+    )
+    first_locked = Event()
+    release_first = Event()
+    second_insert_started = Event()
+    backend_pids: dict[str, int] = {}
+    results: dict[str, str] = {}
+    errors: list[BaseException] = []
+
+    def pause_first_after_owner_lock(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany: bool,
+    ) -> None:
+        normalized = statement.lower()
+        if (
+            current_thread().name == "private-deletion-newer"
+            and "private_deletion_owner_states" in normalized
+            and "for update" in normalized
+        ):
+            first_locked.set()
+            if not release_first.wait(timeout=3):
+                raise AssertionError("timed out while holding the owner state lock")
+
+    def observe_second_owner_insert(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany: bool,
+    ) -> None:
+        if (
+            current_thread().name == "private-deletion-older"
+            and "insert into" in statement.lower()
+            and "private_deletion_owner_states" in statement.lower()
+        ):
+            second_insert_started.set()
+
+    def run_deletion(label: str, command: PrivateDeletionCommand) -> None:
+        try:
+            with session_factory.begin() as session:
+                backend_pid = session.scalar(text("SELECT pg_backend_pid()"))
+                assert backend_pid is not None
+                backend_pids[label] = backend_pid
+                outcome = apply_private_deletion(session, command)
+            results[label] = outcome
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    first = Thread(
+        target=run_deletion,
+        args=("newer", newer),
+        name="private-deletion-newer",
+    )
+    second = Thread(
+        target=run_deletion,
+        args=("older", older),
+        name="private-deletion-older",
+    )
+    event.listen(database_engine, "after_cursor_execute", pause_first_after_owner_lock)
+    event.listen(database_engine, "before_cursor_execute", observe_second_owner_insert)
+    try:
+        first.start()
+        assert first_locked.wait(timeout=2)
+        second.start()
+        assert second_insert_started.wait(timeout=2)
+        _wait_for_postgres_lock(database_engine, backend_pids["older"])
+    finally:
+        release_first.set()
+        first.join(timeout=3)
+        if second.ident is not None:
+            second.join(timeout=3)
+        event.remove(database_engine, "after_cursor_execute", pause_first_after_owner_lock)
+        event.remove(database_engine, "before_cursor_execute", observe_second_owner_insert)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert results == {"newer": "APPLIED", "older": "STALE"}
+    with session_factory() as session:
+        owner_state = session.get(PrivateDeletionOwnerState, OWNER_A)
+        assert owner_state is not None
+        assert owner_state.latest_epoch == 7
+        assert session.get(PrivateDeletionReceipt, newer.deletion_id) is not None
+        assert session.get(PrivateDeletionReceipt, older.deletion_id) is None
 
 
 @pytest.mark.approved_postgres

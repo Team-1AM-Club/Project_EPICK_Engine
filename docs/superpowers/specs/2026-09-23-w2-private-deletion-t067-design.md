@@ -26,7 +26,7 @@ whereas T067 applies to a user or project deletion scope.
 | --- | --- |
 | `deletion_id` | UUID; stable across retries of one W1 deletion decision. |
 | `owner_user_id` | UUID of the authenticated deletion owner. |
-| `deletion_epoch` | Positive integer, strictly newer than the durable epoch recorded for that owner. |
+| `deletion_epoch` | Signed 64-bit integer from 1 through 9223372036854775807, strictly newer than the durable epoch recorded for that owner. |
 | `attempt_ids` | Unique UUID collection-attempt identifiers in the W1-approved scope. |
 | `request_deduplication_ids` | Unique UUID request-deduplication identifiers in the same scope. |
 | `private_reference_keys` | Unique, non-empty private adapter reference keys to purge after database deletion. |

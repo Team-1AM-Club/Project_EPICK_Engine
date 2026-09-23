@@ -1106,7 +1106,7 @@ class PrivateDeletionOwnerState(Base):
         PostgreSQLUUID(as_uuid=True),
         primary_key=True,
     )
-    latest_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    latest_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class PrivateDeletionReceipt(Base):
@@ -1125,7 +1125,7 @@ class PrivateDeletionReceipt(Base):
         primary_key=True,
     )
     owner_user_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
-    deletion_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    deletion_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     command_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     outcome: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

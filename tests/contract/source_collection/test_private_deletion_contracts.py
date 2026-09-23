@@ -59,6 +59,27 @@ def test_private_deletion_command_fixture_validates_without_coercion() -> None:
     assert command.private_reference_keys == frozenset(raw["private_reference_keys"])
 
 
+def test_private_deletion_command_accepts_signed_64_bit_maximum_epoch() -> None:
+    command_type = _command_type()
+    raw = deepcopy(_load("valid-command.json"))
+    raw["deletion_epoch"] = 9_223_372_036_854_775_807
+
+    _validator("private-deletion-command.schema.json").validate(raw)
+    command = command_type.from_mapping(raw)
+
+    assert command.deletion_epoch == 9_223_372_036_854_775_807
+
+
+def test_private_deletion_command_rejects_epoch_above_signed_64_bit_maximum() -> None:
+    command_type = _command_type()
+    raw = deepcopy(_load("valid-command.json"))
+    raw["deletion_epoch"] = 9_223_372_036_854_775_808
+
+    assert list(_validator("private-deletion-command.schema.json").iter_errors(raw))
+    with pytest.raises(WorkerContractViolation):
+        command_type.from_mapping(raw)
+
+
 def test_private_deletion_ack_fixture_validates_without_coercion() -> None:
     ack_type = _ack_type()
     raw = _load("valid-ack-applied.json")
@@ -130,6 +151,7 @@ def test_private_deletion_ack_rejects_invalid_or_public_scope(field: str, value:
         ("owner_user_id", "00000000-0000-4000-8000-000000006301"),
         ("deletion_epoch", 0),
         ("deletion_epoch", True),
+        ("deletion_epoch", 9_223_372_036_854_775_808),
         ("attempt_ids", frozenset({"72000000-0000-4000-8000-000000000001"})),
         (
             "request_deduplication_ids",
