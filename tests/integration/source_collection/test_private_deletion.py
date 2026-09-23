@@ -46,7 +46,11 @@ from epick_engine.source_collection.persistence import (
     apply_private_deletion,
     assert_current_attempt,
 )
-from epick_engine.source_collection.worker import PrivateDeletionCommand, SourceCollectionWorker
+from epick_engine.source_collection.worker import (
+    PrivateDeletionAcknowledgement,
+    PrivateDeletionCommand,
+    SourceCollectionWorker,
+)
 
 NOW = datetime(2031, 6, 1, 9, 0, tzinfo=UTC)
 OWNER_A = UUID("00000000-0000-4000-8000-000000006301")
@@ -388,7 +392,7 @@ def _process_private_deletion(
     request_deduplication_ids: frozenset[UUID],
     private_reference_keys: frozenset[str],
     side_effects: _PrivateDeletionSideEffects,
-) -> None:
+) -> PrivateDeletionAcknowledgement:
     """Invoke the concrete T067 worker contract; intentionally unavailable today."""
 
     from epick_engine.source_collection.worker import (  # noqa: PLC0415
@@ -396,7 +400,7 @@ def _process_private_deletion(
         process_private_deletion,
     )
 
-    process_private_deletion(
+    return process_private_deletion(
         session_factory=session_factory,
         command=PrivateDeletionCommand(
             deletion_id=deletion_id,
@@ -1144,6 +1148,65 @@ def test_stale_epoch_skips_purge_and_ack(
     assert side_effects.events == [
         ("purge", (OWNER_A, frozenset({"a-project-1"}))),
         ("acknowledge", (first_id, 7)),
+    ]
+
+
+@pytest.mark.approved_postgres
+def test_replaying_old_receipt_after_newer_deletion_is_stale_without_side_effects(
+    session_factory: sessionmaker[Session],
+) -> None:
+    state = _seed_shared_public_source(session_factory)
+    side_effects = _PrivateDeletionSideEffects()
+    old_deletion_id = uuid4()
+    current_deletion_id = uuid4()
+
+    old_ack = _process_private_deletion(
+        session_factory=session_factory,
+        owner_user_id=OWNER_A,
+        deletion_id=old_deletion_id,
+        deletion_epoch=5,
+        attempt_ids=frozenset({state.attempt_a_project_1}),
+        request_deduplication_ids=frozenset({state.dedup_a_project_1}),
+        private_reference_keys=frozenset({"a-project-1"}),
+        side_effects=side_effects,
+    )
+    current_ack = _process_private_deletion(
+        session_factory=session_factory,
+        owner_user_id=OWNER_A,
+        deletion_id=current_deletion_id,
+        deletion_epoch=7,
+        attempt_ids=frozenset({state.attempt_a_project_2}),
+        request_deduplication_ids=frozenset({state.dedup_a_project_2}),
+        private_reference_keys=frozenset({"a-project-2"}),
+        side_effects=side_effects,
+    )
+    replay_ack = _process_private_deletion(
+        session_factory=session_factory,
+        owner_user_id=OWNER_A,
+        deletion_id=old_deletion_id,
+        deletion_epoch=5,
+        attempt_ids=frozenset({state.attempt_a_project_1}),
+        request_deduplication_ids=frozenset({state.dedup_a_project_1}),
+        private_reference_keys=frozenset({"a-project-1"}),
+        side_effects=side_effects,
+    )
+
+    assert old_ack.outcome == "APPLIED"
+    assert current_ack.outcome == "APPLIED"
+    assert replay_ack.outcome == "STALE"
+    assert _attempt_ids_for_owner(session_factory, OWNER_A) == set()
+    assert _dedup_ids_for_owner(session_factory, OWNER_A) == set()
+    assert _attempt_ids_for_owner(session_factory, OWNER_B) == {state.attempt_b_project_1}
+    assert _dedup_ids_for_owner(session_factory, OWNER_B) == {state.dedup_b_project_1}
+    with session_factory() as session:
+        owner_state = session.get(PrivateDeletionOwnerState, OWNER_A)
+        assert owner_state is not None
+        assert owner_state.latest_epoch == 7
+    assert side_effects.events == [
+        ("purge", (OWNER_A, frozenset({"a-project-1"}))),
+        ("acknowledge", (old_deletion_id, 5)),
+        ("purge", (OWNER_A, frozenset({"a-project-2"}))),
+        ("acknowledge", (current_deletion_id, 7)),
     ]
 
 

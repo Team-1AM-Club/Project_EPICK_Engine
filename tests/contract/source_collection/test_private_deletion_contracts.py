@@ -93,6 +93,41 @@ def test_private_deletion_ack_fixture_validates_without_coercion() -> None:
     assert acknowledgement.outcome == "APPLIED"
 
 
+def test_private_deletion_ack_accepts_signed_64_bit_maximum_epoch() -> None:
+    ack_type = _ack_type()
+    raw = deepcopy(_load("valid-ack-applied.json"))
+    raw["deletion_epoch"] = 9_223_372_036_854_775_807
+
+    _validator("private-deletion-ack.schema.json").validate(raw)
+    acknowledgement = ack_type.from_mapping(raw)
+    direct_acknowledgement = ack_type(
+        deletion_id=UUID(raw["deletion_id"]),
+        owner_user_id=UUID(raw["owner_user_id"]),
+        deletion_epoch=9_223_372_036_854_775_807,
+        outcome="APPLIED",
+    )
+
+    assert acknowledgement.deletion_epoch == 9_223_372_036_854_775_807
+    assert direct_acknowledgement.deletion_epoch == 9_223_372_036_854_775_807
+
+
+def test_private_deletion_ack_rejects_epoch_above_signed_64_bit_maximum() -> None:
+    ack_type = _ack_type()
+    raw = deepcopy(_load("valid-ack-applied.json"))
+    raw["deletion_epoch"] = 9_223_372_036_854_775_808
+
+    assert list(_validator("private-deletion-ack.schema.json").iter_errors(raw))
+    with pytest.raises(WorkerContractViolation):
+        ack_type.from_mapping(raw)
+    with pytest.raises(WorkerContractViolation):
+        ack_type(
+            deletion_id=UUID(raw["deletion_id"]),
+            owner_user_id=UUID(raw["owner_user_id"]),
+            deletion_epoch=9_223_372_036_854_775_808,
+            outcome="APPLIED",
+        )
+
+
 @pytest.mark.parametrize("fixture", ["invalid-zero-epoch.json", "invalid-public-reference.json"])
 def test_private_deletion_rejects_invalid_or_public_scope(fixture: str) -> None:
     command_type = _command_type()

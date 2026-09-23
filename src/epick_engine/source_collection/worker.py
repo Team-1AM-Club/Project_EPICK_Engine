@@ -201,8 +201,9 @@ class PrivateDeletionAcknowledgement:
             isinstance(self.deletion_epoch, bool)
             or not isinstance(self.deletion_epoch, int)
             or self.deletion_epoch < 1
+            or self.deletion_epoch > _MAX_PRIVATE_DELETION_EPOCH
         ):
-            raise WorkerContractViolation("deletion_epoch must be a positive integer")
+            raise WorkerContractViolation("deletion_epoch must be a positive signed 64-bit integer")
         if not isinstance(self.outcome, str) or self.outcome not in _PRIVATE_DELETION_OUTCOMES:
             raise WorkerContractViolation("private deletion ACK outcome is invalid")
 
@@ -221,7 +222,7 @@ class PrivateDeletionAcknowledgement:
         return cls(
             deletion_id=_require_private_deletion_uuid(raw, "deletion_id"),
             owner_user_id=_require_private_deletion_uuid(raw, "owner_user_id"),
-            deletion_epoch=_require_private_deletion_epoch(raw),
+            deletion_epoch=_require_private_deletion_command_epoch(raw),
             outcome=cast(PrivateDeletionOutcome, outcome),
         )
 

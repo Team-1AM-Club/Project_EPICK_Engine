@@ -1215,6 +1215,8 @@ def apply_private_deletion(
     if receipt is not None:
         if receipt.command_digest != command_digest:
             raise PersistenceConflict("deletion receipt does not match command")
+        if command.deletion_epoch < owner_state.latest_epoch:
+            return "STALE"
         return "DUPLICATE"
 
     if command.deletion_epoch <= owner_state.latest_epoch:
