@@ -220,14 +220,42 @@ Expected: New persistence-focused tests PASS; the previously RED worker consumer
 - [ ] **Step 1: Extend RED consumer tests**
 
     def test_stale_epoch_skips_purge_and_ack(session_factory) -> None:
-        _process_private_deletion(session_factory=session_factory, owner_user_id=OWNER_A, deletion_id=FIRST_ID, deletion_epoch=7, attempt_ids=frozenset({ATTEMPT_A}), request_deduplication_ids=frozenset({DEDUP_A}), private_reference_keys=frozenset({"a-project-1"}), side_effects=effects)
-        _process_private_deletion(session_factory=session_factory, owner_user_id=OWNER_A, deletion_id=LATE_ID, deletion_epoch=6, attempt_ids=frozenset({ATTEMPT_A2}), request_deduplication_ids=frozenset({DEDUP_A2}), private_reference_keys=frozenset({"a-project-2"}), side_effects=effects)
-        assert effects.events == [("purge", (OWNER_A, frozenset({"a-project-1"}))), ("acknowledge", (ANY, 7))]
+        state = _seed_shared_public_source(session_factory)
+        effects = _PrivateDeletionSideEffects()
+        first_id = uuid4()
+        _process_private_deletion(
+            session_factory=session_factory, owner_user_id=OWNER_A,
+            deletion_id=first_id, deletion_epoch=7,
+            attempt_ids=frozenset({state.attempt_a_project_1}),
+            request_deduplication_ids=frozenset({state.dedup_a_project_1}),
+            private_reference_keys=frozenset({"a-project-1"}), side_effects=effects,
+        )
+        _process_private_deletion(
+            session_factory=session_factory, owner_user_id=OWNER_A,
+            deletion_id=uuid4(), deletion_epoch=6,
+            attempt_ids=frozenset({state.attempt_a_project_2}),
+            request_deduplication_ids=frozenset({state.dedup_a_project_2}),
+            private_reference_keys=frozenset({"a-project-2"}), side_effects=effects,
+        )
+        assert effects.events == [
+            ("purge", (OWNER_A, frozenset({"a-project-1"}))),
+            ("acknowledge", (first_id, 7)),
+        ]
 
     def test_foreign_attempt_identifier_rolls_back_without_side_effects(session_factory) -> None:
+        state = _seed_shared_public_source(session_factory)
+        effects = _PrivateDeletionSideEffects()
         with pytest.raises(PersistenceConflict):
-            _process_private_deletion(session_factory=session_factory, owner_user_id=OWNER_A, deletion_id=FOREIGN_ID, deletion_epoch=7, attempt_ids=frozenset({B1}), request_deduplication_ids=frozenset(), private_reference_keys=frozenset({"b-project-1"}), side_effects=effects)
+            _process_private_deletion(
+                session_factory=session_factory, owner_user_id=OWNER_A,
+                deletion_id=uuid4(), deletion_epoch=7,
+                attempt_ids=frozenset({state.attempt_b_project_1}),
+                request_deduplication_ids=frozenset(),
+                private_reference_keys=frozenset({"b-project-1"}), side_effects=effects,
+            )
         assert effects.events == []
+
+Import PersistenceConflict from persistence.py for the foreign-owner assertion.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -241,7 +269,12 @@ Expected: FAIL until worker consumer and side-effect ordering are wired.
         with session_factory() as session:
             with session.begin():
                 outcome = apply_private_deletion(session, command)
-        acknowledgement = PrivateDeletionAcknowledgement.from_command(command, outcome=outcome)
+        acknowledgement = PrivateDeletionAcknowledgement(
+            deletion_id=command.deletion_id,
+            owner_user_id=command.owner_user_id,
+            deletion_epoch=command.deletion_epoch,
+            outcome=outcome,
+        )
         if outcome == "STALE":
             return acknowledgement
         side_effects.purge_private_references(
@@ -274,6 +307,7 @@ Expected: PASS for account scope, project scope, purge failure/no-ACK, replay, r
 - Modify: tests/unit/source_collection/test_commit_gate_operator.py
 - Modify: tests/integration/source_collection/test_collection_runtime_storage.py
 - Modify: tests/integration/source_collection/test_private_commit_gate.py
+- Modify: tests/contract/source_collection/test_foundation_boundary.py
 - Modify: contracts/w2-private/ct15-runtime.md
 
 **Interfaces:**
@@ -282,16 +316,24 @@ Expected: PASS for account scope, project scope, purge failure/no-ACK, replay, r
 
 - [ ] **Step 1: Write failing head-pin and handoff assertions**
 
-    def test_preflight_requires_private_deletion_receipt_head() -> None:
-        with pytest.raises(SourceRuntimeConfigurationError, match="0009_private_deletion_receipt"):
+    def test_preflight_requires_private_deletion_receipt_head(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        _map_fixed_container_paths(monkeypatch, tmp_path)
+        values = environment()
+        sdk = _fake_sqs(values)
+        with pytest.raises(_configuration_error()):
             _symbol("preflight")(
                 _engine(revisions=("0008_collection_runtime",)),
-                _fake_sqs(),
-                _settings(_config_payload()),
+                sdk,
+                _settings(values),
             )
+        assert sdk.calls == []
 
     def test_ct15_contract_mentions_t067_schema_and_forward_head() -> None:
-        document = CT15_RUNTIME.read_text(encoding="utf-8")
+        document = (
+            Path(__file__).resolve().parents[3] / "contracts/w2-private/ct15-runtime.md"
+        ).read_text(encoding="utf-8")
         assert "0009_private_deletion_receipt" in document
         assert "private-deletion-command.schema.json" in document
         assert "private-deletion-ack.schema.json" in document
@@ -310,7 +352,7 @@ Update each current-head fixture found by searching the literal 0008_collection_
 
 - [ ] **Step 4: Run complete affected verification**
 
-Run: python -m pytest tests/contract/source_collection/test_private_deletion_contracts.py tests/integration/source_collection/test_private_deletion.py tests/unit/source_collection/test_alembic_config.py tests/unit/source_collection/test_source_runtime_operator.py tests/unit/source_collection/test_commit_gate_operator.py tests/integration/source_collection/test_collection_runtime_storage.py tests/integration/source_collection/test_private_commit_gate.py -q
+Run: python -m pytest tests/contract/source_collection/test_private_deletion_contracts.py tests/contract/source_collection/test_foundation_boundary.py tests/integration/source_collection/test_private_deletion.py tests/unit/source_collection/test_alembic_config.py tests/unit/source_collection/test_source_runtime_operator.py tests/unit/source_collection/test_commit_gate_operator.py tests/integration/source_collection/test_collection_runtime_storage.py tests/integration/source_collection/test_private_commit_gate.py -q
 
 Expected: PASS; all current-head checks accept only 0009 and T067 behavior passes.
 
@@ -319,7 +361,7 @@ Expected: PASS; all current-head checks accept only 0009 and T067 behavior passe
     ruff check src/epick_engine/source_collection tests/contract/source_collection/test_private_deletion_contracts.py tests/integration/source_collection/test_private_deletion.py
     ruff format --check src/epick_engine/source_collection tests/contract/source_collection/test_private_deletion_contracts.py tests/integration/source_collection/test_private_deletion.py
     git diff --check
-    git add src/epick_engine/source_collection/source_runtime_operator.py src/epick_engine/source_collection/commit_gate_operator.py tests/unit/source_collection/test_source_runtime_operator.py tests/unit/source_collection/test_commit_gate_operator.py tests/integration/source_collection/test_collection_runtime_storage.py tests/integration/source_collection/test_private_commit_gate.py contracts/w2-private/ct15-runtime.md
+    git add src/epick_engine/source_collection/source_runtime_operator.py src/epick_engine/source_collection/commit_gate_operator.py tests/unit/source_collection/test_source_runtime_operator.py tests/unit/source_collection/test_commit_gate_operator.py tests/integration/source_collection/test_collection_runtime_storage.py tests/integration/source_collection/test_private_commit_gate.py tests/contract/source_collection/test_foundation_boundary.py contracts/w2-private/ct15-runtime.md
     git commit -m "docs(w2): private 삭제 W1 인계 갱신"
 
 ## Self-Review
