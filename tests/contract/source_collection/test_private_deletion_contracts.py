@@ -180,3 +180,31 @@ def test_private_deletion_ack_direct_construction_enforces_invariants(
 
     with pytest.raises(WorkerContractViolation):
         ack_type(**values)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "schema", "field"),
+    [
+        ("valid-command.json", "private-deletion-command.schema.json", "deletion_id"),
+        ("valid-command.json", "private-deletion-command.schema.json", "owner_user_id"),
+        ("valid-command.json", "private-deletion-command.schema.json", "attempt_ids"),
+        (
+            "valid-command.json",
+            "private-deletion-command.schema.json",
+            "request_deduplication_ids",
+        ),
+        ("valid-ack-applied.json", "private-deletion-ack.schema.json", "deletion_id"),
+        ("valid-ack-applied.json", "private-deletion-ack.schema.json", "owner_user_id"),
+    ],
+)
+def test_uppercase_letter_bearing_uuid_is_rejected_by_schema_and_python(
+    fixture: str, schema: str, field: str
+) -> None:
+    raw = deepcopy(_load(fixture))
+    uppercase_uuid = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+    raw[field] = [uppercase_uuid] if field.endswith("_ids") else uppercase_uuid
+    payload_type = _command_type() if fixture == "valid-command.json" else _ack_type()
+
+    assert list(_validator(schema).iter_errors(raw))
+    with pytest.raises(WorkerContractViolation):
+        payload_type.from_mapping(raw)

@@ -21,11 +21,13 @@
     },
     "deletion_id": {
       "type": "string",
-      "format": "uuid"
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     },
     "owner_user_id": {
       "type": "string",
-      "format": "uuid"
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     },
     "deletion_epoch": {
       "type": "integer",
@@ -36,7 +38,8 @@
       "uniqueItems": true,
       "items": {
         "type": "string",
-        "format": "uuid"
+        "format": "uuid",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
       }
     },
     "request_deduplication_ids": {
@@ -44,7 +47,8 @@
       "uniqueItems": true,
       "items": {
         "type": "string",
-        "format": "uuid"
+        "format": "uuid",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
       }
     },
     "private_reference_keys": {
