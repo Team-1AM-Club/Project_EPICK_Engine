@@ -26,6 +26,7 @@ from epick_engine.source_collection.persistence import (
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.private_scope import (
     PrivateScopeRejected,
+    PrivateWriteAuthorityDecision,
     PrivateWriteScope,
     ScopeUnclassified,
     lock_private_write_scope,
@@ -281,24 +282,27 @@ def _proof(
     project_id: UUID | None = None,
 ) -> PrivateWriteScope:
     return PrivateWriteScope(
-        owner_user_id=OWNER_ID,
-        owner_deletion_epoch=epoch,
-        kind=kind,
-        project_id=project_id,
-        authority_ref="w1:test-authority",
-        command_id=COMMAND_ID,
-        job_id=JOB_ID,
+        PrivateWriteAuthorityDecision(
+            owner_user_id=OWNER_ID,
+            owner_deletion_epoch=epoch,
+            scope=PrivateDeletionScope(kind=kind, project_id=project_id),
+            authority_ref="w1:test-authority",
+            command_id=COMMAND_ID,
+            job_id=JOB_ID,
+        )
     )
 
 
 def test_private_write_scope_consumes_v2_scope_and_checks_exact_binding() -> None:
-    proof = PrivateWriteScope.from_scope(
-        owner_user_id=OWNER_ID,
-        owner_deletion_epoch=0,
-        scope=PrivateDeletionScope(kind="PROJECT", project_id=PROJECT_ID),
-        authority_ref="w1:test-authority",
-        command_id=COMMAND_ID,
-        job_id=JOB_ID,
+    proof = PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=OWNER_ID,
+            owner_deletion_epoch=0,
+            scope=PrivateDeletionScope(kind="PROJECT", project_id=PROJECT_ID),
+            authority_ref="w1:test-authority",
+            command_id=COMMAND_ID,
+            job_id=JOB_ID,
+        )
     )
 
     proof.assert_bound_to(
@@ -328,6 +332,49 @@ def test_private_write_scope_consumes_v2_scope_and_checks_exact_binding() -> Non
             command_id=COMMAND_ID,
             job_id=uuid4(),
         )
+    with pytest.raises(PrivateScopeRejected, match="command"):
+        proof.assert_bound_to(
+            owner_user_id=OWNER_ID,
+            owner_deletion_epoch=0,
+            job_id=JOB_ID,
+        )
+    with pytest.raises(PrivateScopeRejected, match="job"):
+        proof.assert_bound_to(
+            owner_user_id=OWNER_ID,
+            owner_deletion_epoch=0,
+            command_id=COMMAND_ID,
+        )
+
+
+@pytest.mark.parametrize("target_epoch", [False, -1, SIGNED_64_MAX + 1])
+def test_private_write_scope_rejects_invalid_target_epoch(target_epoch: object) -> None:
+    proof = _proof()
+
+    with pytest.raises(PrivateScopeRejected, match="outside signed 64-bit"):
+        proof.assert_bound_to(
+            owner_user_id=OWNER_ID,
+            owner_deletion_epoch=target_epoch,  # type: ignore[arg-type]
+            command_id=COMMAND_ID,
+            job_id=JOB_ID,
+        )
+
+
+def test_loose_scope_and_authority_string_cannot_construct_write_proof() -> None:
+    with pytest.raises(TypeError):
+        PrivateWriteScope(
+            owner_user_id=OWNER_ID,
+            owner_deletion_epoch=0,
+            kind="PROJECT",
+            project_id=PROJECT_ID,
+            authority_ref="unverified:caller-string",
+            command_id=COMMAND_ID,
+            job_id=JOB_ID,
+        )
+    assert not hasattr(PrivateWriteScope, "from_scope")
+    with pytest.raises(PrivateScopeRejected, match="authority decision"):
+        PrivateWriteScope(  # type: ignore[arg-type]
+            PrivateDeletionScope(kind="PROJECT", project_id=PROJECT_ID)
+        )
 
 
 @pytest.mark.parametrize(
@@ -337,9 +384,9 @@ def test_private_write_scope_consumes_v2_scope_and_checks_exact_binding() -> Non
         ({"owner_deletion_epoch": -1}, "epoch"),
         ({"owner_deletion_epoch": SIGNED_64_MAX + 1}, "epoch"),
         ({"owner_deletion_epoch": True}, "epoch"),
-        ({"kind": "UNKNOWN"}, "kind"),
-        ({"kind": "ACCOUNT", "project_id": PROJECT_ID}, "ACCOUNT"),
-        ({"kind": "PROJECT", "project_id": None}, "PROJECT"),
+        ({"scope": object()}, "validated v2 scope"),
+        ({"command_id": "not-a-uuid"}, "command"),
+        ({"job_id": "not-a-uuid"}, "job"),
     ],
 )
 def test_private_write_scope_rejects_untrusted_shapes(
@@ -349,8 +396,7 @@ def test_private_write_scope_rejects_untrusted_shapes(
     values: dict[str, object] = {
         "owner_user_id": OWNER_ID,
         "owner_deletion_epoch": 0,
-        "kind": "ACCOUNT",
-        "project_id": None,
+        "scope": PrivateDeletionScope(kind="ACCOUNT", project_id=None),
         "authority_ref": "w1:test-authority",
         "command_id": COMMAND_ID,
         "job_id": JOB_ID,
@@ -358,7 +404,7 @@ def test_private_write_scope_rejects_untrusted_shapes(
     values.update(overrides)
 
     with pytest.raises(PrivateScopeRejected, match=match):
-        PrivateWriteScope(**values)  # type: ignore[arg-type]
+        PrivateWriteAuthorityDecision(**values)  # type: ignore[arg-type]
 
 
 def test_scope_unclassified_is_a_private_scope_rejection() -> None:

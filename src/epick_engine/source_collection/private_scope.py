@@ -1,4 +1,4 @@
-"""Authenticated private-write scope validation and owner-first locking."""
+"""Private-write authority values, scope validation, and owner-first locking."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ SIGNED_64_MAX = 9_223_372_036_854_775_807
 
 
 class PrivateScopeRejected(RuntimeError):
-    """Raised when authenticated private-write scope cannot pass its fence."""
+    """Raised when a private-write authority value cannot pass its fence."""
 
 
 class ScopeUnclassified(PrivateScopeRejected):
@@ -28,13 +28,16 @@ class ScopeUnclassified(PrivateScopeRejected):
 
 
 @dataclass(frozen=True, slots=True)
-class PrivateWriteScope:
-    """Immutable scope proof constructed from a trusted W1 authority decision."""
+class PrivateWriteAuthorityDecision:
+    """Shape-validated value supplied by a trusted authentication adapter.
+
+    Constructing this value does not authenticate W1. Task 3 owns the production
+    adapter/provider that may create it after authenticating the authority decision.
+    """
 
     owner_user_id: UUID
     owner_deletion_epoch: int
-    kind: Literal["ACCOUNT", "PROJECT"]
-    project_id: UUID | None
+    scope: PrivateDeletionScope
     authority_ref: str
     command_id: UUID | None = None
     job_id: UUID | None = None
@@ -48,12 +51,8 @@ class PrivateWriteScope:
             or not 0 <= self.owner_deletion_epoch <= SIGNED_64_MAX
         ):
             raise PrivateScopeRejected("owner deletion epoch is outside signed 64-bit range")
-        if self.kind not in {"ACCOUNT", "PROJECT"}:
-            raise PrivateScopeRejected("private scope kind must be explicit")
-        if self.kind == "ACCOUNT" and self.project_id is not None:
-            raise PrivateScopeRejected("ACCOUNT scope cannot bind a Project")
-        if self.kind == "PROJECT" and not isinstance(self.project_id, UUID):
-            raise PrivateScopeRejected("PROJECT scope requires a Project UUID")
+        if not isinstance(self.scope, PrivateDeletionScope):
+            raise PrivateScopeRejected("authority decision requires a validated v2 scope")
         if not isinstance(self.authority_ref, str) or not self.authority_ref.strip():
             raise PrivateScopeRejected("authority reference must be nonempty")
         if self.command_id is not None and not isinstance(self.command_id, UUID):
@@ -61,30 +60,44 @@ class PrivateWriteScope:
         if self.job_id is not None and not isinstance(self.job_id, UUID):
             raise PrivateScopeRejected("job binding must be a UUID")
 
-    @classmethod
-    def from_scope(
-        cls,
-        *,
-        owner_user_id: UUID,
-        owner_deletion_epoch: int,
-        scope: PrivateDeletionScope,
-        authority_ref: str,
-        command_id: UUID | None = None,
-        job_id: UUID | None = None,
-    ) -> PrivateWriteScope:
-        """Bind a validated v2 scope to one trusted W1 write authority."""
 
-        if not isinstance(scope, PrivateDeletionScope):
-            raise PrivateScopeRejected("scope must be a validated v2 private deletion scope")
-        return cls(
-            owner_user_id=owner_user_id,
-            owner_deletion_epoch=owner_deletion_epoch,
-            kind=scope.kind,
-            project_id=scope.project_id,
-            authority_ref=authority_ref,
-            command_id=command_id,
-            job_id=job_id,
-        )
+@dataclass(frozen=True, slots=True)
+class PrivateWriteScope:
+    """Write-fence proof built from one upstream authority decision value."""
+
+    decision: PrivateWriteAuthorityDecision
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision, PrivateWriteAuthorityDecision):
+            raise PrivateScopeRejected("a private write authority decision is required")
+
+    @property
+    def owner_user_id(self) -> UUID:
+        return self.decision.owner_user_id
+
+    @property
+    def owner_deletion_epoch(self) -> int:
+        return self.decision.owner_deletion_epoch
+
+    @property
+    def kind(self) -> Literal["ACCOUNT", "PROJECT"]:
+        return self.decision.scope.kind
+
+    @property
+    def project_id(self) -> UUID | None:
+        return self.decision.scope.project_id
+
+    @property
+    def authority_ref(self) -> str:
+        return self.decision.authority_ref
+
+    @property
+    def command_id(self) -> UUID | None:
+        return self.decision.command_id
+
+    @property
+    def job_id(self) -> UUID | None:
+        return self.decision.job_id
 
     def assert_bound_to(
         self,
@@ -96,13 +109,25 @@ class PrivateWriteScope:
     ) -> None:
         """Reject a proof reused for a different owner, epoch, command, or job."""
 
+        if not isinstance(owner_user_id, UUID):
+            raise PrivateScopeRejected("target owner binding must be a UUID")
+        if (
+            isinstance(owner_deletion_epoch, bool)
+            or not isinstance(owner_deletion_epoch, int)
+            or not 0 <= owner_deletion_epoch <= SIGNED_64_MAX
+        ):
+            raise PrivateScopeRejected("target owner deletion epoch is outside signed 64-bit range")
+        if command_id is not None and not isinstance(command_id, UUID):
+            raise PrivateScopeRejected("target command binding must be a UUID")
+        if job_id is not None and not isinstance(job_id, UUID):
+            raise PrivateScopeRejected("target job binding must be a UUID")
         if self.owner_user_id != owner_user_id:
             raise PrivateScopeRejected("private scope owner binding does not match")
         if self.owner_deletion_epoch != owner_deletion_epoch:
             raise PrivateScopeRejected("private scope epoch binding does not match")
-        if command_id is not None and self.command_id != command_id:
+        if self.command_id != command_id:
             raise PrivateScopeRejected("private scope command binding does not match")
-        if job_id is not None and self.job_id != job_id:
+        if self.job_id != job_id:
             raise PrivateScopeRejected("private scope job binding does not match")
 
 
@@ -110,7 +135,7 @@ def lock_private_write_scope(session: Session, proof: PrivateWriteScope) -> None
     """Lock the owner fence first and reject deleted or non-current write scope."""
 
     if not isinstance(proof, PrivateWriteScope):
-        raise PrivateScopeRejected("an authenticated private write scope is required")
+        raise PrivateScopeRejected("a private write scope from an authority decision is required")
 
     session.execute(
         postgresql_insert(PrivateDeletionOwnerState)
