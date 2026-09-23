@@ -307,6 +307,10 @@ Expected: PASS for account scope, project scope, purge failure/no-ACK, replay, r
 - Modify: tests/unit/source_collection/test_commit_gate_operator.py
 - Modify: tests/integration/source_collection/test_collection_runtime_storage.py
 - Modify: tests/integration/source_collection/test_private_commit_gate.py
+- Modify: tests/integration/source_collection/test_commit_gate_delivery.py
+- Modify: tests/integration/source_collection/test_restriction_storage.py
+- Modify: tests/integration/source_collection/test_retention_origin.py
+- Modify: tests/integration/source_collection/test_restriction_mutation.py
 - Modify: tests/contract/source_collection/test_foundation_boundary.py
 - Modify: contracts/w2-private/ct15-runtime.md
 
@@ -352,7 +356,7 @@ Update each current-head fixture found by searching the literal 0008_collection_
 
 - [ ] **Step 4: Run complete affected verification**
 
-Run: python -m pytest tests/contract/source_collection/test_private_deletion_contracts.py tests/contract/source_collection/test_foundation_boundary.py tests/integration/source_collection/test_private_deletion.py tests/unit/source_collection/test_alembic_config.py tests/unit/source_collection/test_source_runtime_operator.py tests/unit/source_collection/test_commit_gate_operator.py tests/integration/source_collection/test_collection_runtime_storage.py tests/integration/source_collection/test_private_commit_gate.py -q
+Run: python -m pytest tests/contract/source_collection/test_private_deletion_contracts.py tests/contract/source_collection/test_foundation_boundary.py tests/integration/source_collection/test_private_deletion.py tests/unit/source_collection/test_alembic_config.py tests/unit/source_collection/test_source_runtime_operator.py tests/unit/source_collection/test_commit_gate_operator.py tests/integration/source_collection/test_collection_runtime_storage.py tests/integration/source_collection/test_private_commit_gate.py tests/integration/source_collection/test_commit_gate_delivery.py tests/integration/source_collection/test_restriction_storage.py tests/integration/source_collection/test_retention_origin.py tests/integration/source_collection/test_restriction_mutation.py -q
 
 Expected: PASS; all current-head checks accept only 0009 and T067 behavior passes.
 
@@ -361,7 +365,7 @@ Expected: PASS; all current-head checks accept only 0009 and T067 behavior passe
     ruff check src/epick_engine/source_collection tests/contract/source_collection/test_private_deletion_contracts.py tests/integration/source_collection/test_private_deletion.py
     ruff format --check src/epick_engine/source_collection tests/contract/source_collection/test_private_deletion_contracts.py tests/integration/source_collection/test_private_deletion.py
     git diff --check
-    git add src/epick_engine/source_collection/source_runtime_operator.py src/epick_engine/source_collection/commit_gate_operator.py tests/unit/source_collection/test_source_runtime_operator.py tests/unit/source_collection/test_commit_gate_operator.py tests/integration/source_collection/test_collection_runtime_storage.py tests/integration/source_collection/test_private_commit_gate.py tests/contract/source_collection/test_foundation_boundary.py contracts/w2-private/ct15-runtime.md
+    git add src/epick_engine/source_collection/source_runtime_operator.py src/epick_engine/source_collection/commit_gate_operator.py tests/unit/source_collection/test_source_runtime_operator.py tests/unit/source_collection/test_commit_gate_operator.py tests/integration/source_collection/test_collection_runtime_storage.py tests/integration/source_collection/test_private_commit_gate.py tests/integration/source_collection/test_commit_gate_delivery.py tests/integration/source_collection/test_restriction_storage.py tests/integration/source_collection/test_retention_origin.py tests/integration/source_collection/test_restriction_mutation.py tests/contract/source_collection/test_foundation_boundary.py contracts/w2-private/ct15-runtime.md
     git commit -m "docs(w2): private 삭제 W1 인계 갱신"
 
 ## Self-Review
