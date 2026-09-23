@@ -88,7 +88,7 @@ The earlier W1 CT15 report was pinned to W2 database head
 `11c005db5f94fe26c60314aec9b61764c166e379`, and a W1-reported image digest.
 W2 confirmed only that the source object exists locally; it did not independently
 verify that deployed image, ECR/SQS, the deployed database, or same-run restart
-and count evidence. Because current runtime readiness now requires `0009`, that
+and count evidence. At that snapshot, runtime readiness required `0009`, so that
 historical 0008 CT15 observation must not be presented as current READY evidence.
 
 ## Historical local verification snapshots (2026-09-19 through 2026-09-20)
