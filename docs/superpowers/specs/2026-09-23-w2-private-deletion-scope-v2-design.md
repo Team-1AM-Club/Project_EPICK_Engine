@@ -73,6 +73,12 @@ table or payload introduced before activation. Public `Source`,
 `SourceVersion`, `Evidence`, observations, public outbox, and permitted public
 retained bodies are never deleted merely because a user or Project is deleted.
 
+The later [W2–W1 private authority design](2026-09-26-w2-w1-private-authority-runtime-design.md)
+narrows deletion of those descendants: raw results and STAGED payloads are
+deleted, but the exact ACK outbox and minimal replay-control binding survive
+until a separately approved bilateral drain/retention termination. No public
+Source or private result may be reconstructed from this exception.
+
 Every newly written private parent row carries an explicit, authenticated
 scope classification: account-wide or a specific `(owner_user_id, project_id)`.
 `collection_attempts.project_id` already exists but its null value alone is
