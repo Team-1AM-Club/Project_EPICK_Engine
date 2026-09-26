@@ -36,6 +36,9 @@ def environment() -> dict[str, str]:
         ),
         "W2_CT15_EXPECTED_W1_SENDER_ID": "AROASYNTHETICW1ROLE12",
         "W2_CT15_RUNTIME_LABEL": "epick-ct15-synthetic",
+        "W1_LOOKUP_ENDPOINT": "https://lookup.example.test/internal/v1/job-commands/lookup",
+        "W1_LOOKUP_BEARER": "BEARER-CANARY",
+        "W1_LOOKUP_CA_FILE": "/run/epick/source-runtime/w1-ca.pem",
     }
 
 
@@ -66,6 +69,8 @@ def test_all_live_settings_require_explicit_values(key: str) -> None:
             "https://sqs.ap-northeast-2.amazonaws.com/123456789012/test-ct15.fifo",
         ),
         ("W2_CT15_REGION", "us-east-1"),
+        ("W1_LOOKUP_ENDPOINT", "http://lookup.example.test/internal/v1/job-commands/lookup"),
+        ("W1_LOOKUP_BEARER", ""),
     ],
 )
 def test_nonisolated_or_ambiguous_configuration_fails_closed(key: str, value: str) -> None:
@@ -80,6 +85,8 @@ def test_queue_routes_must_be_distinct_and_config_repr_has_no_secrets() -> None:
     settings = Ct15Settings.from_environment(values)
     assert "synthetic@" not in repr(settings)
     assert "amazonaws.com" not in repr(settings)
+    assert "BEARER-CANARY" not in repr(settings)
+    assert "lookup.example.test" not in repr(settings)
     values["W2_CT15_INBOUND_QUEUE_URL"] = values["W2_CT15_COMMAND_QUEUE_URL"]
     with pytest.raises(Ct15ConfigurationError):
         Ct15Settings.from_environment(values)
@@ -168,11 +175,11 @@ def test_sdk_errors_do_not_expose_payload_or_receipt() -> None:
     assert caught.value.__suppress_context__
 
 
-def test_preflight_accepts_only_private_deletion_scope_v2_migration_head() -> None:
+def test_preflight_accepts_only_private_ack_control_retention_migration_head() -> None:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0010_private_deletion_scope_v2"]
-    connection.scalars.return_value.all.return_value = ["0010_private_deletion_scope_v2"]
+    connection.scalar.side_effect = ["epick_ct15", "0011_private_ack_control_retention"]
+    connection.scalars.return_value.all.return_value = ["0011_private_ack_control_retention"]
     sdk = FakeSqs()
     result = preflight(engine, sdk, Ct15Settings.from_environment(environment()))
     assert result["status"] == "PREFLIGHT_PASSED"
@@ -189,10 +196,11 @@ def test_preflight_accepts_only_private_deletion_scope_v2_migration_head() -> No
         ("0007_restriction_receipt",),
         ("0008_collection_runtime",),
         ("0009_private_deletion_receipt",),
+        ("0010_private_deletion_scope_v2",),
         (),
         ("9999_unknown",),
-        ("0010_private_deletion_scope_v2", "9999_unknown"),
-        ("0010_private_deletion_scope_v2", "0010_private_deletion_scope_v2"),
+        ("0011_private_ack_control_retention", "9999_unknown"),
+        ("0011_private_ack_control_retention", "0011_private_ack_control_retention"),
     ],
 )
 def test_preflight_does_not_claim_readiness_for_incompatible_migration(
@@ -219,8 +227,8 @@ def test_preflight_rejects_nonisolated_unencrypted_or_no_dlq_queue(bad_attribute
 
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0010_private_deletion_scope_v2"]
-    connection.scalars.return_value.all.return_value = ["0010_private_deletion_scope_v2"]
+    connection.scalar.side_effect = ["epick_ct15", "0011_private_ack_control_retention"]
+    connection.scalars.return_value.all.return_value = ["0011_private_ack_control_retention"]
     with pytest.raises(Ct15ConfigurationError):
         preflight(engine, BadQueue(), Ct15Settings.from_environment(environment()))
 
@@ -231,7 +239,10 @@ def test_runtime_stops_after_inflight_delivery_and_emits_only_safe_status(
     stop = Event()
     calls = []
 
-    def finish_current(_sessions, _queue):
+    authority_client = object()
+
+    def finish_current(_sessions, _queue, *, authority_client):
+        assert authority_client is not None
         calls.append("sent")
         stop.set()
         return RelayResult(status="SENT")
@@ -239,9 +250,54 @@ def test_runtime_stops_after_inflight_delivery_and_emits_only_safe_status(
     monkeypatch.setattr(
         "epick_engine.source_collection.commit_gate_operator.relay_once", finish_current
     )
-    assert run_loop("relay", MagicMock(), MagicMock(), "synthetic", stop) == 0
+    assert (
+        run_loop(
+            "relay",
+            MagicMock(),
+            MagicMock(),
+            "synthetic",
+            stop,
+            private_authority_client=authority_client,
+        )
+        == 0
+    )
     assert calls == ["sent"]
     assert json.loads(capsys.readouterr().out) == {"status": "SENT"}
+
+
+@pytest.mark.parametrize("action", ("consume", "relay"))
+def test_ct15_relay_requires_configured_w1_client(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    stop = Event()
+    private_authority_client = object()
+    observed: list[object] = []
+
+    def finish_once(*_args: object, **kwargs: object) -> RelayResult:
+        key = "private_authority_client" if action == "consume" else "authority_client"
+        observed.append(kwargs[key])
+        stop.set()
+        return RelayResult(status="SENT")
+
+    monkeypatch.setattr(
+        commit_gate_operator,
+        "consume_once" if action == "consume" else "relay_once",
+        finish_once,
+    )
+
+    assert (
+        run_loop(
+            action,
+            MagicMock(),
+            MagicMock(),
+            "synthetic",
+            stop,
+            private_authority_client=private_authority_client,
+        )
+        == 0
+    )
+    assert observed == [private_authority_client]
 
 
 def test_inspect_run_uses_explicit_fixture_after_existing_preflight(

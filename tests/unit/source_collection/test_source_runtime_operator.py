@@ -189,7 +189,7 @@ def _queue_attributes(*, arn_name: str, encrypted: bool = True, dlq: bool = True
     return attributes
 
 
-def _engine(*, revisions: tuple[str, ...] = ("0010_private_deletion_scope_v2",)) -> MagicMock:
+def _engine(*, revisions: tuple[str, ...] = ("0011_private_ack_control_retention",)) -> MagicMock:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
     connection.scalar.return_value = "epick"
@@ -367,13 +367,14 @@ def test_preflight_accepts_numeric_or_string_redrive_max_receive_count(
     "migration_revisions",
     [
         pytest.param(("0009_private_deletion_receipt",), id="previous-head"),
+        pytest.param(("0010_private_deletion_scope_v2",), id="pre-ack-retention-head"),
         pytest.param(("9999_unknown",), id="unknown-head"),
         pytest.param(
-            ("0010_private_deletion_scope_v2", "9999_unknown"),
+            ("0011_private_ack_control_retention", "9999_unknown"),
             id="multiple-heads",
         ),
         pytest.param(
-            ("0010_private_deletion_scope_v2", "0010_private_deletion_scope_v2"),
+            ("0011_private_ack_control_retention", "0011_private_ack_control_retention"),
             id="duplicate-head",
         ),
     ],
@@ -544,6 +545,7 @@ def test_build_runtime_dependencies_keeps_all_runtime_boundaries_explicit(
         return object()
 
     relay_lookup_client = object()
+    private_authority_client = object()
 
     def message_id_factory() -> UUID:
         return UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
@@ -556,6 +558,7 @@ def test_build_runtime_dependencies_keeps_all_runtime_boundaries_explicit(
         collection_handler=collection_handler,
         gate_applier=gate_applier,
         relay_lookup_client=relay_lookup_client,
+        private_authority_client=private_authority_client,
         clock=_fixed_clock,
         message_id_factory=message_id_factory,
     )
@@ -564,13 +567,14 @@ def test_build_runtime_dependencies_keeps_all_runtime_boundaries_explicit(
     assert dependencies.collection_handler is collection_handler
     assert dependencies.gate_applier is gate_applier
     assert dependencies.relay_authorizer is not None
+    assert dependencies.private_authority_client is private_authority_client
     assert dependencies.claim_lease_seconds == 120
     assert 0 < dependencies.visibility_heartbeat_seconds <= 40
     assert operator is _operator()
 
 
 @pytest.mark.parametrize("mode", ("mixed", "collection", "gate"))
-def test_run_action_forwards_injected_router_handler_gate_and_relay(
+def test_production_actions_inject_private_authority_client(
     monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     operator = _operator()
@@ -579,7 +583,9 @@ def test_run_action_forwards_injected_router_handler_gate_and_relay(
     collection_calls: list[object] = []
     gate_calls: list[tuple[object, object]] = []
     relay_calls: list[tuple[str, dict[str, object]]] = []
+    authority_clients: list[object] = []
     captured: dict[str, object] = {}
+    private_authority_client = object()
 
     def collection_handler(dispatch: object) -> None:
         collection_calls.append(dispatch)
@@ -596,6 +602,7 @@ def test_run_action_forwards_injected_router_handler_gate_and_relay(
         captured["consume_kwargs"] = kwargs
         assert kwargs["collection_handler"] is collection_handler
         assert kwargs["gate_applier"] is gate_applier
+        authority_clients.append(kwargs["private_authority_client"])
         return SimpleNamespace(status="REJECTED")
 
     def fake_relay(*args: object, **kwargs: object) -> object:
@@ -604,10 +611,17 @@ def test_run_action_forwards_injected_router_handler_gate_and_relay(
         authorizer = kwargs["before_send"]
         assert authorizer is relay_authorizer
         authorizer("ACK", {})
+        authority_clients.append(kwargs["authority_client"])
         return SimpleNamespace(status="EMPTY")
+
+    def fake_run_loop(*, consume_once: Any, relay_once: Any, **_: object) -> int:
+        consume_once()
+        relay_once()
+        return 0
 
     monkeypatch.setattr(operator, "consume_source_runtime_once", fake_consume, raising=False)
     monkeypatch.setattr(operator, "relay_once", fake_relay, raising=False)
+    monkeypatch.setattr(operator, "run_loop", fake_run_loop, raising=False)
 
     common = {
         "session_factory": session_factory,
@@ -617,6 +631,7 @@ def test_run_action_forwards_injected_router_handler_gate_and_relay(
         "collection_handler": collection_handler,
         "gate_applier": gate_applier,
         "relay_authorizer": relay_authorizer,
+        "private_authority_client": private_authority_client,
         "clock": _fixed_clock,
         "message_id_factory": lambda: UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
         "claim_lease_seconds": 120,
@@ -625,14 +640,17 @@ def test_run_action_forwards_injected_router_handler_gate_and_relay(
 
     consume_result = _symbol("run_action")("consume-once", **common)
     relay_result = _symbol("run_action")("relay-once", **common)
+    run_result = _symbol("run_action")("run", stop=Event(), **common)
 
     assert consume_result.status == "REJECTED"
     assert relay_result.status == "EMPTY"
+    assert run_result == 0
     assert captured["consume_args"] == (session_factory, queue, "AROASYNTHETICW1ROLE12")
     assert captured["consume_kwargs"] == {
         "mode": mode,
         "collection_handler": collection_handler,
         "gate_applier": gate_applier,
+        "private_authority_client": private_authority_client,
         "clock": _fixed_clock,
         "message_id_factory": common["message_id_factory"],
         "visibility_heartbeat_seconds": 40,
@@ -640,13 +658,15 @@ def test_run_action_forwards_injected_router_handler_gate_and_relay(
     assert captured["relay_args"] == (session_factory, queue)
     assert captured["relay_kwargs"] == {
         "clock": _fixed_clock,
+        "authority_client": private_authority_client,
         "before_send": relay_authorizer,
         "claim_lease_seconds": 120,
     }
-    assert relay_calls == [("ACK", {})]
+    assert relay_calls == [("ACK", {}), ("ACK", {})]
     assert collection_calls == []
     assert gate_calls == []
     assert queue.deleted == []
+    assert authority_clients == [private_authority_client] * 4
 
 
 def test_run_action_run_delegates_only_explicit_bounded_callbacks(
@@ -669,6 +689,8 @@ def test_run_action_run_delegates_only_explicit_bounded_callbacks(
     def relay_authorizer(_: str, __: dict[str, object]) -> None:
         return None
 
+    private_authority_client = object()
+
     monkeypatch.setattr(operator, "run_loop", fake_run_loop, raising=False)
     result = _symbol("run_action")(
         "run",
@@ -679,6 +701,7 @@ def test_run_action_run_delegates_only_explicit_bounded_callbacks(
         collection_handler=collection_handler,
         gate_applier=gate_applier,
         relay_authorizer=relay_authorizer,
+        private_authority_client=private_authority_client,
         clock=_fixed_clock,
         message_id_factory=lambda: UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
         claim_lease_seconds=120,
@@ -690,6 +713,50 @@ def test_run_action_run_delegates_only_explicit_bounded_callbacks(
     assert captured["stop"] is stop
     assert callable(captured["consume_once"])
     assert callable(captured["relay_once"])
+
+
+@pytest.mark.parametrize("action", ("consume-once", "relay-once", "run"))
+def test_missing_authority_dependency_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    operator = _operator()
+    runtime_calls: list[str] = []
+
+    monkeypatch.setattr(
+        operator,
+        "consume_source_runtime_once",
+        lambda *_args, **_kwargs: runtime_calls.append("consume"),
+    )
+    monkeypatch.setattr(
+        operator,
+        "relay_once",
+        lambda *_args, **_kwargs: runtime_calls.append("relay"),
+    )
+    monkeypatch.setattr(
+        operator,
+        "run_loop",
+        lambda **_kwargs: runtime_calls.append("run"),
+    )
+
+    with pytest.raises(_configuration_error(), match="dependency is invalid"):
+        _symbol("run_action")(
+            action,
+            session_factory=object(),
+            queue=_RecordingQueue(),
+            expected_sender_id="AROASYNTHETICW1ROLE12",
+            mode="mixed",
+            collection_handler=lambda _dispatch: None,
+            gate_applier=lambda *_args, **_kwargs: object(),
+            relay_authorizer=lambda _kind, _payload: None,
+            private_authority_client=None,
+            clock=_fixed_clock,
+            message_id_factory=lambda: UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+            claim_lease_seconds=120,
+            visibility_heartbeat_seconds=40,
+        )
+
+    assert runtime_calls == []
 
 
 def test_run_loop_honors_graceful_signal_stop_after_current_bounded_action() -> None:

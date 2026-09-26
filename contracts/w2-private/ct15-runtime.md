@@ -1,13 +1,12 @@
 # W2 CT15 runtime — local implementation / deployment pending
 
-2026-09-24 private-deletion scope-v2 correction: current CT15 preflight requires
-exactly one Alembic head, `0010_private_deletion_scope_v2`. Revisions `0005`
-through `0009` are forward-migration starting points only, not CT15
-runtime-ready heads. The `0010` migration adds explicit private-scope
-attribution, account/Project tombstones, signed-64-bit writer epochs, and
-versioned deletion receipts required by the v2 write fence and deletion
-consumer. Preflight rejects older, unknown, multiple, and duplicate heads before
-it reads any queue metadata.
+2026-09-27 private-authority runtime correction: current CT15 preflight requires
+exactly one Alembic head, `0011_private_ack_control_retention`. Revisions `0005`
+through `0010` are forward-migration starting points only, not CT15
+runtime-ready heads. The `0011` migration retains only the original ACK control
+graph needed for exact historical replay after private payload deletion.
+Preflight rejects older, unknown, multiple, and duplicate heads before it reads
+any queue metadata. The metadata-only preflight does not grant runtime authority.
 
 2026-09-20 follow-up: [B1 scoped inspection and transport controls](ct15-b1-controls.md)
 supersedes the historical missing-harness explanation below. The new W1 action
@@ -95,7 +94,7 @@ historical 0008 CT15 observation must not be presented as current READY evidence
 
 Everything in this section is a dated historical snapshot, not current operator
 guidance. Current preflight and deployment instructions require the exact
-`0010_private_deletion_scope_v2` head described above and under Operator
+`0011_private_ack_control_retention` head described above and under Operator
 commands.
 
 T095 local-service update (2026-09-20): full regression is now **1286 passed,
@@ -178,6 +177,10 @@ re-arms its delivery marker. It never substitutes a new DUPLICATE success ACK.
   An uncertain send/commit retries the same persisted wire identity. If PURGE
   wins first, the erased staged body is not sent. If send wins first, subsequent
   W1 stale/epoch validation is still required: a sent SQS body cannot be recalled.
+- Every CT15 consume or relay action uses the configured protected W1 authority
+  client. Gate application, relay claim/release, and send obtain their own fresh
+  operation-specific decision; a preflight or count-only inspection neither
+  constructs an authority result nor authorizes a later effect.
 - Local transaction atomicity does not extend across SQS or W1's database.
   Standard SQS delivery/order guarantees are not strengthened by this runtime.
 - Store errors and SDK diagnostics are reduced to fixed statuses; body, DSN,
@@ -222,6 +225,9 @@ delivery and private network access; this file does not mount host credentials.
 | `W2_CT15_EXPECTED_W1_SENDER_ID` | Real stable IAM role ID, no STS session suffix or ARN |
 | `W2_CT15_RUNTIME_LABEL` | Operator-chosen isolated runtime label containing a `ct15` token |
 | `W2_CT15_SYNTHETIC_INPUTS` | Exact `true` only when using the explicit `stage` fixture operation |
+| `W1_LOOKUP_ENDPOINT` | Existing validated protected W1 HTTPS origin; no alternate authority URL |
+| `W1_LOOKUP_BEARER` | Existing W2 service bearer supplied through the approved secret channel |
+| `W1_LOOKUP_CA_FILE` | Existing CA bundle for the protected W1 origin |
 
 W1 additionally supplies/records the actual W2 IAM role ARN and stable role ID
 for inbound queue policy and `W2_COMMIT_GATE_EXPECTED_SENDER_ID`. W1 also provides
@@ -236,8 +242,8 @@ rendering Compose with secret interpolation into saved logs.
 
 Run from the Engine checkout with `uv run --no-sync epick-w2-ct15 <action>`, or
 the image entrypoint with the same action.
-A W1 operator applies Alembic through `0010_private_deletion_scope_v2` to the
-approved W2 DB before starting the runtime. Revisions `0004` through `0009` are
+A W1 operator applies Alembic through `0011_private_ack_control_retention` to the
+approved W2 DB before starting the runtime. Revisions `0004` through `0010` are
 forward-migration starting points, not runtime-ready heads. Preflight never
 migrates the database.
 
@@ -292,20 +298,21 @@ counts and W2's counts; neither side's local result substitutes for the other.
 ## Explicit remaining work
 
 - Canonical CT15-01~09 harness and actual queue execution remain incomplete.
-- Real collection/direct-registration multiplexing and authenticated lookup
-  connection remain outside this gate-only test operator.
-- W2 local private-deletion scope-v2 payload, consumer, migration, write fences,
-  and exact-head preflight work is complete at this source revision. The W1
-  authenticated scope-proof adapter, outer envelope/dispatcher/ACK, scope purge,
-  per-owner epoch serialization, AWS/SQS/IAM deployment, and joint account/Project
-  validation remain incomplete.
+- Real collection/direct-registration multiplexing remains outside this gate-only
+  test operator. Its consume and relay effects now use the same configured
+  protected W1 authority client as the general source runtime.
+- W2 local private-deletion scope-v2 payload, consumer, ACK-control retention,
+  per-operation W1 authority adapter, write fences, and exact-head preflight work
+  is complete at this source revision. The W1 outer envelope/dispatcher/ACK,
+  scope purge, per-owner epoch serialization, AWS/SQS/IAM deployment, and joint
+  account/Project validation remain incomplete.
 - Revisions `0006_source_restriction`, `0007_restriction_receipt`, and
-  `0008_collection_runtime`, and `0009_private_deletion_receipt` are migration
-  history below the required 0010 head, not future migrations or runtime-ready
-  alternatives.
-- No current 0010 deployed-image digest or deployment evidence has been
+  `0008_collection_runtime`, `0009_private_deletion_receipt`, and
+  `0010_private_deletion_scope_v2` are migration history below the required 0011
+  head, not future migrations or runtime-ready alternatives.
+- No current 0011 deployed-image digest or deployment evidence has been
   independently verified. The prior W1-reported 0008 image evidence does not
-  establish current READY at 0010.
+  establish current READY at 0011.
 - W3 deployment, retention/monitoring policy and full-app/W4 integration remain
   separate responsibilities and are not completed by these local tests.
 

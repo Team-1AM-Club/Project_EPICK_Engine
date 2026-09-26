@@ -9,6 +9,7 @@ import json
 import os
 import re
 import signal
+import ssl
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ from epick_engine.source_collection.commit_gate_runtime import (
     PrivateWriteAuthorityProvider,
     Queue,
     QueueDelivery,
+    RelayAuthorityClient,
     SessionFactory,
     _strict_json_object,
     _wire_body,
@@ -46,10 +48,16 @@ from epick_engine.source_collection.private_scope import (
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
 )
+from epick_engine.source_collection.w1_lookup_client import (
+    W1LookupClientError,
+    validate_lookup_endpoint,
+)
+from epick_engine.source_collection.w1_private_authority_client import W1PrivateAuthorityClient
 from epick_engine.source_collection.w1_transport import _parse_wire
 
 _ROLE_ID = re.compile(r"AROA[A-Z0-9]{17}")
 _STATES = ("STAGED", "PREPARED", "FINALIZED", "ABORTED", "PURGED")
+_MIGRATION_HEAD = "0011_private_ack_control_retention"
 
 
 class Ct15ConfigurationError(ValueError):
@@ -68,10 +76,26 @@ class Ct15Settings:
     inbound_queue_url: str = field(repr=False)
     expected_w1_sender_id: str
     runtime_label: str
+    lookup_endpoint: str = field(repr=False)
+    lookup_bearer: str = field(repr=False)
+    lookup_ca_file: str = field(repr=False)
 
     @classmethod
     def from_environment(cls, values: Mapping[str, str]) -> Ct15Settings:
         try:
+            lookup_values = {
+                name: values[name]
+                for name in (
+                    "W1_LOOKUP_ENDPOINT",
+                    "W1_LOOKUP_BEARER",
+                    "W1_LOOKUP_CA_FILE",
+                )
+            }
+            if any(
+                not isinstance(value, str) or not value.strip() for value in lookup_values.values()
+            ):
+                raise ValueError
+            validate_lookup_endpoint(lookup_values["W1_LOOKUP_ENDPOINT"])
             if (
                 values["W2_CT15_ENABLED"] != "true"
                 or values["W2_CT15_GATE_ONLY_QUEUE_APPROVED"] != "true"
@@ -84,6 +108,9 @@ class Ct15Settings:
                 inbound_queue_url=values["W2_CT15_INBOUND_QUEUE_URL"],
                 expected_w1_sender_id=values["W2_CT15_EXPECTED_W1_SENDER_ID"],
                 runtime_label=values["W2_CT15_RUNTIME_LABEL"],
+                lookup_endpoint=lookup_values["W1_LOOKUP_ENDPOINT"],
+                lookup_bearer=lookup_values["W1_LOOKUP_BEARER"],
+                lookup_ca_file=lookup_values["W1_LOOKUP_CA_FILE"],
             )
             db = make_url(settings.database_url)
             if db.drivername != "postgresql+psycopg" or not _isolated_name(db.database or ""):
@@ -109,7 +136,7 @@ class Ct15Settings:
             if settings.command_queue_url == settings.inbound_queue_url:
                 raise ValueError
             return settings
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, W1LookupClientError):
             raise Ct15ConfigurationError("explicit isolated CT15 settings required") from None
 
 
@@ -200,13 +227,21 @@ def create_ct15_engine(settings: Ct15Settings) -> Engine:
     )
 
 
+def create_private_authority_client(settings: Ct15Settings) -> W1PrivateAuthorityClient:
+    return W1PrivateAuthorityClient(
+        endpoint=settings.lookup_endpoint,
+        bearer=settings.lookup_bearer,
+        ssl_context=ssl.create_default_context(cafile=settings.lookup_ca_file),
+    )
+
+
 def preflight(engine: Engine, client: SqsClient, settings: Ct15Settings) -> dict[str, str]:
     """Read metadata only; never receive/delete/send a message or migrate a DB."""
     with engine.connect() as connection:
         if not _isolated_name(connection.scalar(text("SELECT current_database()")) or ""):
             raise Ct15ConfigurationError("isolated CT15 database required")
         revisions = tuple(connection.scalars(text("SELECT version_num FROM alembic_version")).all())
-        if revisions != ("0010_private_deletion_scope_v2",):
+        if revisions != (_MIGRATION_HEAD,):
             raise Ct15ConfigurationError("CT15 collection runtime migration required")
         for table in (PrivateStagedOutbox, PrivateCommitGateAck):
             connection.execute(select(table.delivered_at).limit(0))
@@ -324,8 +359,11 @@ def run_loop(
     stop: Event,
     *,
     authority_provider: PrivateWriteAuthorityProvider | None = None,
+    private_authority_client: RelayAuthorityClient | None = None,
 ) -> int:
     """Finish the current bounded transaction on SIGTERM, then stop receiving."""
+    if private_authority_client is None:
+        return 1
     while not stop.is_set():
         outcome = (
             consume_once(
@@ -333,9 +371,10 @@ def run_loop(
                 queue,
                 expected_sender_id,
                 authority_provider=authority_provider,
+                private_authority_client=private_authority_client,
             )
             if action == "consume"
-            else relay_once(sessions, queue)
+            else relay_once(sessions, queue, authority_client=private_authority_client)
         )
         if outcome.status != "EMPTY":
             print(json.dumps({"status": outcome.status}), flush=True)
@@ -372,6 +411,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         sessions = sessionmaker(engine, expire_on_commit=False)
         client = create_sqs_client(settings)
         preflight(engine, client, settings)
+        private_authority_client = (
+            create_private_authority_client(settings)
+            if args.action in {"consume-once", "relay-once", "consume", "relay"}
+            else None
+        )
         result: dict[str, object]
         if args.action == "preflight":
             result = {"status": "PREFLIGHT_PASSED", "scope": "metadata_only"}
@@ -406,6 +450,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     SqsGateQueue(client, settings),
                     settings.expected_w1_sender_id,
                     stop,
+                    private_authority_client=private_authority_client,
                 )
             finally:
                 for sig, handler in previous.items():
@@ -413,9 +458,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             queue = SqsGateQueue(client, settings)
             outcome = (
-                consume_once(sessions, queue, settings.expected_w1_sender_id)
+                consume_once(
+                    sessions,
+                    queue,
+                    settings.expected_w1_sender_id,
+                    private_authority_client=private_authority_client,
+                )
                 if args.action == "consume-once"
-                else relay_once(sessions, queue)
+                else relay_once(sessions, queue, authority_client=private_authority_client)
             )
             result = {"status": outcome.status}
         print(json.dumps(result, sort_keys=True))

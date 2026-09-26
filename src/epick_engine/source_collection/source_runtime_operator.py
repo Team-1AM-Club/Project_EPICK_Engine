@@ -33,6 +33,7 @@ from epick_engine.source_collection.commit_gate_runtime import relay_once
 from epick_engine.source_collection.parsing import extract_static_candidate
 from epick_engine.source_collection.persistence import create_session_factory
 from epick_engine.source_collection.source_runtime import (
+    PrivateAuthorityClient,
     build_collection_relay_authorizer,
     consume_source_runtime_once,
     handle_collection_dispatch,
@@ -49,6 +50,7 @@ from epick_engine.source_collection.w1_lookup_client import (
     W1LookupClientError,
     validate_lookup_endpoint,
 )
+from epick_engine.source_collection.w1_private_authority_client import W1PrivateAuthorityClient
 
 _ROLE_ID = re.compile(r"AROA[A-Z0-9]{17}")
 _QUEUE_HOST = re.compile(r"^sqs\.([a-z0-9-]+)\.amazonaws\.com$")
@@ -56,7 +58,7 @@ _QUEUE_ARN = re.compile(
     r"^arn:(?P<partition>aws(?:-us-gov|-cn)?):sqs:(?P<region>[a-z0-9-]+):"
     r"(?P<account>[0-9]{12}):(?P<name>[A-Za-z0-9_-]+)$"
 )
-_MIGRATION_HEAD = "0010_private_deletion_scope_v2"
+_MIGRATION_HEAD = "0011_private_ack_control_retention"
 _RUNTIME_CONFIG_PATH = "/run/epick/source-runtime/config.json"
 _LOOKUP_CA_PATH = "/run/epick/source-runtime/w1-ca.pem"
 _STATIC_AWS_CONFIGURATION = frozenset(
@@ -471,6 +473,7 @@ class RuntimeDependencies:
     collection_handler: object
     gate_applier: object
     relay_authorizer: object
+    private_authority_client: PrivateAuthorityClient
     claim_lease_seconds: int
     visibility_heartbeat_seconds: float
 
@@ -484,6 +487,7 @@ def build_runtime_dependencies(
     collection_handler: object,
     gate_applier: object,
     relay_lookup_client: object,
+    private_authority_client: PrivateAuthorityClient,
     clock: Callable[[], datetime],
     message_id_factory: Callable[[], UUID],
 ) -> RuntimeDependencies:
@@ -495,7 +499,7 @@ def build_runtime_dependencies(
         raise SourceRuntimeConfigurationError("source runtime dependency is invalid")
     # Keeping these boundaries explicit is intentional even though queue and DB
     # work happens only when run_action invokes the Task 7 runtime.
-    if client is None or session_factory is None:
+    if client is None or session_factory is None or private_authority_client is None:
         raise SourceRuntimeConfigurationError("source runtime dependency is invalid")
     runtime_config = _load_runtime_config(settings)
     claim_lease_seconds = runtime_config.claim_lease_seconds
@@ -507,6 +511,7 @@ def build_runtime_dependencies(
         collection_handler=collection_handler,
         gate_applier=gate_applier,
         relay_authorizer=build_collection_relay_authorizer(cast(Any, relay_lookup_client)),
+        private_authority_client=private_authority_client,
         claim_lease_seconds=claim_lease_seconds,
         visibility_heartbeat_seconds=heartbeat_seconds,
     )
@@ -541,6 +546,7 @@ def run_action(
     collection_handler: object,
     gate_applier: object,
     relay_authorizer: object,
+    private_authority_client: PrivateAuthorityClient | None,
     clock: Callable[[], datetime],
     message_id_factory: Callable[[], UUID],
     claim_lease_seconds: int,
@@ -548,6 +554,9 @@ def run_action(
     stop: Event | None = None,
 ) -> object:
     """Execute one bounded Task 7 action or a signal-aware alternating loop."""
+
+    if private_authority_client is None:
+        raise SourceRuntimeConfigurationError("source runtime dependency is invalid")
 
     if action == "consume-once":
         return consume_source_runtime_once(
@@ -557,6 +566,7 @@ def run_action(
             mode=cast(Any, mode),
             collection_handler=cast(Any, collection_handler),
             gate_applier=cast(Any, gate_applier),
+            private_authority_client=private_authority_client,
             clock=clock,
             message_id_factory=message_id_factory,
             visibility_heartbeat_seconds=visibility_heartbeat_seconds,
@@ -566,6 +576,7 @@ def run_action(
             cast(Any, session_factory),
             cast(Any, queue),
             clock=clock,
+            authority_client=private_authority_client,
             before_send=cast(Any, relay_authorizer),
             claim_lease_seconds=claim_lease_seconds,
         )
@@ -582,6 +593,7 @@ def run_action(
             collection_handler=collection_handler,
             gate_applier=gate_applier,
             relay_authorizer=relay_authorizer,
+            private_authority_client=private_authority_client,
             clock=clock,
             message_id_factory=message_id_factory,
             claim_lease_seconds=claim_lease_seconds,
@@ -596,6 +608,7 @@ def run_action(
             collection_handler=collection_handler,
             gate_applier=gate_applier,
             relay_authorizer=relay_authorizer,
+            private_authority_client=private_authority_client,
             clock=clock,
             message_id_factory=message_id_factory,
             claim_lease_seconds=claim_lease_seconds,
@@ -682,10 +695,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         runtime_config = _load_runtime_config(settings)
         session_factory = create_session_factory(engine)
+        ssl_context = ssl.create_default_context(cafile=settings.lookup_ca_file)
         lookup_client = W1LookupClient(
             endpoint=settings.lookup_endpoint,
             bearer=settings.lookup_bearer,
-            ssl_context=ssl.create_default_context(cafile=settings.lookup_ca_file),
+            ssl_context=ssl_context,
+        )
+        private_authority_client = W1PrivateAuthorityClient(
+            endpoint=settings.lookup_endpoint,
+            bearer=settings.lookup_bearer,
+            ssl_context=ssl_context,
         )
         input_provider = SqlAlchemyCollectionInputProvider(session_factory, runtime_config)
         collection_handler = partial(
@@ -707,6 +726,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             collection_handler=collection_handler,
             gate_applier=apply_collection_commit_gate,
             relay_lookup_client=lookup_client,
+            private_authority_client=private_authority_client,
             clock=_utc_now,
             message_id_factory=uuid4,
         )
@@ -734,6 +754,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 collection_handler=dependencies.collection_handler,
                 gate_applier=dependencies.gate_applier,
                 relay_authorizer=dependencies.relay_authorizer,
+                private_authority_client=dependencies.private_authority_client,
                 clock=_utc_now,
                 message_id_factory=uuid4,
                 claim_lease_seconds=dependencies.claim_lease_seconds,
@@ -750,6 +771,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 collection_handler=dependencies.collection_handler,
                 gate_applier=dependencies.gate_applier,
                 relay_authorizer=dependencies.relay_authorizer,
+                private_authority_client=dependencies.private_authority_client,
                 clock=_utc_now,
                 message_id_factory=uuid4,
                 claim_lease_seconds=dependencies.claim_lease_seconds,
