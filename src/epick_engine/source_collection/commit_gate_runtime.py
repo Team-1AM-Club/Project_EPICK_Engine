@@ -25,19 +25,28 @@ from epick_engine.source_collection.commit_gate_store import (
     PrivateStagedOutbox,
     _lock_command,
     apply_commit_gate,
+    cleanup_terminal_staged_outbox,
 )
+from epick_engine.source_collection.persistence import PrivateDeletionOwnerState
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.private_scope import (
     PrivateGateAuthority,
+    PrivateScopeRejected,
+    PrivateTerminalCleanupAuthority,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
     lock_private_write_scope,
 )
+from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
 from epick_engine.source_collection.w1_private_authority_contracts import (
+    CleanupKind,
     GateAuthorityResponse,
     GatePhase,
     GateScopeLookupResponse,
+    PrivateWriteAuthorityResponse,
+    TerminalCleanupAuthorityResponse,
     W1GateBinding,
+    W1PrivateBinding,
 )
 from epick_engine.source_collection.w1_transport import W1WireContractError
 
@@ -114,6 +123,21 @@ class GateAuthorityClient(Protocol):
     ) -> GateAuthorityResponse: ...
 
 
+class RelayAuthorityClient(GateAuthorityClient, Protocol):
+    def authorize_write(
+        self,
+        binding: W1PrivateBinding,
+        scope: PrivateDeletionScope,
+    ) -> PrivateWriteAuthorityResponse: ...
+
+    def authorize_terminal_cleanup(
+        self,
+        binding: W1PrivateBinding,
+        scope: PrivateDeletionScope,
+        cleanup_kind: CleanupKind,
+    ) -> TerminalCleanupAuthorityResponse: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ConsumeResult:
     status: ConsumeStatus
@@ -122,6 +146,28 @@ class ConsumeResult:
 @dataclass(frozen=True, slots=True)
 class RelayResult:
     status: RelayStatus
+
+
+class _CurrentWriteSemanticallyDenied(RuntimeError):
+    """A W1 HTTP 403 that permits only an exact terminal-cleanup attempt."""
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedRelaySubject:
+    binding: W1PrivateBinding
+    scope: PrivateDeletionScope
+    body: str
+    payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _AckRelaySubject:
+    ack: CommitGateAckProposal
+    body: str
+    payload: dict[str, object]
+
+
+type _RelaySubject = _StagedRelaySubject | _AckRelaySubject
 
 
 def _utc_now() -> datetime:
@@ -191,12 +237,21 @@ def _get_relay_outbox(
     return session.get(PrivateCommitGateAck, message_id, populate_existing=True)
 
 
-def _stored_private_scope(session: Session, command_id: UUID) -> PrivateWriteScope | None:
+def _stored_relay_binding(
+    session: Session,
+    command_id: UUID,
+) -> tuple[W1PrivateBinding, PrivateDeletionScope] | None:
     stage = session.get(PrivateCommitStage, command_id, populate_existing=True)
     if stage is None or stage.private_scope_kind not in {"ACCOUNT", "PROJECT"}:
         return None
     try:
-        epoch = int(stage.owner_deletion_epoch)
+        owner_deletion_epoch = int(stage.owner_deletion_epoch)
+        execution_fence = int(stage.execution_fence)
+        if (
+            str(owner_deletion_epoch) != stage.owner_deletion_epoch
+            or str(execution_fence) != stage.execution_fence
+        ):
+            raise ValueError
         kind: Literal["ACCOUNT", "PROJECT"] = (
             "ACCOUNT" if stage.private_scope_kind == "ACCOUNT" else "PROJECT"
         )
@@ -204,38 +259,87 @@ def _stored_private_scope(session: Session, command_id: UUID) -> PrivateWriteSco
             kind=kind,
             project_id=stage.project_id,
         )
-        return PrivateWriteScope(
-            PrivateWriteAuthorityDecision(
+        return (
+            W1PrivateBinding(
                 owner_user_id=stage.owner_ref,
-                owner_deletion_epoch=epoch,
-                scope=scope,
-                authority_ref="w2:persisted-private-commit-stage",
+                owner_deletion_epoch=owner_deletion_epoch,
                 command_id=stage.command_id,
                 job_id=stage.job_id,
-            )
+                execution_fence=execution_fence,
+            ),
+            scope,
         )
     except (TypeError, ValueError):
         return None
 
 
-def _lock_relay_owner_scope(session: Session, command_id: UUID) -> PrivateWriteScope:
-    proof = _stored_private_scope(session, command_id)
-    if proof is None:
+def _private_response_matches(
+    response: PrivateWriteAuthorityResponse | TerminalCleanupAuthorityResponse,
+    binding: W1PrivateBinding,
+) -> bool:
+    return (
+        response.owner_user_id == binding.owner_user_id
+        and response.owner_deletion_epoch == binding.owner_deletion_epoch
+        and response.command_id == binding.command_id
+        and response.job_id == binding.job_id
+        and response.execution_fence == binding.execution_fence
+    )
+
+
+def _authorize_staged_relay(
+    subject: _StagedRelaySubject,
+    authority_client: RelayAuthorityClient,
+) -> PrivateWriteScope:
+    try:
+        response = authority_client.authorize_write(subject.binding, subject.scope)
+    except W1LookupClientError as exc:
+        if exc.code == "HTTP_403":
+            raise _CurrentWriteSemanticallyDenied from exc
+        raise RuntimeError("W1 private relay authority is invalid") from exc
+    except Exception as exc:
+        raise RuntimeError("W1 private relay authority is invalid") from exc
+    if (
+        not isinstance(response, PrivateWriteAuthorityResponse)
+        or not _private_response_matches(response, subject.binding)
+        or response.scope != subject.scope.to_mapping()
+    ):
+        raise RuntimeError("W1 private relay authority is invalid")
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=subject.binding.owner_user_id,
+            owner_deletion_epoch=subject.binding.owner_deletion_epoch,
+            scope=subject.scope,
+            authority_ref=response.authority_ref,
+            command_id=subject.binding.command_id,
+            job_id=subject.binding.job_id,
+        )
+    )
+
+
+def _lock_staged_relay_scope(
+    session: Session,
+    command_id: UUID,
+    subject: _StagedRelaySubject,
+    decision: PrivateWriteScope,
+    *,
+    lock_command: bool,
+) -> None:
+    lock_private_write_scope(session, decision)
+    if lock_command:
+        _lock_command(session, command_id)
+    current = _stored_relay_binding(session, command_id)
+    if current != (subject.binding, subject.scope):
         raise RuntimeError("persisted private relay scope unavailable")
-    lock_private_write_scope(session, proof)
-    current = _stored_private_scope(session, command_id)
-    if current != proof:
-        raise RuntimeError("persisted private relay scope changed")
-    return proof
 
 
-def _lock_relay_scope(session: Session, command_id: UUID) -> PrivateWriteScope:
-    proof = _lock_relay_owner_scope(session, command_id)
-    _lock_command(session, command_id)
-    current = _stored_private_scope(session, command_id)
-    if current != proof:
-        raise RuntimeError("persisted private relay scope changed")
-    return proof
+def _lock_ack_owner(session: Session, decision: PrivateGateAuthority) -> None:
+    owner = session.scalar(
+        select(PrivateDeletionOwnerState)
+        .where(PrivateDeletionOwnerState.owner_user_id == decision.owner_user_id)
+        .with_for_update()
+    )
+    if owner is None:
+        raise PrivateScopeRejected("private ACK relay owner state was not found")
 
 
 def _gate_response_matches(
@@ -276,6 +380,206 @@ def _persisted_gate_scope(session: Session, gate: CommitGateCommand) -> PrivateD
     if stage.private_scope_kind == "PROJECT" and isinstance(stage.project_id, UUID):
         return PrivateDeletionScope(kind="PROJECT", project_id=stage.project_id)
     raise RuntimeError("persisted private gate scope is unclassified")
+
+
+def _persisted_ack_scope(
+    session: Session,
+    ack: CommitGateAckProposal,
+) -> PrivateDeletionScope | None:
+    stage = session.get(PrivateCommitStage, ack.command_id, populate_existing=True)
+    if stage is None:
+        return None
+    if (
+        stage.owner_ref != ack.authenticated_owner_ref
+        or stage.job_id != ack.job_id
+        or stage.execution_fence != str(ack.execution_fence)
+        or stage.owner_deletion_epoch != str(ack.owner_deletion_epoch)
+        or stage.result_digest != ack.result_digest
+    ):
+        raise RuntimeError("persisted private ACK binding does not match")
+    if stage.private_scope_kind == "UNKNOWN":
+        return None
+    if stage.private_scope_kind == "ACCOUNT" and stage.project_id is None:
+        return PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    if stage.private_scope_kind == "PROJECT" and isinstance(stage.project_id, UUID):
+        return PrivateDeletionScope(kind="PROJECT", project_id=stage.project_id)
+    raise RuntimeError("persisted private ACK scope is unclassified")
+
+
+def _resolve_ack_relay_authority(
+    session_factory: SessionFactory,
+    ack: CommitGateAckProposal,
+    authority_client: GateAuthorityClient,
+) -> PrivateGateAuthority:
+    binding = W1GateBinding.from_ack(ack)
+    with session_factory() as session:
+        scope = _persisted_ack_scope(session, ack)
+    if scope is None:
+        lookup = authority_client.lookup_gate_scope(binding, "ACK_RELAY")
+        if not isinstance(lookup, GateScopeLookupResponse) or not _gate_response_matches(
+            lookup,
+            binding,
+            phase="ACK_RELAY",
+        ):
+            raise RuntimeError("W1 ACK relay scope lookup is invalid")
+        try:
+            scope = PrivateDeletionScope.from_mapping(lookup.scope)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise RuntimeError("W1 ACK relay scope lookup is invalid") from exc
+    response = authority_client.authorize_gate(binding, "ACK_RELAY", scope)
+    if (
+        not isinstance(response, GateAuthorityResponse)
+        or not _gate_response_matches(response, binding, phase="ACK_RELAY")
+        or response.scope != scope.to_mapping()
+    ):
+        raise RuntimeError("W1 ACK relay authority is invalid")
+    decision = PrivateGateAuthority.from_w1_response(response)
+    if decision.scope != scope:
+        raise RuntimeError("W1 ACK relay authority scope is invalid")
+    return decision
+
+
+def _parse_ack_subject(
+    outbox: PrivateCommitGateAck,
+    *,
+    message_id: UUID,
+    command_id: UUID,
+) -> _AckRelaySubject:
+    body = _wire_body(outbox.payload)
+    try:
+        ack = CommitGateAckProposal.model_validate_json(body, strict=True)
+    except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+        raise RuntimeError("persisted private ACK body is invalid") from exc
+    if ack.message_id != message_id or ack.command_id != command_id:
+        raise RuntimeError("persisted private ACK identity does not match")
+    return _AckRelaySubject(
+        ack=ack,
+        body=body,
+        payload=_strict_json_object(body, max_bytes=MAX_OUTBOUND_MESSAGE_BYTES),
+    )
+
+
+def _load_relay_subject(
+    session_factory: SessionFactory,
+    kind: Literal["STAGED", "ACK"],
+    message_id: UUID,
+    command_id: UUID,
+    *,
+    expected_body: str | None = None,
+) -> _RelaySubject:
+    with session_factory() as session:
+        outbox = _get_relay_outbox(session, kind, message_id)
+        if (
+            outbox is None
+            or outbox.command_id != command_id
+            or outbox.delivered_at is not None
+            or outbox.payload is None
+        ):
+            raise RuntimeError("persisted private relay outbox is unavailable")
+        if kind == "ACK":
+            if not isinstance(outbox, PrivateCommitGateAck):
+                raise RuntimeError("persisted private ACK outbox is invalid")
+            subject: _RelaySubject = _parse_ack_subject(
+                outbox,
+                message_id=message_id,
+                command_id=command_id,
+            )
+        else:
+            stored = _stored_relay_binding(session, command_id)
+            if stored is None:
+                raise RuntimeError("persisted private relay binding is unavailable")
+            binding, scope = stored
+            body = _wire_body(outbox.payload)
+            subject = _StagedRelaySubject(
+                binding=binding,
+                scope=scope,
+                body=body,
+                payload=_strict_json_object(body, max_bytes=MAX_OUTBOUND_MESSAGE_BYTES),
+            )
+    if expected_body is not None and subject.body != expected_body:
+        raise RuntimeError("persisted private relay body changed")
+    return subject
+
+
+def _authorize_relay_subject(
+    session_factory: SessionFactory,
+    subject: _RelaySubject,
+    authority_client: RelayAuthorityClient,
+) -> PrivateWriteScope | PrivateGateAuthority:
+    if isinstance(subject, _StagedRelaySubject):
+        return _authorize_staged_relay(subject, authority_client)
+    return _resolve_ack_relay_authority(session_factory, subject.ack, authority_client)
+
+
+def _lock_relay_subject(
+    session: Session,
+    command_id: UUID,
+    subject: _RelaySubject,
+    decision: PrivateWriteScope | PrivateGateAuthority,
+    *,
+    lock_command: bool,
+) -> None:
+    if isinstance(subject, _StagedRelaySubject):
+        if not isinstance(decision, PrivateWriteScope):
+            raise PrivateScopeRejected("a current-write relay decision is required")
+        _lock_staged_relay_scope(
+            session,
+            command_id,
+            subject,
+            decision,
+            lock_command=lock_command,
+        )
+        return
+    if not isinstance(decision, PrivateGateAuthority) or decision.phase != "ACK_RELAY":
+        raise PrivateScopeRejected("an ACK_RELAY gate decision is required")
+    binding = W1GateBinding.from_ack(subject.ack)
+    if (
+        decision.owner_user_id != binding.private.owner_user_id
+        or decision.owner_deletion_epoch != binding.private.owner_deletion_epoch
+        or decision.command_id != binding.private.command_id
+        or decision.job_id != binding.private.job_id
+        or decision.execution_fence != binding.private.execution_fence
+        or decision.operation_id != binding.operation_id
+        or decision.operation_revision != binding.operation_revision
+        or decision.action != binding.action
+        or decision.result_digest != binding.result_digest
+        or decision.purge_owner_deletion_epoch != binding.purge_owner_deletion_epoch
+    ):
+        raise PrivateScopeRejected("private ACK_RELAY authority binding does not match")
+    _lock_ack_owner(session, decision)
+    if lock_command:
+        _lock_command(session, command_id)
+    local_scope = _persisted_ack_scope(session, subject.ack)
+    if local_scope is not None and local_scope != decision.scope:
+        raise PrivateScopeRejected("private ACK_RELAY scope does not match")
+
+
+def _cleanup_denied_staged(
+    session_factory: SessionFactory,
+    subject: _StagedRelaySubject,
+    authority_client: RelayAuthorityClient,
+) -> None:
+    response = authority_client.authorize_terminal_cleanup(
+        subject.binding,
+        subject.scope,
+        "STAGED_OUTBOX",
+    )
+    if (
+        not isinstance(response, TerminalCleanupAuthorityResponse)
+        or not _private_response_matches(response, subject.binding)
+        or response.scope != subject.scope.to_mapping()
+        or response.cleanup_kind != "STAGED_OUTBOX"
+        or response.allowed_effect != "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY"
+    ):
+        raise RuntimeError("W1 terminal STAGED cleanup authority is invalid")
+    decision = PrivateTerminalCleanupAuthority.from_w1_response(response)
+    decision.assert_bound_to(subject.binding, cleanup_kind="STAGED_OUTBOX")
+    with session_factory.begin() as session:
+        cleanup_terminal_staged_outbox(
+            session,
+            subject.binding.command_id,
+            private_cleanup_authority=decision,
+        )
 
 
 def _resolve_gate_apply_authority(
@@ -381,26 +685,52 @@ def relay_once(
     *,
     clock: Callable[[], datetime] = _utc_now,
     command_id: UUID | None = None,
+    authority_client: RelayAuthorityClient | None = None,
     before_send: BeforeSend | None = None,
     claim_token_factory: Callable[[], object] = uuid4,
     claim_lease_seconds: int = DEFAULT_RELAY_CLAIM_LEASE_SECONDS,
 ) -> RelayResult:
     """Relay one persisted wire, optionally scoped to a synthetic command."""
 
-    claimed: tuple[Literal["STAGED", "ACK"], UUID, UUID, UUID] | None = None
+    claimed: tuple[Literal["STAGED", "ACK"], UUID, UUID, UUID, str] | None = None
 
     def release_claim() -> None:
-        if claimed is None:
+        if claimed is None or authority_client is None:
             return
-        kind, message_id, claimed_command_id, claim_token = claimed
+        kind, message_id, claimed_command_id, claim_token, claimed_body = claimed
         try:
+            subject = _load_relay_subject(
+                session_factory,
+                kind,
+                message_id,
+                claimed_command_id,
+                expected_body=claimed_body,
+            )
+            try:
+                decision = _authorize_relay_subject(
+                    session_factory,
+                    subject,
+                    authority_client,
+                )
+            except _CurrentWriteSemanticallyDenied:
+                if isinstance(subject, _StagedRelaySubject):
+                    _cleanup_denied_staged(session_factory, subject, authority_client)
+                return
             with session_factory.begin() as session:
-                _lock_relay_scope(session, claimed_command_id)
+                _lock_relay_subject(
+                    session,
+                    claimed_command_id,
+                    subject,
+                    decision,
+                    lock_command=True,
+                )
                 outbox = _get_relay_outbox(session, kind, message_id)
                 if (
                     outbox is not None
                     and outbox.delivered_at is None
                     and outbox.relay_claim_token == claim_token
+                    and outbox.payload is not None
+                    and _wire_body(outbox.payload) == claimed_body
                 ):
                     outbox.relay_claim_token = None
                     outbox.relay_claim_expires_at = None
@@ -462,13 +792,40 @@ def relay_once(
                 candidate = None if ack is None else ("ACK", ack.message_id, ack.command_id)
         if candidate is None:
             return RelayResult(status="EMPTY")
+        if authority_client is None:
+            return RelayResult(status="SEND_FAILED")
 
         kind, message_id, candidate_command_id = candidate
         claim_token = claim_token_factory()
         if not isinstance(claim_token, UUID):
             return RelayResult(status="SEND_FAILED")
+        subject = _load_relay_subject(
+            session_factory,
+            kind,
+            message_id,
+            candidate_command_id,
+        )
+        try:
+            claim_decision = _authorize_relay_subject(
+                session_factory,
+                subject,
+                authority_client,
+            )
+        except _CurrentWriteSemanticallyDenied:
+            if isinstance(subject, _StagedRelaySubject):
+                try:
+                    _cleanup_denied_staged(session_factory, subject, authority_client)
+                except Exception:
+                    pass
+            return RelayResult(status="SEND_FAILED")
         with session_factory.begin() as session:
-            _lock_relay_scope(session, candidate_command_id)
+            _lock_relay_subject(
+                session,
+                candidate_command_id,
+                subject,
+                claim_decision,
+                lock_command=True,
+            )
             outbox = _get_relay_outbox(session, kind, message_id)
             db_now = session.scalar(select(func.clock_timestamp()))
             if not isinstance(db_now, datetime) or db_now.tzinfo is None:
@@ -490,17 +847,32 @@ def relay_once(
             payload = outbox.payload
             if payload is None:
                 return RelayResult(status="EMPTY")
-            body = _wire_body(payload)
-            authorized_payload = _strict_json_object(
-                body,
-                max_bytes=MAX_OUTBOUND_MESSAGE_BYTES,
-            )
+            if _wire_body(payload) != subject.body:
+                raise RuntimeError("persisted queue payload changed during relay claim")
             outbox.relay_claim_token = claim_token
             outbox.relay_claim_expires_at = db_now + timedelta(seconds=claim_lease_seconds)
-        claimed = (kind, message_id, candidate_command_id, claim_token)
+        claimed = (kind, message_id, candidate_command_id, claim_token, subject.body)
 
+        send_subject = _load_relay_subject(
+            session_factory,
+            kind,
+            message_id,
+            candidate_command_id,
+            expected_body=subject.body,
+        )
+        send_decision = _authorize_relay_subject(
+            session_factory,
+            send_subject,
+            authority_client,
+        )
         with session_factory.begin() as session:
-            private_scope = _lock_relay_owner_scope(session, candidate_command_id)
+            _lock_relay_subject(
+                session,
+                candidate_command_id,
+                send_subject,
+                send_decision,
+                lock_command=False,
+            )
             outbox = _get_relay_outbox(session, kind, message_id)
             if (
                 outbox is None
@@ -511,14 +883,24 @@ def relay_once(
             ):
                 raise RuntimeError("persisted queue payload changed during relay authorization")
             payload = outbox.payload
-            if payload is None or _wire_body(payload) != body:
+            if payload is None or _wire_body(payload) != send_subject.body:
                 raise RuntimeError("persisted queue payload changed during relay authorization")
             if before_send is not None:
-                before_send(kind, authorized_payload)
-            queue.send(body)
+                before_send(kind, send_subject.payload)
+            queue.send(send_subject.body)
             _lock_command(session, candidate_command_id)
-            if _stored_private_scope(session, candidate_command_id) != private_scope:
-                raise RuntimeError("persisted private relay scope changed")
+            if isinstance(send_subject, _StagedRelaySubject):
+                if _stored_relay_binding(session, candidate_command_id) != (
+                    send_subject.binding,
+                    send_subject.scope,
+                ):
+                    raise RuntimeError("persisted private relay scope changed")
+            else:
+                if not isinstance(send_decision, PrivateGateAuthority):
+                    raise RuntimeError("private ACK relay authority changed")
+                local_scope = _persisted_ack_scope(session, send_subject.ack)
+                if local_scope is not None and local_scope != send_decision.scope:
+                    raise RuntimeError("persisted private ACK scope changed")
             outbox = _get_relay_outbox(session, kind, message_id)
             if (
                 outbox is None
@@ -527,7 +909,7 @@ def relay_once(
                 or outbox.relay_claim_token != claim_token
                 or outbox.relay_claim_expires_at is None
                 or outbox.payload is None
-                or _wire_body(outbox.payload) != body
+                or _wire_body(outbox.payload) != send_subject.body
             ):
                 raise RuntimeError("persisted queue payload changed during relay send")
             outbox.delivered_at = clock()

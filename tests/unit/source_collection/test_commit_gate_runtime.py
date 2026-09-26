@@ -13,6 +13,7 @@ import pytest
 from epick_engine.source_collection import commit_gate_runtime, commit_gate_store
 from epick_engine.source_collection.commit_gate_contracts import (
     CommitGateCommand,
+    build_commit_gate_ack,
     parse_commit_gate_command,
 )
 from epick_engine.source_collection.commit_gate_runtime import (
@@ -647,3 +648,100 @@ def test_gate_apply_rejects_authorize_failure_before_transaction(
     assert session_factory.begin_calls == 0
     assert apply_calls == []
     assert queue.deleted == []
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+        PrivateDeletionScope(
+            kind="PROJECT",
+            project_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        ),
+    ],
+    ids=["ACCOUNT", "PROJECT"],
+)
+def test_ack_relay_authority_resolves_stage_less_scope_without_guessing(scope) -> None:
+    gate, _delivery = _gate_delivery("ABORT")
+    ack = build_commit_gate_ack(
+        gate,
+        outcome="APPLIED",
+        message_id=uuid4(),
+        occurred_at=datetime(2026, 9, 27, tzinfo=UTC),
+    )
+    sessions = GateSessionFactory()
+    client = FakeGateAuthorityClient(scope=scope)
+
+    authority = commit_gate_runtime._resolve_ack_relay_authority(sessions, ack, client)
+
+    assert authority.phase == "ACK_RELAY"
+    assert authority.scope == scope
+    assert client.lookup_calls == [(W1GateBinding.from_ack(ack), "ACK_RELAY")]
+    assert client.authorize_calls == [(W1GateBinding.from_ack(ack), "ACK_RELAY", scope)]
+    assert sessions.begin_calls == 0
+
+
+def test_ack_relay_authority_uses_stage_as_binding_not_authority() -> None:
+    gate, _delivery = _gate_delivery("ABORT")
+    ack = build_commit_gate_ack(
+        gate,
+        outcome="APPLIED",
+        message_id=uuid4(),
+        occurred_at=datetime(2026, 9, 27, tzinfo=UTC),
+    )
+    stage = PersistedStage(
+        command_id=ack.command_id,
+        owner_ref=ack.authenticated_owner_ref,
+        job_id=ack.job_id,
+        execution_fence=str(ack.execution_fence),
+        owner_deletion_epoch=str(ack.owner_deletion_epoch),
+        result_digest=ack.result_digest,
+        private_scope_kind="ACCOUNT",
+        project_id=None,
+    )
+    sessions = GateSessionFactory(stage)
+    client = FakeGateAuthorityClient(scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None))
+
+    authority = commit_gate_runtime._resolve_ack_relay_authority(sessions, ack, client)
+
+    assert authority.authority_ref == "w1:test-gate-apply-authority"
+    assert authority.phase == "ACK_RELAY"
+    assert client.lookup_calls == []
+    assert client.authorize_calls == [
+        (
+            W1GateBinding.from_ack(ack),
+            "ACK_RELAY",
+            PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+        )
+    ]
+
+
+def test_ack_relay_scope_lookup_rejects_changed_echo_without_candidate_probe() -> None:
+    gate, _delivery = _gate_delivery("ABORT")
+    ack = build_commit_gate_ack(
+        gate,
+        outcome="APPLIED",
+        message_id=uuid4(),
+        occurred_at=datetime(2026, 9, 27, tzinfo=UTC),
+    )
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+
+    class ChangedEchoClient(FakeGateAuthorityClient):
+        def lookup_gate_scope(
+            self,
+            gate: W1GateBinding,
+            phase: str,
+        ) -> GateScopeLookupResponse:
+            response = super().lookup_gate_scope(gate, phase)
+            return response.model_copy(
+                update={"operation_revision": response.operation_revision + 1}
+            )
+
+    sessions = GateSessionFactory()
+    client = ChangedEchoClient(scope=scope)
+
+    with pytest.raises(RuntimeError, match="scope lookup is invalid"):
+        commit_gate_runtime._resolve_ack_relay_authority(sessions, ack, client)
+
+    assert client.lookup_calls == [(W1GateBinding.from_ack(ack), "ACK_RELAY")]
+    assert client.authorize_calls == []

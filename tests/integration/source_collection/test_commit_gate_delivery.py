@@ -24,10 +24,12 @@ from epick_engine.source_collection.commit_gate_contracts import (
 )
 from epick_engine.source_collection.commit_gate_runtime import (
     QueueDelivery,
-    relay_once,
 )
 from epick_engine.source_collection.commit_gate_runtime import (
     consume_once as _consume_once,
+)
+from epick_engine.source_collection.commit_gate_runtime import (
+    relay_once as _relay_once,
 )
 from epick_engine.source_collection.commit_gate_store import (
     CommitGateRejected,
@@ -57,9 +59,11 @@ from epick_engine.source_collection.private_scope import (
     PrivateWriteScope,
 )
 from epick_engine.source_collection.source_runtime import build_collection_relay_authorizer
+from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
 from epick_engine.source_collection.w1_private_authority_contracts import (
     GateAuthorityResponse,
     GateScopeLookupResponse,
+    PrivateWriteAuthorityResponse,
     TerminalCleanupAuthorityResponse,
     W1GateBinding,
     W1PrivateBinding,
@@ -254,16 +258,40 @@ def _gate_authority(gate: CommitGateCommand) -> PrivateGateAuthority:
 
 
 class _GateAuthorityClient:
+    def __init__(
+        self,
+        *,
+        gate_scope: PrivateDeletionScope | None = None,
+        expected_gate: W1GateBinding | None = None,
+        lookup_error: Exception | None = None,
+        authorize_gate_error: Exception | None = None,
+        authorize_write_error: Exception | None = None,
+    ) -> None:
+        self.gate_scope = gate_scope or PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+        self.expected_gate = expected_gate
+        self.lookup_error = lookup_error
+        self.authorize_gate_error = authorize_gate_error
+        self.authorize_write_error = authorize_write_error
+        self.lookup_calls: list[tuple[W1GateBinding, str]] = []
+        self.gate_authorize_calls: list[tuple[W1GateBinding, str, PrivateDeletionScope]] = []
+        self.write_authorize_calls: list[tuple[W1PrivateBinding, PrivateDeletionScope]] = []
+        self.cleanup_calls: list[tuple[W1PrivateBinding, PrivateDeletionScope, str]] = []
+
     def lookup_gate_scope(
         self,
         gate: W1GateBinding,
         phase: str,
     ) -> GateScopeLookupResponse:
+        self.lookup_calls.append((gate, phase))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        if self.expected_gate is not None and gate != self.expected_gate:
+            raise W1LookupClientError("HTTP_403")
         return GateScopeLookupResponse.model_validate(
             {
                 "schema_version": "w1.private.w2-gate-scope-lookup.v1",
                 **_gate_payload(gate, phase),
-                "scope": {"type": "ACCOUNT"},
+                "scope": self.gate_scope.to_mapping(),
             }
         )
 
@@ -273,12 +301,60 @@ class _GateAuthorityClient:
         phase: str,
         scope: PrivateDeletionScope,
     ) -> GateAuthorityResponse:
+        self.gate_authorize_calls.append((gate, phase, scope))
+        if self.authorize_gate_error is not None:
+            raise self.authorize_gate_error
+        if self.expected_gate is not None and gate != self.expected_gate:
+            raise W1LookupClientError("HTTP_403")
         return GateAuthorityResponse.model_validate(
             {
                 "schema_version": "w1.private.w2-gate-authority.v1",
                 **_gate_payload(gate, phase),
                 "scope": scope.to_mapping(),
                 "authority_ref": "w1:test-delivery-gate-authority",
+            }
+        )
+
+    def authorize_write(
+        self,
+        binding: W1PrivateBinding,
+        scope: PrivateDeletionScope,
+    ) -> PrivateWriteAuthorityResponse:
+        self.write_authorize_calls.append((binding, scope))
+        if self.authorize_write_error is not None:
+            raise self.authorize_write_error
+        return PrivateWriteAuthorityResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-write-authority.v1",
+                "owner_user_id": binding.owner_user_id,
+                "owner_deletion_epoch": binding.owner_deletion_epoch,
+                "command_id": binding.command_id,
+                "job_id": binding.job_id,
+                "execution_fence": binding.execution_fence,
+                "scope": scope.to_mapping(),
+                "authority_ref": "w1:test-delivery-write-authority",
+            }
+        )
+
+    def authorize_terminal_cleanup(
+        self,
+        binding: W1PrivateBinding,
+        scope: PrivateDeletionScope,
+        cleanup_kind: str,
+    ) -> TerminalCleanupAuthorityResponse:
+        self.cleanup_calls.append((binding, scope, cleanup_kind))
+        return TerminalCleanupAuthorityResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-terminal-cleanup.v1",
+                "owner_user_id": binding.owner_user_id,
+                "owner_deletion_epoch": binding.owner_deletion_epoch,
+                "command_id": binding.command_id,
+                "job_id": binding.job_id,
+                "execution_fence": binding.execution_fence,
+                "scope": scope.to_mapping(),
+                "cleanup_kind": cleanup_kind,
+                "authority_ref": "w1:test-delivery-terminal-cleanup",
+                "allowed_effect": "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY",
             }
         )
 
@@ -296,6 +372,11 @@ def apply_commit_gate(session, gate, **kwargs):
 def consume_once(session_factory, queue, expected_sender_id, **kwargs):
     kwargs.setdefault("private_authority_client", _GateAuthorityClient())
     return _consume_once(session_factory, queue, expected_sender_id, **kwargs)
+
+
+def relay_once(session_factory, queue, **kwargs):
+    kwargs.setdefault("authority_client", _GateAuthorityClient())
+    return _relay_once(session_factory, queue, **kwargs)
 
 
 def _delivery(gate: CommitGateCommand, receipt: str = "synthetic-receipt") -> QueueDelivery:
@@ -487,16 +568,19 @@ def test_send_failure_clears_exact_relay_claim_and_allows_immediate_same_wire_re
     _stage(session_factory, command, result)
     first_token, second_token = uuid4(), uuid4()
     failed_queue = FakeQueue(fail_send=True)
+    failed_authority = _GateAuthorityClient()
 
     first = relay_once(
         session_factory,
         failed_queue,
+        authority_client=failed_authority,
         clock=lambda: NOW,
         claim_token_factory=lambda: first_token,
         claim_lease_seconds=120,
     )
 
     assert first.status == "SEND_FAILED"
+    assert len(failed_authority.write_authorize_calls) == 3
     with session_factory() as session:
         staged = session.scalar(
             select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
@@ -664,7 +748,7 @@ def test_old_failed_relay_cleanup_cannot_clear_a_newer_claim_token(session_facto
         assert staged.relay_claim_expires_at is not None
 
 
-def test_post_send_commit_failure_replays_the_same_persisted_body(session_factory) -> None:
+def test_send_commit_failure_retries_same_body_and_id(session_factory) -> None:
     command, result = _pair()
     _stage(session_factory, command, result)
     queue = FakeQueue()
@@ -694,6 +778,7 @@ def test_post_send_commit_failure_replays_the_same_persisted_body(session_factor
     assert second.status == "SENT"
     assert len(queue.sent) == 2
     assert queue.sent[0] == queue.sent[1]
+    assert json.loads(queue.sent[0])["message_id"] == json.loads(queue.sent[1])["message_id"]
     with session_factory() as session:
         row = session.scalar(
             select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
@@ -1203,6 +1288,314 @@ def test_private_relay_cannot_send_after_competing_deletion_commits(session_fact
     assert after_deletion.sent == []
 
 
+def test_deleted_owner_ack_replays_original_wire(session_factory) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+    assert relay_once(session_factory, FakeQueue()).status == "SENT"
+    gate = _gate(command, result, "PREPARE", operation_id=uuid4(), revision=1)
+    assert (
+        consume_once(
+            session_factory,
+            FakeQueue(deliveries=[_delivery(gate)]),
+            EXPECTED_SENDER_ID,
+        ).status
+        == "APPLIED"
+    )
+    with session_factory.begin() as session:
+        owner = session.get(PrivateDeletionOwnerState, command.authenticated_owner_ref)
+        stage = session.get(PrivateCommitStage, command.command_id)
+        staged = session.scalar(
+            select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
+        )
+        ack = session.scalar(select(PrivateCommitGateAck))
+        assert owner is not None and stage is not None and staged is not None and ack is not None
+        original_id = ack.message_id
+        original_body = json.dumps(
+            ack.payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        owner.latest_epoch = command.owner_deletion_epoch + 1
+        owner.account_deleted = True
+        stage.payload_purged = True
+        stage.result_payload = None
+        staged.payload = None
+
+    authority = _GateAuthorityClient(expected_gate=W1GateBinding.from_gate(gate))
+    outbound = FakeQueue()
+    outcome = relay_once(
+        session_factory,
+        outbound,
+        authority_client=authority,
+        command_id=command.command_id,
+    )
+
+    assert outcome.status == "SENT"
+    assert outbound.sent == [original_body]
+    assert json.loads(outbound.sent[0])["message_id"] == str(original_id)
+    assert authority.write_authorize_calls == []
+    assert [phase for _, phase, _ in authority.gate_authorize_calls] == [
+        "ACK_RELAY",
+        "ACK_RELAY",
+    ]
+
+
+@pytest.mark.parametrize(
+    "gate_scope",
+    [
+        PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+        PrivateDeletionScope(
+            kind="PROJECT", project_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        ),
+    ],
+    ids=["ACCOUNT", "PROJECT"],
+)
+def test_stage_less_ack_scope_lookup_before_relay(session_factory, gate_scope) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+    assert relay_once(session_factory, FakeQueue()).status == "SENT"
+    gate = _gate(command, result, "PREPARE", operation_id=uuid4(), revision=1)
+    assert (
+        consume_once(
+            session_factory,
+            FakeQueue(deliveries=[_delivery(gate)]),
+            EXPECTED_SENDER_ID,
+        ).status
+        == "APPLIED"
+    )
+    with session_factory.begin() as session:
+        stage = session.get(PrivateCommitStage, command.command_id)
+        assert stage is not None
+        stage.private_scope_kind = "UNKNOWN"
+        stage.project_id = None
+
+    authority = _GateAuthorityClient(
+        gate_scope=gate_scope,
+        expected_gate=W1GateBinding.from_gate(gate),
+    )
+    outbound = FakeQueue()
+    outcome = relay_once(
+        session_factory,
+        outbound,
+        authority_client=authority,
+        command_id=command.command_id,
+    )
+
+    assert outcome.status == "SENT"
+    assert len(outbound.sent) == 1
+    assert len(authority.lookup_calls) == 2
+    assert [phase for _, phase in authority.lookup_calls] == ["ACK_RELAY", "ACK_RELAY"]
+    assert [scope for _, _, scope in authority.gate_authorize_calls] == [
+        gate_scope,
+        gate_scope,
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        W1LookupClientError("HTTP_403"),
+        W1LookupClientError("HTTP_503"),
+        W1LookupClientError("TIMEOUT"),
+    ],
+    ids=["missing-historical-outbox-or-403", "503", "timeout"],
+)
+def test_stage_less_ack_scope_lookup_failure_does_not_probe_candidates(
+    session_factory,
+    failure,
+) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+    assert relay_once(session_factory, FakeQueue()).status == "SENT"
+    gate = _gate(command, result, "PREPARE", operation_id=uuid4(), revision=1)
+    assert (
+        consume_once(
+            session_factory,
+            FakeQueue(deliveries=[_delivery(gate)]),
+            EXPECTED_SENDER_ID,
+        ).status
+        == "APPLIED"
+    )
+    with session_factory.begin() as session:
+        stage = session.get(PrivateCommitStage, command.command_id)
+        assert stage is not None
+        stage.private_scope_kind = "UNKNOWN"
+        stage.project_id = None
+
+    authority = _GateAuthorityClient(lookup_error=failure)
+    outbound = FakeQueue()
+    outcome = relay_once(
+        session_factory,
+        outbound,
+        authority_client=authority,
+        command_id=command.command_id,
+    )
+
+    assert outcome.status == "SEND_FAILED"
+    assert outbound.sent == []
+    assert len(authority.lookup_calls) == 1
+    assert authority.lookup_calls[0][1] == "ACK_RELAY"
+    assert authority.gate_authorize_calls == []
+
+
+def test_staged_send_race_with_deletion_is_owner_serialized(session_factory) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+    send_authorize_started = Event()
+    release_send_authorize = Event()
+
+    class BlockingSendAuthority(_GateAuthorityClient):
+        def authorize_write(self, binding, scope):
+            call_number = len(self.write_authorize_calls) + 1
+            if call_number == 2:
+                send_authorize_started.set()
+                if not release_send_authorize.wait(timeout=5):
+                    raise RuntimeError("synthetic send authorization timed out")
+            if call_number >= 3:
+                self.write_authorize_calls.append((binding, scope))
+                raise W1LookupClientError("HTTP_403")
+            return super().authorize_write(binding, scope)
+
+    authority = BlockingSendAuthority()
+    outbound = FakeQueue()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        relay_future = pool.submit(
+            relay_once,
+            session_factory,
+            outbound,
+            authority_client=authority,
+            command_id=command.command_id,
+        )
+        assert send_authorize_started.wait(timeout=5)
+        with session_factory.begin() as session:
+            owner = session.get(PrivateDeletionOwnerState, command.authenticated_owner_ref)
+            assert owner is not None
+            owner.latest_epoch = command.owner_deletion_epoch + 1
+            owner.account_deleted = True
+        release_send_authorize.set()
+        assert relay_future.result(timeout=5).status == "SEND_FAILED"
+
+    assert outbound.sent == []
+    assert len(authority.write_authorize_calls) == 3
+    assert len(authority.cleanup_calls) == 1
+    assert authority.cleanup_calls[0][2] == "STAGED_OUTBOX"
+
+
+def test_changed_ack_body_conflicts(session_factory) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+    assert relay_once(session_factory, FakeQueue()).status == "SENT"
+    gate = _gate(command, result, "PREPARE", operation_id=uuid4(), revision=1)
+    assert (
+        consume_once(
+            session_factory,
+            FakeQueue(deliveries=[_delivery(gate)]),
+            EXPECTED_SENDER_ID,
+        ).status
+        == "APPLIED"
+    )
+    with session_factory.begin() as session:
+        ack = session.scalar(select(PrivateCommitGateAck))
+        assert ack is not None
+        ack.payload = {**ack.payload, "operation_revision": gate.operation_revision + 1}
+
+    authority = _GateAuthorityClient(expected_gate=W1GateBinding.from_gate(gate))
+    outbound = FakeQueue()
+    outcome = relay_once(
+        session_factory,
+        outbound,
+        authority_client=authority,
+        command_id=command.command_id,
+    )
+
+    assert outcome.status == "SEND_FAILED"
+    assert outbound.sent == []
+    assert len(authority.gate_authorize_calls) == 1
+
+
+def test_staged_relay_still_runs_command_lookup(session_factory) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+    lookup = RecordingRelayLookup(
+        LookupResponse(
+            schema_version="w1.private.command-lookup.v1",
+            command_id=command.command_id,
+            status="AVAILABLE",
+            reason_code=None,
+            command=command,
+        )
+    )
+    authority = _GateAuthorityClient()
+    outbound = FakeQueue()
+
+    outcome = relay_once(
+        session_factory,
+        outbound,
+        authority_client=authority,
+        command_id=command.command_id,
+        before_send=build_collection_relay_authorizer(lookup),
+    )
+
+    assert outcome.status == "SENT"
+    assert len(lookup.requests) == 1
+    assert len(authority.write_authorize_calls) == 2
+    assert len(outbound.sent) == 1
+
+
+def test_relay_fails_closed_without_authority_client(session_factory) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+    outbound = FakeQueue()
+
+    outcome = _relay_once(
+        session_factory,
+        outbound,
+        command_id=command.command_id,
+    )
+
+    assert outcome.status == "SEND_FAILED"
+    assert outbound.sent == []
+    with session_factory() as session:
+        staged = session.scalar(
+            select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
+        )
+        assert staged is not None
+        assert staged.relay_claim_token is None
+        assert staged.delivered_at is None
+
+
+def test_denied_staged_relay_uses_only_terminal_cleanup(session_factory) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+    authority = _GateAuthorityClient(authorize_write_error=W1LookupClientError("HTTP_403"))
+    outbound = FakeQueue()
+
+    outcome = relay_once(
+        session_factory,
+        outbound,
+        authority_client=authority,
+        command_id=command.command_id,
+    )
+
+    assert outcome.status == "SEND_FAILED"
+    assert outbound.sent == []
+    assert len(authority.write_authorize_calls) == 1
+    assert len(authority.cleanup_calls) == 1
+    assert authority.cleanup_calls[0][2] == "STAGED_OUTBOX"
+    with session_factory() as session:
+        stage = session.get(PrivateCommitStage, command.command_id)
+        staged = session.scalar(
+            select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
+        )
+        assert stage is not None and staged is not None
+        assert stage.payload_purged is True
+        assert stage.result_payload is None
+        assert staged.payload is None
+
+
 def test_delivery_migration_precedes_the_forward_non_destructive_head() -> None:
     root = Path(__file__).resolve().parents[3]
     scripts = ScriptDirectory.from_config(Config(root / "alembic.ini"))
@@ -1242,6 +1635,7 @@ def test_controlled_ack_loss_recovers_original_wire_with_new_relay(
         ack_id = ack.message_id
         original = ack.payload
     base = FakeQueue()
+    failed_authority = _GateAuthorityClient()
     controlled = ControlledQueue(
         base,
         command=command,
@@ -1250,7 +1644,15 @@ def test_controlled_ack_loss_recovers_original_wire_with_new_relay(
         approved=True,
         expected_sender_id=EXPECTED_SENDER_ID,
     )
-    assert relay_once(session_factory, controlled).status == "SEND_FAILED"
+    assert (
+        relay_once(
+            session_factory,
+            controlled,
+            authority_client=failed_authority,
+        ).status
+        == "SEND_FAILED"
+    )
+    assert len(failed_authority.gate_authorize_calls) == 3
     assert len(base.sent) == initial_sends
     with session_factory() as session:
         ack = session.get(PrivateCommitGateAck, ack_id)

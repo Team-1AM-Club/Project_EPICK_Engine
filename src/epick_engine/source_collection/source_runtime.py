@@ -30,6 +30,7 @@ from epick_engine.source_collection.commit_gate_runtime import (
     ConsumeResult,
     GateApplier,
     QueueDelivery,
+    RelayAuthorityClient,
     _resolve_gate_apply_authority,
     _sender_matches,
     _strict_json_object,
@@ -111,7 +112,7 @@ class RelayLookupClient(Protocol):
     def lookup(self, request: LookupRequest) -> LookupResponse: ...
 
 
-class PrivateAuthorityClient(Protocol):
+class PrivateAuthorityClient(RelayAuthorityClient, Protocol):
     def lookup_current_scope(
         self,
         binding: W1PrivateBinding,
