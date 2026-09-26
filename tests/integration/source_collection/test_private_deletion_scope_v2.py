@@ -925,6 +925,75 @@ def test_0012_backfills_ack_wire_digest_and_matches_metadata(
 
 
 @pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    "legacy_payload",
+    ["legacy-scalar-ack", [{"legacy": "array-ack"}]],
+    ids=["json-scalar", "json-array"],
+)
+def test_0012_invalid_legacy_ack_wire_aborts_and_rolls_back_schema(
+    approved_postgres_url: URL,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_payload: object,
+) -> None:
+    with _migration_schema(approved_postgres_url, monkeypatch) as (engine, config, schema):
+        alembic_command.upgrade(config, "0011_private_ack_control_retention")
+        command_id = uuid4()
+        ack_id = uuid4()
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO private_commit_stages ("
+                    "command_id, owner_ref, job_id, execution_fence, owner_deletion_epoch, "
+                    "result_digest, operation_revision, max_purge_epoch, state, result_payload"
+                    ") VALUES ("
+                    ":command_id, :owner_ref, :job_id, '1', '1', :result_digest, "
+                    "'0', '1', 'STAGED', CAST(:result_payload AS jsonb))"
+                ),
+                {
+                    "command_id": command_id,
+                    "owner_ref": uuid4(),
+                    "job_id": uuid4(),
+                    "result_digest": "sha256:" + "a" * 64,
+                    "result_payload": json.dumps({"private": "discarded"}),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO private_commit_gate_acks (message_id, command_id, payload) "
+                    "VALUES (:message_id, :command_id, CAST(:payload AS jsonb))"
+                ),
+                {
+                    "message_id": ack_id,
+                    "command_id": command_id,
+                    "payload": json.dumps(legacy_payload),
+                },
+            )
+
+        with pytest.raises(RuntimeError, match="ACK payload must be a JSON object"):
+            alembic_command.upgrade(config, "0012_private_ack_wire_digest")
+
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "0011_private_ack_control_retention"
+            )
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT payload FROM private_commit_gate_acks "
+                        "WHERE message_id = :message_id"
+                    ),
+                    {"message_id": ack_id},
+                )
+                == legacy_payload
+            )
+        columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("private_commit_gate_acks", schema=schema)
+        }
+        assert "wire_digest" not in columns
+
+
+@pytest.mark.approved_postgres
 @pytest.mark.parametrize("unknown_parent", ["attempt", "deduplication", "runtime", "stage"])
 def test_v2_project_deletion_rolls_back_on_any_unclassified_owner_row(
     session_factory: sessionmaker[Session],
