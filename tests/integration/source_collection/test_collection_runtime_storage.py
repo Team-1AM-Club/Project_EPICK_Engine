@@ -106,7 +106,10 @@ from epick_engine.source_collection.private_scope import (
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
 )
-from epick_engine.source_collection.source_runtime import handle_collection_dispatch
+from epick_engine.source_collection.source_runtime import (
+    RuntimeAuthorizationError,
+    handle_collection_dispatch,
+)
 from epick_engine.source_collection.source_runtime_input import (
     RuntimeSourceConfigFile,
     SourceRuntimeInputError,
@@ -129,6 +132,11 @@ from epick_engine.source_collection.source_runtime_store import (
 )
 from epick_engine.source_collection.source_runtime_store import (
     reserve_collection_attempt as _reserve_collection_attempt,
+)
+from epick_engine.source_collection.w1_private_authority_contracts import (
+    CurrentWriteScopeLookupResponse,
+    PrivateWriteAuthorityResponse,
+    W1PrivateBinding,
 )
 from epick_engine.source_collection.w1_transport import (
     LookupResponse,
@@ -545,8 +553,15 @@ def _dispatch(
     execution_fence: int = 1,
     owner_deletion_epoch: int = 0,
     decision_id: UUID | None = None,
+    dispatch_kind: str = "core",
+    project_ref: str | None = None,
 ) -> W1Dispatch:
-    raw = json.loads((FIXTURES / "private-w2-command-dispatch.json").read_text(encoding="utf-8"))
+    fixture = (
+        "private-w2-command-dispatch.json"
+        if dispatch_kind == "core"
+        else "private-w2-direct-source-registration-dispatch.json"
+    )
+    raw = json.loads((FIXTURES / fixture).read_text(encoding="utf-8"))
     raw["message_id"] = str(command_id)
     raw["payload"].update(
         command_id=str(command_id),
@@ -556,17 +571,25 @@ def _dispatch(
         source_id=str(source_id),
         execution_fence=str(execution_fence),
         owner_deletion_epoch=owner_deletion_epoch,
+        project_ref=project_ref,
     )
     raw["lookup_request"].update(
         command_id=str(command_id),
         execution_fence=execution_fence,
         owner_deletion_epoch=owner_deletion_epoch,
     )
-    raw["core_decision_pin"].update(
-        company_id=str(company_id),
-        source_id=str(source_id),
-        decision_id=str(decision_id or uuid4()),
-    )
+    if dispatch_kind == "core":
+        raw["core_decision_pin"].update(
+            company_id=str(company_id),
+            source_id=str(source_id),
+            decision_id=str(decision_id or uuid4()),
+        )
+    else:
+        raw["direct_source_registration_pin"].update(
+            company_id=str(company_id),
+            source_id=str(source_id),
+            registration_decision_id=str(decision_id or uuid4()),
+        )
     return parse_w1_dispatch(raw)
 
 
@@ -585,6 +608,96 @@ def _trusted_scope(dispatch: W1Dispatch) -> PrivateWriteScope:
             job_id=command.job_id,
         )
     )
+
+
+def _scope_for_dispatch(
+    dispatch: W1Dispatch,
+    scope: PrivateDeletionScope,
+    *,
+    authority_ref: str = "w1:test-runtime-authority",
+) -> PrivateWriteScope:
+    command = dispatch.payload
+    return PrivateWriteScope(
+        PrivateWriteAuthorityDecision(
+            owner_user_id=command.authenticated_owner_ref,
+            owner_deletion_epoch=command.owner_deletion_epoch,
+            scope=scope,
+            authority_ref=authority_ref,
+            command_id=command.command_id,
+            job_id=command.job_id,
+        )
+    )
+
+
+def _private_binding_payload(binding: W1PrivateBinding) -> dict[str, object]:
+    return {
+        "owner_user_id": binding.owner_user_id,
+        "owner_deletion_epoch": binding.owner_deletion_epoch,
+        "command_id": binding.command_id,
+        "job_id": binding.job_id,
+        "execution_fence": binding.execution_fence,
+    }
+
+
+class _PrivateAuthorityClient:
+    def __init__(
+        self,
+        scope: PrivateDeletionScope,
+        *,
+        before_decision: Callable[[str], None] | None = None,
+        write_scope: PrivateDeletionScope | None = None,
+    ) -> None:
+        self.scope = scope
+        self.write_scope = write_scope
+        self.before_decision = before_decision
+        self.events: list[str] = []
+
+    def lookup_current_scope(self, binding: W1PrivateBinding) -> CurrentWriteScopeLookupResponse:
+        self.events.append("scope")
+        if self.before_decision is not None:
+            self.before_decision("scope")
+        return CurrentWriteScopeLookupResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-current-write-scope-lookup.v1",
+                **_private_binding_payload(binding),
+                "scope": self.scope.to_mapping(),
+            },
+            strict=True,
+        )
+
+    def authorize_write(
+        self,
+        binding: W1PrivateBinding,
+        scope: PrivateDeletionScope,
+    ) -> PrivateWriteAuthorityResponse:
+        self.events.append("write")
+        if self.before_decision is not None:
+            self.before_decision("write")
+        returned_scope = self.write_scope or scope
+        return PrivateWriteAuthorityResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-write-authority.v1",
+                **_private_binding_payload(binding),
+                "scope": returned_scope.to_mapping(),
+                "authority_ref": f"w1:test:{len(self.events)}",
+            },
+            strict=True,
+        )
+
+
+class _AvailableDispatchLookup:
+    def __init__(self) -> None:
+        self.dispatches: list[W1Dispatch] = []
+
+    def lookup_dispatch(self, dispatch: W1Dispatch) -> LookupResponse:
+        self.dispatches.append(dispatch)
+        return LookupResponse(
+            schema_version="w1.private.command-lookup.v1",
+            command_id=dispatch.payload.command_id,
+            status="AVAILABLE",
+            reason_code=None,
+            command=dispatch.payload,
+        )
 
 
 def _gate_scope(gate: CommitGateCommand) -> PrivateWriteScope:
@@ -639,6 +752,252 @@ def replay_staged_collection(session_factory, dispatch, **kwargs):
 def apply_commit_gate(session, gate, **kwargs):
     kwargs.setdefault("private_scope", _gate_scope(gate))
     return _apply_commit_gate(session, gate, **kwargs)
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize("dispatch_kind", ["core", "direct"])
+@pytest.mark.parametrize("scope_kind", ["ACCOUNT", "PROJECT"])
+def test_first_reservation_requires_w1_scope_then_fresh_write_authority(
+    runtime_session_factory: sessionmaker[Session],
+    dispatch_kind: str,
+    scope_kind: str,
+) -> None:
+    """Skipping either protected decision would persist an unbound first reservation."""
+
+    company_id, source_id = _seed_source(runtime_session_factory)
+    with runtime_session_factory.begin() as session:
+        source = session.get(Source, source_id)
+        assert source is not None
+        source.source_type = SourceType.COMPANY_WEBSITE.value
+    project_id = uuid4() if scope_kind == "PROJECT" else None
+    scope = PrivateDeletionScope(kind=cast(Any, scope_kind), project_id=project_id)
+    dispatch = _dispatch(
+        command_id=uuid4(),
+        job_id=uuid4(),
+        owner_ref=uuid4(),
+        company_id=company_id,
+        source_id=source_id,
+        dispatch_kind=dispatch_kind,
+        project_ref=None if project_id is None else str(project_id),
+    )
+    observed_before_decision: list[tuple[str, int, int]] = []
+
+    def observe_unmutated_database(decision: str) -> None:
+        with runtime_session_factory() as session:
+            source = session.get(Source, source_id)
+            assert source is not None
+            observed_before_decision.append(
+                (
+                    decision,
+                    source.next_observation_order,
+                    session.scalar(select(func.count()).select_from(CollectionRuntimeAttempt)),
+                )
+            )
+
+    authority = _PrivateAuthorityClient(scope, before_decision=observe_unmutated_database)
+    lookup = _AvailableDispatchLookup()
+    attempt_id = uuid4()
+    with pytest.raises(StopIteration):
+        handle_collection_dispatch(
+            dispatch,
+            session_factory=runtime_session_factory,
+            lookup_client=lookup,
+            private_authority_client=authority,
+            input_provider=SqlAlchemyCollectionInputProvider(
+                runtime_session_factory,
+                _source_runtime_config({source_id: 3}),
+            ),
+            collector_factory=lambda: pytest.fail("reservation boundary must stop before collect"),
+            parser=extract_static_candidate,
+            runtime_config=_source_runtime_config({source_id: 3}),
+            clock=lambda: NOW,
+            uuid_factory=_uuid_factory(attempt_id),
+        )
+
+    assert lookup.dispatches == [dispatch]
+    assert authority.events == ["scope", "write"]
+    assert observed_before_decision == [("scope", 0, 0), ("write", 0, 0)]
+    with runtime_session_factory() as session:
+        attempt = session.get(CollectionRuntimeAttempt, dispatch.payload.command_id)
+        source = session.get(Source, source_id)
+        assert attempt is not None and source is not None
+        assert attempt.attempt_id == attempt_id
+        assert attempt.dispatch_digest == dispatch_digest(dispatch)
+        assert attempt.owner_ref == dispatch.payload.authenticated_owner_ref
+        assert attempt.job_id == dispatch.payload.job_id
+        assert attempt.private_scope_kind == scope_kind
+        assert attempt.project_id == project_id
+        assert source.next_observation_order == 1
+        assert session.scalar(select(func.count()).select_from(CollectionRuntimeAttempt)) == 1
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    ("scope_kind", "project_ref"),
+    [
+        ("ACCOUNT", "50000000-0000-4000-8000-000000000001"),
+        ("PROJECT", None),
+        ("PROJECT", "abcdefab-cdef-4abc-8def-abcdefabcdef".upper()),
+        ("PROJECT", "{50000000-0000-4000-8000-000000000001}"),
+    ],
+)
+def test_first_reservation_requires_w1_scope_then_fresh_write_authority_rejects_nonexact_ref(
+    runtime_session_factory: sessionmaker[Session],
+    scope_kind: str,
+    project_ref: str | None,
+) -> None:
+    """Normalizing or inferring project_ref would bind a dispatch W1 did not issue."""
+
+    company_id, source_id = _seed_source(runtime_session_factory)
+    project_id = UUID("abcdefab-cdef-4abc-8def-abcdefabcdef") if scope_kind == "PROJECT" else None
+    scope = PrivateDeletionScope(kind=cast(Any, scope_kind), project_id=project_id)
+    dispatch = _dispatch(
+        command_id=uuid4(),
+        job_id=uuid4(),
+        owner_ref=uuid4(),
+        company_id=company_id,
+        source_id=source_id,
+        project_ref=project_ref,
+    )
+    authority = _PrivateAuthorityClient(scope)
+
+    with pytest.raises(RuntimeAuthorizationError):
+        handle_collection_dispatch(
+            dispatch,
+            session_factory=runtime_session_factory,
+            lookup_client=_AvailableDispatchLookup(),
+            private_authority_client=authority,
+            input_provider=SqlAlchemyCollectionInputProvider(
+                runtime_session_factory,
+                _source_runtime_config({source_id: 3}),
+            ),
+            collector_factory=lambda: pytest.fail("invalid binding must not collect"),
+            parser=extract_static_candidate,
+            runtime_config=_source_runtime_config({source_id: 3}),
+            clock=lambda: NOW,
+            uuid_factory=uuid4,
+        )
+
+    assert authority.events == ["scope"]
+    with runtime_session_factory() as session:
+        source = session.get(Source, source_id)
+        assert source is not None
+        assert source.next_observation_order == 0
+        assert session.scalar(select(func.count()).select_from(CollectionRuntimeAttempt)) == 0
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "uppercase_ref",
+        "noncanonical_ref",
+        "owner",
+        "job",
+        "fence",
+        "epoch",
+        "missing_ref",
+        "pin_digest",
+        "scope",
+        "unknown_scope",
+    ],
+)
+def test_replayed_dispatch_cannot_change_original_scope_or_digest(
+    runtime_session_factory: sessionmaker[Session],
+    changed: str,
+) -> None:
+    """Replay must neither rewrite its first binding nor consume a second order."""
+
+    company_id, source_id = _seed_source(runtime_session_factory)
+    command_id, job_id, owner_ref = uuid4(), uuid4(), uuid4()
+    project_id = UUID("abcdefab-cdef-4abc-8def-abcdefabcdef")
+    decision_id = UUID("51000000-0000-4000-8000-000000000001")
+    original = _dispatch(
+        command_id=command_id,
+        job_id=job_id,
+        owner_ref=owner_ref,
+        company_id=company_id,
+        source_id=source_id,
+        project_ref=str(project_id),
+        decision_id=decision_id,
+    )
+    project_scope = PrivateDeletionScope(kind="PROJECT", project_id=project_id)
+    with runtime_session_factory.begin() as session:
+        _reserve_collection_attempt(
+            session,
+            original,
+            effective_policy_revision=3,
+            now=NOW,
+            uuid_factory=_uuid_factory(uuid4()),
+            private_scope=_scope_for_dispatch(original, project_scope),
+        )
+    if changed == "unknown_scope":
+        with runtime_session_factory.begin() as session:
+            attempt = session.get(CollectionRuntimeAttempt, command_id)
+            assert attempt is not None
+            attempt.private_scope_kind = "UNKNOWN"
+            attempt.project_id = None
+
+    changed_project_ref: str | None = str(project_id)
+    if changed == "uppercase_ref":
+        changed_project_ref = str(project_id).upper()
+    elif changed == "noncanonical_ref":
+        changed_project_ref = "{" + str(project_id) + "}"
+    elif changed == "missing_ref":
+        changed_project_ref = None
+    replay = _dispatch(
+        command_id=command_id,
+        job_id=uuid4() if changed == "job" else job_id,
+        owner_ref=uuid4() if changed == "owner" else owner_ref,
+        company_id=company_id,
+        source_id=source_id,
+        execution_fence=2 if changed == "fence" else 1,
+        owner_deletion_epoch=1 if changed == "epoch" else 0,
+        project_ref=changed_project_ref,
+        decision_id=(
+            UUID("51000000-0000-4000-8000-000000000002") if changed == "pin_digest" else decision_id
+        ),
+    )
+    authority = _PrivateAuthorityClient(
+        project_scope,
+        write_scope=(
+            PrivateDeletionScope(kind="ACCOUNT", project_id=None) if changed == "scope" else None
+        ),
+    )
+
+    with pytest.raises(
+        (RuntimeAuthorizationError, CollectionRuntimeConflict, PrivateScopeRejected)
+    ):
+        handle_collection_dispatch(
+            replay,
+            session_factory=runtime_session_factory,
+            lookup_client=_AvailableDispatchLookup(),
+            private_authority_client=authority,
+            input_provider=SqlAlchemyCollectionInputProvider(
+                runtime_session_factory,
+                _source_runtime_config({source_id: 3}),
+            ),
+            collector_factory=lambda: pytest.fail("conflicting replay must not collect"),
+            parser=extract_static_candidate,
+            runtime_config=_source_runtime_config({source_id: 3}),
+            clock=lambda: NOW,
+            uuid_factory=_uuid_factory(),
+        )
+
+    assert authority.events == (["write"] if changed == "scope" else [])
+    with runtime_session_factory() as session:
+        attempt = session.get(CollectionRuntimeAttempt, command_id)
+        source = session.get(Source, source_id)
+        assert attempt is not None and source is not None
+        assert attempt.dispatch_digest == dispatch_digest(original)
+        assert attempt.owner_ref == owner_ref
+        assert attempt.job_id == job_id
+        assert attempt.private_scope_kind == (
+            "UNKNOWN" if changed == "unknown_scope" else "PROJECT"
+        )
+        assert attempt.project_id == (None if changed == "unknown_scope" else project_id)
+        assert source.next_observation_order == 1
+        assert session.scalar(select(func.count()).select_from(CollectionRuntimeAttempt)) == 1
 
 
 @pytest.mark.approved_postgres
@@ -2466,6 +2825,9 @@ def test_full_runtime_handler_persists_candidate_after_fresh_stages_without_deli
         clock=lambda: NOW,
         uuid_factory=uuid4,
         private_scope=_trusted_scope(dispatch),
+        private_authority_client=_PrivateAuthorityClient(
+            PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+        ),
     )
 
     assert lookup.dispatches == [dispatch] * 5

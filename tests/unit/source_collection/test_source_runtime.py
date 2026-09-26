@@ -29,6 +29,12 @@ from epick_engine.source_collection.source_runtime import (
 )
 from epick_engine.source_collection.source_runtime_input import RuntimeSourceConfigFile
 from epick_engine.source_collection.source_runtime_store import CollectionRuntimeConflict
+from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
+from epick_engine.source_collection.w1_private_authority_contracts import (
+    CurrentWriteScopeLookupResponse,
+    PrivateWriteAuthorityResponse,
+    W1PrivateBinding,
+)
 from epick_engine.source_collection.w1_transport import (
     LookupResponse,
     W1Dispatch,
@@ -62,12 +68,62 @@ def _trusted_scope(dispatch: W1Dispatch) -> PrivateWriteScope:
     )
 
 
+def _binding_payload(binding: W1PrivateBinding) -> dict[str, object]:
+    return {
+        "owner_user_id": binding.owner_user_id,
+        "owner_deletion_epoch": binding.owner_deletion_epoch,
+        "command_id": binding.command_id,
+        "job_id": binding.job_id,
+        "execution_fence": binding.execution_fence,
+    }
+
+
+class _TrustedPrivateAuthorityClient:
+    def __init__(
+        self,
+        dispatch: W1Dispatch,
+        *,
+        scope: PrivateDeletionScope | None = None,
+    ) -> None:
+        self.scope = scope or PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+        self.events: list[str] = []
+        self._dispatch = dispatch
+
+    def lookup_current_scope(self, binding: W1PrivateBinding) -> CurrentWriteScopeLookupResponse:
+        self.events.append("scope")
+        return CurrentWriteScopeLookupResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-current-write-scope-lookup.v1",
+                **_binding_payload(binding),
+                "scope": self.scope.to_mapping(),
+            },
+            strict=True,
+        )
+
+    def authorize_write(
+        self,
+        binding: W1PrivateBinding,
+        scope: PrivateDeletionScope,
+    ) -> PrivateWriteAuthorityResponse:
+        self.events.append("write")
+        return PrivateWriteAuthorityResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-write-authority.v1",
+                **_binding_payload(binding),
+                "scope": scope.to_mapping(),
+                "authority_ref": "test:w1-authenticated",
+            },
+            strict=True,
+        )
+
+
 def handle_collection_dispatch(dispatch: W1Dispatch, **kwargs: Any) -> object:
-    """Test adapter: inject one explicit trusted W1 authority decision."""
+    """Test adapter: inject deterministic protected W1 decisions."""
 
     return _handle_collection_dispatch(
         dispatch,
         private_scope=_trusted_scope(dispatch),
+        private_authority_client=_TrustedPrivateAuthorityClient(dispatch),
         **kwargs,
     )
 
@@ -285,6 +341,8 @@ def _patch_runtime_happy_path(
             state=attempt_state[0],
             effective_policy_revision=attempt_state[1],
             attempt_id=attempt_state[2],
+            private_scope_kind="ACCOUNT",
+            project_id=None,
         )
 
     def reserve(*args: object, **kwargs: object) -> object:
@@ -349,6 +407,67 @@ class _SequencedLookupClient:
         if self._unavailable_call == len(self.dispatches):
             return _not_found(dispatch)
         return _available(dispatch)
+
+
+@pytest.mark.parametrize("failure", ["wrong-echo", "http-503", "timeout"])
+def test_first_reservation_authority_failure_has_zero_writes_and_no_scope_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Accepting an untrusted/failed scope lookup would permit a reservation write."""
+
+    dispatch = _dispatch()
+    events: list[str] = []
+    input_value = _RuntimeInput(policy_revision=3)
+    execution_type, _instances = _execution_type(events, prepared="prepared")
+    calls = _patch_runtime_happy_path(
+        monkeypatch,
+        events=events,
+        input_value=input_value,
+        heartbeat_type=_heartbeat_type(events),
+        execution_type=execution_type,
+    )
+
+    class _FailingPrivateAuthorityClient(_TrustedPrivateAuthorityClient):
+        def lookup_current_scope(
+            self,
+            binding: W1PrivateBinding,
+        ) -> CurrentWriteScopeLookupResponse:
+            self.events.append("scope")
+            if failure == "http-503":
+                raise W1LookupClientError("HTTP_503")
+            if failure == "timeout":
+                raise W1LookupClientError("TRANSPORT_FAILURE")
+            payload = _binding_payload(binding)
+            payload["owner_user_id"] = UUID("99999999-9999-4999-8999-999999999999")
+            return CurrentWriteScopeLookupResponse.model_validate(
+                {
+                    "schema_version": "w1.private.w2-current-write-scope-lookup.v1",
+                    **payload,
+                    "scope": {"type": "ACCOUNT"},
+                },
+                strict=True,
+            )
+
+    authority = _FailingPrivateAuthorityClient(dispatch)
+    with pytest.raises(RuntimeAuthorizationError):
+        _handle_collection_dispatch(
+            dispatch,
+            session_factory=_SessionFactory(),
+            lookup_client=_SequencedLookupClient(),
+            private_authority_client=authority,
+            input_provider=_RuntimeInputProvider(input_value, events),
+            collector_factory=_UnexpectedCallable(),
+            parser=_UnexpectedCallable(),
+            runtime_config=_runtime_config(dispatch),
+            clock=lambda: NOW,
+            uuid_factory=_UnexpectedCallable(),
+            store_operations=calls["operations"],
+        )
+
+    assert authority.events == ["scope"]
+    assert calls["reserve"] == []
+    assert events == []
 
 
 def test_initial_unavailable_lookup_has_no_db_or_execution_side_effects() -> None:

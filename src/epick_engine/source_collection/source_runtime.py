@@ -38,11 +38,12 @@ from epick_engine.source_collection.contracts import CollectionCommand, Collecti
 from epick_engine.source_collection.parsing import StaticParseResult
 from epick_engine.source_collection.persistence import (
     CollectionRuntimeAttempt,
-    bind_private_write_scope,
     commit_collection_candidate,
     replay_staged_collection,
 )
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.private_scope import (
+    PrivateScopeRejected,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
 )
@@ -62,6 +63,11 @@ from epick_engine.source_collection.source_runtime_store import (
     reserve_collection_attempt,
 )
 from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
+from epick_engine.source_collection.w1_private_authority_contracts import (
+    CurrentWriteScopeLookupResponse,
+    PrivateWriteAuthorityResponse,
+    W1PrivateBinding,
+)
 from epick_engine.source_collection.w1_transport import (
     LookupRequest,
     LookupResponse,
@@ -89,6 +95,19 @@ class LookupClient(Protocol):
 
 class RelayLookupClient(Protocol):
     def lookup(self, request: LookupRequest) -> LookupResponse: ...
+
+
+class PrivateAuthorityClient(Protocol):
+    def lookup_current_scope(
+        self,
+        binding: W1PrivateBinding,
+    ) -> CurrentWriteScopeLookupResponse: ...
+
+    def authorize_write(
+        self,
+        binding: W1PrivateBinding,
+        scope: PrivateDeletionScope,
+    ) -> PrivateWriteAuthorityResponse: ...
 
 
 class CollectionInputProvider(Protocol):
@@ -457,12 +476,126 @@ def _load_attempt_state(
     session_factory: SessionFactory,
     dispatch: W1Dispatch,
     store_operations: RuntimeStoreOperations,
-) -> tuple[str, int, UUID] | None:
+) -> _BoundAttemptState | None:
     with session_factory() as session, session.begin():
         attempt = store_operations.load_attempt(session, dispatch)
         if attempt is None:
             return None
-        return attempt.state, attempt.effective_policy_revision, attempt.attempt_id
+        return _BoundAttemptState(
+            state=attempt.state,
+            effective_policy_revision=attempt.effective_policy_revision,
+            attempt_id=attempt.attempt_id,
+            private_scope=_stored_attempt_scope(attempt),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundAttemptState:
+    state: str
+    effective_policy_revision: int
+    attempt_id: UUID
+    private_scope: PrivateDeletionScope
+
+
+def _stored_attempt_scope(attempt: CollectionRuntimeAttempt) -> PrivateDeletionScope:
+    if attempt.private_scope_kind == "ACCOUNT" and attempt.project_id is None:
+        return PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    if attempt.private_scope_kind == "PROJECT" and isinstance(attempt.project_id, UUID):
+        return PrivateDeletionScope(kind="PROJECT", project_id=attempt.project_id)
+    raise RuntimeAuthorizationError("collection runtime stored scope is unclassified")
+
+
+def _response_matches_binding(
+    response: CurrentWriteScopeLookupResponse | PrivateWriteAuthorityResponse,
+    binding: W1PrivateBinding,
+) -> bool:
+    return (
+        response.owner_user_id == binding.owner_user_id
+        and response.owner_deletion_epoch == binding.owner_deletion_epoch
+        and response.command_id == binding.command_id
+        and response.job_id == binding.job_id
+        and response.execution_fence == binding.execution_fence
+    )
+
+
+def _scope_from_mapping(raw: object) -> PrivateDeletionScope:
+    if raw == {"type": "ACCOUNT"}:
+        return PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    if not isinstance(raw, dict) or raw.keys() != {"type", "project_id"}:
+        raise RuntimeAuthorizationError("W1 current scope lookup is invalid")
+    project_ref = raw.get("project_id")
+    if raw.get("type") != "PROJECT" or not isinstance(project_ref, str):
+        raise RuntimeAuthorizationError("W1 current scope lookup is invalid")
+    try:
+        project_id = UUID(project_ref)
+    except ValueError:
+        raise RuntimeAuthorizationError("W1 current scope lookup is invalid") from None
+    if project_ref != str(project_id):
+        raise RuntimeAuthorizationError("W1 current scope lookup is invalid")
+    return PrivateDeletionScope(kind="PROJECT", project_id=project_id)
+
+
+def _assert_dispatch_project_ref(
+    dispatch: W1Dispatch,
+    scope: PrivateDeletionScope,
+) -> None:
+    project_ref = dispatch.payload.project_ref
+    if scope.kind == "ACCOUNT":
+        if project_ref is not None:
+            raise RuntimeAuthorizationError("collection dispatch project binding does not match")
+        return
+    assert scope.project_id is not None
+    if project_ref != str(scope.project_id):
+        raise RuntimeAuthorizationError("collection dispatch project binding does not match")
+
+
+def _lookup_initial_scope(
+    dispatch: W1Dispatch,
+    binding: W1PrivateBinding,
+    authority_client: PrivateAuthorityClient,
+) -> PrivateDeletionScope:
+    try:
+        response = authority_client.lookup_current_scope(binding)
+    except (W1LookupClientError, W1LookupError, W1WireContractError, ValueError, TypeError) as exc:
+        raise RuntimeAuthorizationError("W1 current scope lookup is invalid") from exc
+    if not isinstance(response, CurrentWriteScopeLookupResponse) or not _response_matches_binding(
+        response,
+        binding,
+    ):
+        raise RuntimeAuthorizationError("W1 current scope lookup is invalid")
+    scope = _scope_from_mapping(response.scope)
+    _assert_dispatch_project_ref(dispatch, scope)
+    return scope
+
+
+def _authorize_reservation(
+    binding: W1PrivateBinding,
+    scope: PrivateDeletionScope,
+    authority_client: PrivateAuthorityClient,
+) -> PrivateWriteScope:
+    try:
+        response = authority_client.authorize_write(binding, scope)
+    except (W1LookupClientError, W1LookupError, W1WireContractError, ValueError, TypeError) as exc:
+        raise RuntimeAuthorizationError("W1 private write authority is invalid") from exc
+    if (
+        not isinstance(response, PrivateWriteAuthorityResponse)
+        or not _response_matches_binding(response, binding)
+        or response.scope != scope.to_mapping()
+    ):
+        raise RuntimeAuthorizationError("W1 private write authority is invalid")
+    try:
+        return PrivateWriteScope(
+            PrivateWriteAuthorityDecision(
+                owner_user_id=binding.owner_user_id,
+                owner_deletion_epoch=binding.owner_deletion_epoch,
+                scope=scope,
+                authority_ref=response.authority_ref,
+                command_id=binding.command_id,
+                job_id=binding.job_id,
+            )
+        )
+    except PrivateScopeRejected as exc:
+        raise RuntimeAuthorizationError("W1 private write authority is invalid") from exc
 
 
 def _release_after_clean_failure(
@@ -498,33 +631,38 @@ def handle_collection_dispatch(
     uuid_factory: UUIDFactory,
     store_operations: RuntimeStoreOperations | None = None,
     private_scope: PrivateWriteScope | None = None,
+    private_authority_client: PrivateAuthorityClient | None = None,
 ) -> StagedResultProposal:
     """Execute an initial POLICY dispatch through durable PERSIST, never DELIVER."""
 
     operations = _default_store_operations() if store_operations is None else store_operations
     validated = _validated_initial_dispatch(dispatch)
     command = validated.payload
-    bind_private_write_scope(
-        private_scope,
-        owner_user_id=command.authenticated_owner_ref,
-        owner_deletion_epoch=command.owner_deletion_epoch,
-        command_id=command.command_id,
-        job_id=command.job_id,
-        project_ref=command.project_ref,
-        bind_project_ref=True,
-    )
-    assert private_scope is not None
     _require_available(validated, lookup_client)
 
     state = _load_attempt_state(session_factory, validated, operations)
-    if state is not None and state[0] in {"PERSISTED", "FINALIZED"}:
+    if state is not None and state.state == "INVALIDATED":
+        raise RuntimeAuthorizationError("collection runtime attempt is invalidated")
+    if private_authority_client is None:
+        raise RuntimeAuthorizationError("protected W1 private authority client is required")
+    try:
+        binding = W1PrivateBinding.from_collection(command)
+    except W1WireContractError as exc:
+        raise RuntimeAuthorizationError("collection private binding is invalid") from exc
+    scope = (
+        _lookup_initial_scope(validated, binding, private_authority_client)
+        if state is None
+        else state.private_scope
+    )
+    _assert_dispatch_project_ref(validated, scope)
+    private_scope = _authorize_reservation(binding, scope, private_authority_client)
+
+    if state is not None and state.state in {"PERSISTED", "FINALIZED"}:
         return operations.replay_candidate(
             session_factory,
             validated,
             private_scope=private_scope,
         )
-    if state is not None and state[0] == "INVALIDATED":
-        raise RuntimeAuthorizationError("collection runtime attempt is invalidated")
 
     input_value = input_provider.load(validated.payload)
     if not isinstance(input_value, StaticCollectionInput):
@@ -532,7 +670,7 @@ def handle_collection_dispatch(
     approved = runtime_config.sources.get(validated.payload.source_id)
     if approved is None or approved.policy_revision != input_value.policy_revision:
         raise RuntimeAuthorizationError("approved collection policy revision is stale")
-    if state is not None and state[1] != input_value.policy_revision:
+    if state is not None and state.effective_policy_revision != input_value.policy_revision:
         raise RuntimeAuthorizationError("collection runtime policy revision is stale")
 
     with session_factory() as session, session.begin():
