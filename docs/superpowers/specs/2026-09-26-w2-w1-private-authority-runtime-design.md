@@ -1,8 +1,9 @@
 # W2–W1 private authority runtime design
 
-> Draft for written-spec review. The user chose minimal ACK replay-control
-> retention across v2 deletion. W1 has accepted that retention boundary and
+> Draft pending one W1 collection binding clarification. The user chose minimal
+> ACK replay-control retention across v2 deletion. W1 accepted that boundary and
 > provided a protected canonical-scope lookup for gates without a local binding.
+> The initial collection write still lacks a proven canonical scope source.
 > These contracts are not yet implemented or jointly validated in W2.
 
 ## Purpose and boundary
@@ -107,8 +108,12 @@ full SHA and validates their exact fields, echo binding, and protected-error
 behavior in contract tests. The scope-lookup and terminal-cleanup JSON Schemas
 remain separately hash-pinned above. W2 must not synthesize scope from a null
 Project reference, URL, or payload text: collection derives canonical binding
-from the validated W1 dispatch. Gate/relay derives it from the persisted W2
-stage or another exact command-bound local record and the gate or outbox record.
+from a W1-authenticated canonical binding. The current dispatch has only a
+nullable string `project_ref`, not an explicit scope; the first reservation has
+no prior W2 stage. W1 must define how W2 obtains that binding without guessing
+ACCOUNT from null or probing candidate scopes. Gate/relay derives its scope
+from the persisted W2 stage or another exact command-bound local record and
+the gate or outbox record.
 An absent or unclassified binding requires W1's canonical gate-scope lookup.
 A failed or malformed lookup fails closed; its response cannot authorize a
 later gate.
