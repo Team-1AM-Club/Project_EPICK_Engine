@@ -300,6 +300,148 @@ def test_ct15_relay_requires_configured_w1_client(
     assert observed == [private_authority_client]
 
 
+@pytest.mark.parametrize(
+    ("action", "operator_name", "client_argument"),
+    (
+        ("consume-once", "consume_once", "private_authority_client"),
+        ("relay-once", "relay_once", "authority_client"),
+    ),
+)
+def test_main_bounded_actions_use_configured_w1_client_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+    operator_name: str,
+    client_argument: str,
+) -> None:
+    settings = Ct15Settings.from_environment(environment())
+    engine = MagicMock()
+    sessions = MagicMock()
+    private_authority_client = object()
+    factory_settings: list[Ct15Settings] = []
+    observed: list[object] = []
+
+    monkeypatch.setattr(
+        commit_gate_operator.Ct15Settings,
+        "from_environment",
+        classmethod(lambda _cls, _values: settings),
+    )
+    monkeypatch.setattr(commit_gate_operator, "create_ct15_engine", lambda _settings: engine)
+    monkeypatch.setattr(commit_gate_operator, "create_sqs_client", lambda _settings: MagicMock())
+    monkeypatch.setattr(commit_gate_operator, "preflight", lambda *_args: {})
+    monkeypatch.setattr(commit_gate_operator, "sessionmaker", lambda *_args, **_kwargs: sessions)
+    monkeypatch.setattr(
+        commit_gate_operator,
+        "create_private_authority_client",
+        lambda actual_settings: (
+            factory_settings.append(actual_settings) or private_authority_client
+        ),
+    )
+
+    def operate_once(*_args: object, **kwargs: object) -> RelayResult:
+        observed.append(kwargs[client_argument])
+        return RelayResult(status="EMPTY")
+
+    monkeypatch.setattr(commit_gate_operator, operator_name, operate_once)
+
+    assert main([action]) == 0
+    assert factory_settings == [settings]
+    assert observed == [private_authority_client]
+    assert json.loads(capsys.readouterr().out) == {"status": "EMPTY"}
+
+
+@pytest.mark.parametrize("action", ("consume", "relay"))
+def test_main_continuous_actions_use_configured_w1_client_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    settings = Ct15Settings.from_environment(environment())
+    engine = MagicMock()
+    sessions = MagicMock()
+    private_authority_client = object()
+    factory_settings: list[Ct15Settings] = []
+    observed: list[object] = []
+
+    monkeypatch.setattr(
+        commit_gate_operator.Ct15Settings,
+        "from_environment",
+        classmethod(lambda _cls, _values: settings),
+    )
+    monkeypatch.setattr(commit_gate_operator, "create_ct15_engine", lambda _settings: engine)
+    monkeypatch.setattr(commit_gate_operator, "create_sqs_client", lambda _settings: MagicMock())
+    monkeypatch.setattr(commit_gate_operator, "preflight", lambda *_args: {})
+    monkeypatch.setattr(commit_gate_operator, "sessionmaker", lambda *_args, **_kwargs: sessions)
+    monkeypatch.setattr(
+        commit_gate_operator,
+        "create_private_authority_client",
+        lambda actual_settings: (
+            factory_settings.append(actual_settings) or private_authority_client
+        ),
+    )
+    monkeypatch.setattr(commit_gate_operator.signal, "signal", lambda *_args: object())
+
+    def stop_loop(*_args: object, **kwargs: object) -> int:
+        observed.append(kwargs["private_authority_client"])
+        return 0
+
+    monkeypatch.setattr(commit_gate_operator, "run_loop", stop_loop)
+
+    assert main([action]) == 0
+    assert factory_settings == [settings]
+    assert observed == [private_authority_client]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ["preflight"],
+        [
+            "inspect",
+            "--owner-ref",
+            "00000000-0000-0000-0000-000000000001",
+            "--command-id",
+            "00000000-0000-0000-0000-000000000002",
+        ],
+    ),
+)
+def test_main_metadata_actions_do_not_create_private_authority_client(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    settings = Ct15Settings.from_environment(environment())
+    engine = MagicMock()
+    sessions = MagicMock()
+
+    monkeypatch.setattr(
+        commit_gate_operator.Ct15Settings,
+        "from_environment",
+        classmethod(lambda _cls, _values: settings),
+    )
+    monkeypatch.setattr(commit_gate_operator, "create_ct15_engine", lambda _settings: engine)
+    monkeypatch.setattr(commit_gate_operator, "create_sqs_client", lambda _settings: MagicMock())
+    monkeypatch.setattr(commit_gate_operator, "preflight", lambda *_args: {})
+    monkeypatch.setattr(commit_gate_operator, "sessionmaker", lambda *_args, **_kwargs: sessions)
+    monkeypatch.setattr(
+        commit_gate_operator,
+        "create_private_authority_client",
+        lambda _settings: pytest.fail("metadata-only actions must not create a W1 client"),
+    )
+    monkeypatch.setattr(
+        commit_gate_operator,
+        "inspect_counts",
+        lambda *_args, **_kwargs: {"state_counts": {}},
+    )
+
+    assert main(argv) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output == (
+        {"status": "PREFLIGHT_PASSED", "scope": "metadata_only"}
+        if argv == ["preflight"]
+        else {"state_counts": {}}
+    )
+
+
 def test_inspect_run_uses_explicit_fixture_after_existing_preflight(
     monkeypatch, capsys, tmp_path
 ) -> None:

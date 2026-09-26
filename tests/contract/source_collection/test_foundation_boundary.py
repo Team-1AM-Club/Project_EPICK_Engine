@@ -75,6 +75,29 @@ def test_ct15_contract_mentions_t067_schema_and_forward_head() -> None:
     assert "does not establish current READY" in normalized_document
 
 
+def test_ct15_compose_forwards_w1_authority_with_read_only_ca_mount() -> None:
+    compose = (ENGINE_ROOT / "compose.ct15.yaml").read_text(encoding="utf-8")
+
+    assert (
+        "W1_LOOKUP_ENDPOINT: ${W1_LOOKUP_ENDPOINT:?W1 supplies the authenticated lookup endpoint}"
+        in compose
+    )
+    assert (
+        "W1_LOOKUP_BEARER: ${W1_LOOKUP_BEARER:?Supply through the approved secret channel}"
+        in compose
+    )
+    assert "W1_LOOKUP_CA_FILE: /run/epick/source-runtime/w1-ca.pem" in compose
+    assert (
+        """    volumes:
+      - type: bind
+        source: ${W1_LOOKUP_CA_HOST_FILE:?Supply the W1 CA certificate file}
+        target: /run/epick/source-runtime/w1-ca.pem
+        read_only: true
+"""
+        in compose
+    )
+
+
 EXAMPLES_BY_NAME = {
     example["name"]: example["value"] for example in _load_json("examples.json")["examples"]
 }

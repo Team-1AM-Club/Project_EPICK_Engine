@@ -17,5 +17,13 @@ services:
       W2_CT15_INBOUND_QUEUE_URL: ${W2_CT15_INBOUND_QUEUE_URL:?W1 supplies the dedicated inbound queue}
       W2_CT15_EXPECTED_W1_SENDER_ID: ${W2_CT15_EXPECTED_W1_SENDER_ID:?W1 supplies its stable sender role ID}
       W2_CT15_RUNTIME_LABEL: ${W2_CT15_RUNTIME_LABEL:?Use an isolated CT15 runtime label}
+      W1_LOOKUP_ENDPOINT: ${W1_LOOKUP_ENDPOINT:?W1 supplies the authenticated lookup endpoint}
+      W1_LOOKUP_BEARER: ${W1_LOOKUP_BEARER:?Supply through the approved secret channel}
+      W1_LOOKUP_CA_FILE: /run/epick/source-runtime/w1-ca.pem
+    volumes:
+      - type: bind
+        source: ${W1_LOOKUP_CA_HOST_FILE:?Supply the W1 CA certificate file}
+        target: /run/epick/source-runtime/w1-ca.pem
+        read_only: true
     # W1 supplies workload-role credential delivery and private network connectivity.
     # No static AWS credentials, host credential mounts or production defaults.
