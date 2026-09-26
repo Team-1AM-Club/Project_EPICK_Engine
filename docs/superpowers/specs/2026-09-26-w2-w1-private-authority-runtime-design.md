@@ -99,14 +99,19 @@ The terminal-cleanup request and response are pinned to W1's
 with SHA256 respectively
 `e2d1127c07fb88df249b2bc1294cc930b1191560d04408499587fc54a361e913`
 and `cfba5f5c3886291430ff09640ddc02e83de4cab26bf87338bbba88`.
-The implementation plan must pin and validate the write/gate request and
-response schemas from that same W1 implementation revision before coding the
-adapter. W2 must not synthesize scope from a null Project reference, URL, or
-payload text: collection derives canonical binding from the validated W1
-dispatch, and gate/relay derives it from the persisted W2 stage or another
-exact command-bound local record and the gate or outbox record. An absent or
-unclassified binding requires W1's canonical gate-scope lookup. A failed or
-malformed lookup fails closed; its response cannot authorize a later gate.
+The write/gate-authority routes have Pydantic request/response models but no
+separate JSON Schema files at W1 revision
+`a99de8d39a53444508c4ef2def427eb6ed3c1c91`. W2 pins the
+`backend/app/runtime/w2_private_write_authority.py` model definitions at that
+full SHA and validates their exact fields, echo binding, and protected-error
+behavior in contract tests. The scope-lookup and terminal-cleanup JSON Schemas
+remain separately hash-pinned above. W2 must not synthesize scope from a null
+Project reference, URL, or payload text: collection derives canonical binding
+from the validated W1 dispatch. Gate/relay derives it from the persisted W2
+stage or another exact command-bound local record and the gate or outbox record.
+An absent or unclassified binding requires W1's canonical gate-scope lookup.
+A failed or malformed lookup fails closed; its response cannot authorize a
+later gate.
 
 ## Operation order and local lock policies
 
