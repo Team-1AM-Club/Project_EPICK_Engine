@@ -136,6 +136,7 @@ class GateSessionFactory:
 class FakeGateAuthorityClient:
     scope: PrivateDeletionScope
     lookup_error: Exception | None = None
+    authorize_error: Exception | None = None
     lookup_calls: list[tuple[W1GateBinding, str]] = field(default_factory=list)
     authorize_calls: list[tuple[W1GateBinding, str, PrivateDeletionScope]] = field(
         default_factory=list
@@ -182,6 +183,8 @@ class FakeGateAuthorityClient:
         scope: PrivateDeletionScope,
     ) -> GateAuthorityResponse:
         self.authorize_calls.append((gate, phase, scope))
+        if self.authorize_error is not None:
+            raise self.authorize_error
         return GateAuthorityResponse.model_validate(
             {
                 "schema_version": "w1.private.w2-gate-authority.v1",
@@ -585,7 +588,7 @@ def test_stage_less_gate_rejects_changed_authority_echo_before_transaction() -> 
     assert queue.deleted == []
 
 
-@pytest.mark.parametrize("error_code", ["HTTP_403", "HTTP_503", "TIMEOUT"])
+@pytest.mark.parametrize("error_code", ["HTTP_401", "HTTP_403", "HTTP_503", "TIMEOUT"])
 def test_stage_less_abort_purge_resolves_scope_without_guessing_on_lookup_failure(
     error_code: str,
 ) -> None:
@@ -609,4 +612,38 @@ def test_stage_less_abort_purge_resolves_scope_without_guessing_on_lookup_failur
     assert client.authorize_calls == []
     assert session_factory.read_calls == 1
     assert session_factory.begin_calls == 0
+    assert queue.deleted == []
+
+
+@pytest.mark.parametrize("error_code", ["HTTP_401", "HTTP_403", "HTTP_503", "TIMEOUT"])
+def test_gate_apply_rejects_authorize_failure_before_transaction(
+    error_code: str,
+) -> None:
+    gate, delivery = _gate_delivery("ABORT")
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    queue = FakeQueue([delivery])
+    session_factory = GateSessionFactory()
+    client = FakeGateAuthorityClient(
+        scope,
+        authorize_error=W1LookupClientError(error_code),
+    )
+    apply_calls: list[object] = []
+
+    def apply_gate(*_args: object, **_kwargs: object) -> AppliedAck:
+        apply_calls.append(object())
+        raise AssertionError("authorize failure must not invoke the gate applier")
+
+    result = consume_once(
+        session_factory,
+        queue,
+        EXPECTED_SENDER_ID,
+        apply_gate=apply_gate,
+        private_authority_client=client,
+    )
+
+    assert result.status == "REJECTED"
+    assert client.lookup_calls == [(W1GateBinding.from_gate(gate), "APPLY")]
+    assert client.authorize_calls == [(W1GateBinding.from_gate(gate), "APPLY", scope)]
+    assert session_factory.begin_calls == 0
+    assert apply_calls == []
     assert queue.deleted == []
