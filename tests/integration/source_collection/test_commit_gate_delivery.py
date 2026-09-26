@@ -201,6 +201,7 @@ def _terminal_cleanup_authority(
     command: CollectionCommand,
     *,
     cleanup_kind: str = "STAGED_OUTBOX",
+    **overrides: object,
 ) -> PrivateTerminalCleanupAuthority:
     binding = W1PrivateBinding.from_collection(command)
     response = TerminalCleanupAuthorityResponse.model_validate(
@@ -215,6 +216,7 @@ def _terminal_cleanup_authority(
             "cleanup_kind": cleanup_kind,
             "authority_ref": "w1:test-terminal-cleanup",
             "allowed_effect": "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY",
+            **overrides,
         }
     )
     return PrivateTerminalCleanupAuthority.from_w1_response(response)
@@ -982,6 +984,88 @@ def test_terminal_staged_cleanup_never_sends_or_creates_gate(session_factory) ->
         assert session.scalar(select(func.count()).select_from(PrivateCommitGateAck)) == 0
         assert session.scalar(select(func.count()).select_from(PrivateCommitGateReceipt)) == 0
         assert session.scalar(select(func.count()).select_from(PrivateCommitGateInbox)) == 0
+
+
+@pytest.mark.parametrize("target_case", ["absent", "non-staged", "binding-mismatch"])
+def test_terminal_staged_cleanup_rejects_inexact_target_without_mutation(
+    session_factory: sessionmaker[Session],
+    target_case: str,
+) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+    if target_case == "absent":
+        with session_factory.begin() as session:
+            staged = session.scalar(
+                select(PrivateStagedOutbox).where(
+                    PrivateStagedOutbox.command_id == command.command_id
+                )
+            )
+            stage = session.get(PrivateCommitStage, command.command_id)
+            assert staged is not None and stage is not None
+            session.delete(staged)
+            session.flush()
+            session.delete(stage)
+    elif target_case == "non-staged":
+        gate = _gate(command, result, "PREPARE", operation_id=uuid4(), revision=1)
+        with session_factory.begin() as session:
+            apply_commit_gate(
+                session,
+                gate,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+            )
+
+    def snapshot() -> dict[str, object]:
+        with session_factory() as session:
+            stage = session.get(PrivateCommitStage, command.command_id)
+            staged = session.scalar(
+                select(PrivateStagedOutbox).where(
+                    PrivateStagedOutbox.command_id == command.command_id
+                )
+            )
+            return {
+                "stage": None
+                if stage is None
+                else (
+                    stage.state,
+                    stage.payload_purged,
+                    stage.result_payload,
+                    stage.operation_id,
+                    stage.operation_revision,
+                    stage.result_digest,
+                ),
+                "outbox": None
+                if staged is None
+                else (
+                    staged.message_id,
+                    staged.payload,
+                    staged.delivered_at,
+                    staged.relay_claim_token,
+                    staged.relay_claim_expires_at,
+                ),
+                "acks": session.scalar(select(func.count()).select_from(PrivateCommitGateAck)),
+                "receipts": session.scalar(
+                    select(func.count()).select_from(PrivateCommitGateReceipt)
+                ),
+                "inbox": session.scalar(select(func.count()).select_from(PrivateCommitGateInbox)),
+            }
+
+    before = snapshot()
+    authority_overrides = {"job_id": uuid4()} if target_case == "binding-mismatch" else {}
+    with (
+        session_factory.begin() as session,
+        pytest.raises((CommitGateRejected, PrivateScopeRejected)),
+    ):
+        cleanup_terminal_staged_outbox(
+            session,
+            command.command_id,
+            private_cleanup_authority=_terminal_cleanup_authority(
+                command,
+                **authority_overrides,
+            ),
+        )
+
+    assert snapshot() == before
 
 
 def test_purge_before_relay_suppresses_staged_private_payload(session_factory) -> None:

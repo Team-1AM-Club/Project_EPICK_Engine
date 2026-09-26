@@ -321,6 +321,7 @@ def _patch_runtime_happy_path(
         "commit": [],
         "load": [],
         "release": [],
+        "release_reservation": [],
         "replay": [],
         "renew": [],
         "reserve": [],
@@ -359,6 +360,10 @@ def _patch_runtime_happy_path(
         calls["release"].append((args, kwargs))
         events.append("release")
 
+    def release_reservation(*args: object, **kwargs: object) -> None:
+        calls["release_reservation"].append((args, kwargs))
+        events.append("release-reservation")
+
     def commit(*args: object, **kwargs: object) -> object:
         calls["commit"].append((args, kwargs))
         events.append("commit")
@@ -375,6 +380,7 @@ def _patch_runtime_happy_path(
         claim_attempt=claim,
         renew_claim=renew,
         release_claim=release,
+        release_reservation=release_reservation,
         commit_candidate=commit,
         replay_candidate=replay,
     )
@@ -699,6 +705,165 @@ def test_cancelled_claim_uses_cleanup_not_current_write() -> None:
     assert isinstance(cleanup, PrivateTerminalCleanupAuthority)
     assert cleanup.cleanup_kind == "CLAIM_RELEASE"
     assert released[0]["private_binding"] == binding
+
+
+@pytest.mark.parametrize("changed_cleanup_binding", [False, True])
+def test_cancelled_reservation_uses_cleanup_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    changed_cleanup_binding: bool,
+) -> None:
+    """A post-reservation semantic denial may tombstone only that exact row."""
+
+    dispatch = _dispatch()
+    binding = W1PrivateBinding.from_collection(dispatch.payload)
+    events: list[str] = []
+    input_value = _RuntimeInput(policy_revision=3)
+    execution_type, _instances = _execution_type(events, prepared="prepared")
+    calls = _patch_runtime_happy_path(
+        monkeypatch,
+        events=events,
+        input_value=input_value,
+        heartbeat_type=_heartbeat_type(events),
+        execution_type=execution_type,
+    )
+
+    class _CancelledAfterReservationAuthority(_TrustedPrivateAuthorityClient):
+        def __init__(self, received: W1Dispatch) -> None:
+            super().__init__(received)
+            self.write_calls = 0
+
+        def authorize_write(
+            self,
+            received_binding: W1PrivateBinding,
+            received_scope: PrivateDeletionScope,
+        ) -> PrivateWriteAuthorityResponse:
+            self.write_calls += 1
+            if self.write_calls == 2:
+                assert received_binding == binding
+                self.events.append("write-denied")
+                raise W1LookupClientError("HTTP_403")
+            return super().authorize_write(received_binding, received_scope)
+
+        def authorize_terminal_cleanup(
+            self,
+            received_binding: W1PrivateBinding,
+            received_scope: PrivateDeletionScope,
+            cleanup_kind: str,
+        ) -> TerminalCleanupAuthorityResponse:
+            assert received_binding == binding
+            assert received_scope == self.scope
+            assert cleanup_kind == "RESERVATION_RELEASE"
+            self.events.append("cleanup")
+            response_binding = _binding_payload(binding)
+            if changed_cleanup_binding:
+                response_binding["job_id"] = UUID("99999999-9999-4999-8999-999999999999")
+            return TerminalCleanupAuthorityResponse.model_validate(
+                {
+                    "schema_version": "w1.private.w2-terminal-cleanup.v1",
+                    **response_binding,
+                    "scope": self.scope.to_mapping(),
+                    "cleanup_kind": cleanup_kind,
+                    "authority_ref": "test:w1-reservation-cleanup",
+                    "allowed_effect": "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY",
+                },
+                strict=True,
+            )
+
+    authority = _CancelledAfterReservationAuthority(dispatch)
+    with pytest.raises(RuntimeAuthorizationError, match="semantically denied"):
+        _handle_collection_dispatch(
+            dispatch,
+            session_factory=_SessionFactory(),
+            lookup_client=_SequencedLookupClient(),
+            private_authority_client=authority,
+            input_provider=_RuntimeInputProvider(input_value, events),
+            collector_factory=_UnexpectedCallable(),
+            parser=_UnexpectedCallable(),
+            runtime_config=_runtime_config(dispatch),
+            clock=lambda: NOW,
+            uuid_factory=_uuid_factory(ATTEMPT_ID, CLAIM_TOKEN),
+            store_operations=calls["operations"],
+        )
+
+    assert authority.events == ["scope", "write", "write-denied", "cleanup"]
+    assert len(calls["reserve"]) == 1
+    assert calls["claim"] == []
+    if changed_cleanup_binding:
+        assert calls["release_reservation"] == []
+        return
+    assert len(calls["release_reservation"]) == 1
+    release_kwargs = calls["release_reservation"][0][1]
+    cleanup = release_kwargs["private_scope"]
+    assert isinstance(cleanup, PrivateTerminalCleanupAuthority)
+    assert cleanup.cleanup_kind == "RESERVATION_RELEASE"
+    assert release_kwargs["private_binding"] == binding
+    assert release_kwargs["expected_dispatch_digest"] == dispatch_digest(dispatch)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        W1LookupClientError("HTTP_503"),
+        W1LookupClientError("TRANSPORT_FAILURE"),
+        W1WireContractError("malformed response"),
+    ],
+)
+def test_reservation_cleanup_is_not_fallback_for_uncertain_error(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    dispatch = _dispatch()
+    events: list[str] = []
+    input_value = _RuntimeInput(policy_revision=3)
+    execution_type, _instances = _execution_type(events, prepared="prepared")
+    calls = _patch_runtime_happy_path(
+        monkeypatch,
+        events=events,
+        input_value=input_value,
+        heartbeat_type=_heartbeat_type(events),
+        execution_type=execution_type,
+    )
+
+    class _UncertainAfterReservationAuthority(_TrustedPrivateAuthorityClient):
+        def __init__(self, received: W1Dispatch) -> None:
+            super().__init__(received)
+            self.write_calls = 0
+            self.cleanup_calls = 0
+
+        def authorize_write(
+            self,
+            received_binding: W1PrivateBinding,
+            received_scope: PrivateDeletionScope,
+        ) -> PrivateWriteAuthorityResponse:
+            self.write_calls += 1
+            if self.write_calls == 2:
+                raise failure
+            return super().authorize_write(received_binding, received_scope)
+
+        def authorize_terminal_cleanup(self, *args: object) -> TerminalCleanupAuthorityResponse:
+            self.cleanup_calls += 1
+            raise AssertionError("uncertain write failure must not request terminal cleanup")
+
+    authority = _UncertainAfterReservationAuthority(dispatch)
+    with pytest.raises(RuntimeAuthorizationError, match="private write authority"):
+        _handle_collection_dispatch(
+            dispatch,
+            session_factory=_SessionFactory(),
+            lookup_client=_SequencedLookupClient(),
+            private_authority_client=authority,
+            input_provider=_RuntimeInputProvider(input_value, events),
+            collector_factory=_UnexpectedCallable(),
+            parser=_UnexpectedCallable(),
+            runtime_config=_runtime_config(dispatch),
+            clock=lambda: NOW,
+            uuid_factory=_uuid_factory(ATTEMPT_ID, CLAIM_TOKEN),
+            store_operations=calls["operations"],
+        )
+
+    assert len(calls["reserve"]) == 1
+    assert calls["claim"] == []
+    assert calls["release_reservation"] == []
+    assert authority.cleanup_calls == 0
 
 
 @pytest.mark.parametrize(

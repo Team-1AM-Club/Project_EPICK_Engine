@@ -28,7 +28,10 @@ from epick_engine.source_collection.private_scope import (
     lock_private_terminal_cleanup_scope,
     lock_private_write_scope,
 )
-from epick_engine.source_collection.w1_private_authority_contracts import W1PrivateBinding
+from epick_engine.source_collection.w1_private_authority_contracts import (
+    CleanupKind,
+    W1PrivateBinding,
+)
 from epick_engine.source_collection.w1_transport import (
     W1CommandDispatch,
     W1DirectSourceRegistrationDispatch,
@@ -300,9 +303,28 @@ def _lock_releasable_attempt(
         )
     if not isinstance(private_scope, PrivateTerminalCleanupAuthority):
         raise PrivateScopeRejected("a private release authority is required")
+    return _lock_terminal_cleanup_attempt(
+        session,
+        command_id,
+        private_scope,
+        private_binding,
+        expected_dispatch_digest,
+        cleanup_kind="CLAIM_RELEASE",
+    )
+
+
+def _lock_terminal_cleanup_attempt(
+    session: Session,
+    command_id: UUID,
+    private_scope: PrivateTerminalCleanupAuthority,
+    private_binding: W1PrivateBinding | None,
+    expected_dispatch_digest: str,
+    *,
+    cleanup_kind: CleanupKind,
+) -> CollectionRuntimeAttempt:
     if not isinstance(private_binding, W1PrivateBinding):
         raise PrivateScopeRejected("terminal cleanup requires the original private binding")
-    private_scope.assert_bound_to(private_binding, cleanup_kind="CLAIM_RELEASE")
+    private_scope.assert_bound_to(private_binding, cleanup_kind=cleanup_kind)
     if private_scope.command_id != command_id:
         raise PrivateScopeRejected("private cleanup command binding does not match")
     lock_private_terminal_cleanup_scope(session, private_scope)
@@ -442,4 +464,35 @@ def release_collection_claim(
         attempt.claim_token = None
         attempt.claim_expires_at = None
         attempt.updated_at = database_now
+        return _detach_after_flush(session, attempt)
+
+
+def release_collection_reservation(
+    session_factory: SessionFactory,
+    command_id: UUID,
+    *,
+    expected_dispatch_digest: str,
+    private_scope: PrivateTerminalCleanupAuthority | None = None,
+    private_binding: W1PrivateBinding | None = None,
+) -> CollectionRuntimeAttempt:
+    """Tombstone only an exact unclaimed RESERVED row under terminal authority."""
+
+    if not isinstance(command_id, UUID):
+        raise CollectionRuntimeConflict("invalid collection runtime reservation identity")
+    _validate_dispatch_digest_value(expected_dispatch_digest)
+    if not isinstance(private_scope, PrivateTerminalCleanupAuthority):
+        raise PrivateScopeRejected("a terminal reservation cleanup authority is required")
+    with session_factory() as session, session.begin():
+        attempt = _lock_terminal_cleanup_attempt(
+            session,
+            command_id,
+            private_scope,
+            private_binding,
+            expected_dispatch_digest,
+            cleanup_kind="RESERVATION_RELEASE",
+        )
+        if attempt.claim_token is not None or attempt.claim_expires_at is not None:
+            raise CollectionRuntimeConflict("collection runtime reservation is claimed")
+        attempt.state = "INVALIDATED"
+        attempt.updated_at = _database_now(session)
         return _detach_after_flush(session, attempt)

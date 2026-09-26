@@ -133,6 +133,9 @@ from epick_engine.source_collection.source_runtime_store import (
     release_collection_claim as _release_collection_claim,
 )
 from epick_engine.source_collection.source_runtime_store import (
+    release_collection_reservation as _release_collection_reservation,
+)
+from epick_engine.source_collection.source_runtime_store import (
     renew_collection_claim as _renew_collection_claim,
 )
 from epick_engine.source_collection.source_runtime_store import (
@@ -2178,6 +2181,127 @@ def test_cancelled_claim_uses_cleanup_rejects_changed_binding_and_absent_row(
             private_scope=valid_authority,
             private_binding=binding,
         )
+
+
+@pytest.mark.approved_postgres
+def test_cancelled_reservation_uses_exact_terminal_cleanup(
+    runtime_session_factory: sessionmaker[Session],
+) -> None:
+    company_id, source_id = _seed_source(runtime_session_factory)
+    dispatch = _dispatch(
+        command_id=uuid4(),
+        job_id=uuid4(),
+        owner_ref=uuid4(),
+        company_id=company_id,
+        source_id=source_id,
+    )
+    _runtime_attempt(runtime_session_factory, dispatch)
+    binding = W1PrivateBinding.from_collection(dispatch.payload)
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    with runtime_session_factory.begin() as session:
+        owner_state = session.get(PrivateDeletionOwnerState, binding.owner_user_id)
+        assert owner_state is not None
+        owner_state.latest_epoch = binding.owner_deletion_epoch + 1
+        owner_state.account_deleted = True
+
+    released = _release_collection_reservation(
+        runtime_session_factory,
+        binding.command_id,
+        expected_dispatch_digest=dispatch_digest(dispatch),
+        private_scope=_terminal_cleanup_authority(
+            binding,
+            scope,
+            cleanup_kind="RESERVATION_RELEASE",
+        ),
+        private_binding=binding,
+    )
+
+    assert released.state == "INVALIDATED"
+    assert released.claim_token is None
+    assert released.claim_expires_at is None
+    with runtime_session_factory() as session:
+        attempt = session.get(CollectionRuntimeAttempt, binding.command_id)
+        source = session.get(Source, source_id)
+        assert attempt is not None and source is not None
+        assert attempt.state == "INVALIDATED"
+        assert source.next_observation_order == 1
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    "changed",
+    ["owner", "job", "fence", "epoch", "scope", "kind", "digest", "absent", "claimed"],
+)
+def test_reservation_cleanup_rejects_changed_binding_absent_or_claimed_row(
+    runtime_session_factory: sessionmaker[Session],
+    changed: str,
+) -> None:
+    company_id, source_id = _seed_source(runtime_session_factory)
+    dispatch = _dispatch(
+        command_id=uuid4(),
+        job_id=uuid4(),
+        owner_ref=uuid4(),
+        company_id=company_id,
+        source_id=source_id,
+    )
+    _runtime_attempt(runtime_session_factory, dispatch)
+    binding = W1PrivateBinding.from_collection(dispatch.payload)
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    claim_token = uuid4()
+    if changed == "claimed":
+        claim_collection_attempt(
+            runtime_session_factory,
+            binding.command_id,
+            claim_token=claim_token,
+            lease_seconds=30,
+        )
+    with runtime_session_factory.begin() as session:
+        owner_state = session.get(PrivateDeletionOwnerState, binding.owner_user_id)
+        assert owner_state is not None
+        owner_state.latest_epoch = binding.owner_deletion_epoch + 1
+        owner_state.account_deleted = True
+        if changed == "absent":
+            attempt = session.get(CollectionRuntimeAttempt, binding.command_id)
+            assert attempt is not None
+            session.delete(attempt)
+
+    overrides: dict[str, object] = {}
+    if changed == "owner":
+        overrides["owner_user_id"] = uuid4()
+    elif changed == "job":
+        overrides["job_id"] = uuid4()
+    elif changed == "fence":
+        overrides["execution_fence"] = binding.execution_fence + 1
+    elif changed == "epoch":
+        overrides["owner_deletion_epoch"] = binding.owner_deletion_epoch + 1
+    elif changed == "scope":
+        overrides["scope"] = {"type": "PROJECT", "project_id": str(uuid4())}
+    cleanup_kind = "CLAIM_RELEASE" if changed == "kind" else "RESERVATION_RELEASE"
+    expected_digest = "f" * 64 if changed == "digest" else dispatch_digest(dispatch)
+    authority = _terminal_cleanup_authority(
+        binding,
+        scope,
+        cleanup_kind=cleanup_kind,
+        **overrides,
+    )
+
+    with pytest.raises((CollectionRuntimeConflict, PrivateScopeRejected)):
+        _release_collection_reservation(
+            runtime_session_factory,
+            binding.command_id,
+            expected_dispatch_digest=expected_digest,
+            private_scope=authority,
+            private_binding=binding,
+        )
+
+    with runtime_session_factory() as session:
+        attempt = session.get(CollectionRuntimeAttempt, binding.command_id)
+        if changed == "absent":
+            assert attempt is None
+        else:
+            assert attempt is not None
+            assert attempt.state == "RESERVED"
+            assert attempt.claim_token == (claim_token if changed == "claimed" else None)
 
 
 @pytest.mark.approved_postgres

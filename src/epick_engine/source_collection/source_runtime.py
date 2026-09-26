@@ -62,6 +62,7 @@ from epick_engine.source_collection.source_runtime_store import (
     dispatch_digest,
     load_bound_collection_attempt,
     release_collection_claim,
+    release_collection_reservation,
     renew_collection_claim,
     reserve_collection_attempt,
 )
@@ -300,6 +301,9 @@ class RuntimeStoreOperations:
     )
     release_claim: Callable[..., CollectionRuntimeAttempt] = field(
         default_factory=lambda: release_collection_claim
+    )
+    release_reservation: Callable[..., CollectionRuntimeAttempt] = field(
+        default_factory=lambda: release_collection_reservation
     )
     commit_candidate: Callable[..., StagedResultProposal] = field(
         default_factory=lambda: commit_collection_candidate
@@ -723,6 +727,36 @@ def _release_after_clean_failure(
         return
 
 
+def _release_reservation_after_semantic_denial(
+    session_factory: SessionFactory,
+    command_id: UUID,
+    *,
+    binding: W1PrivateBinding,
+    scope: PrivateDeletionScope,
+    authority_client: PrivateAuthorityClient,
+    expected_dispatch_digest: str,
+    store_operations: RuntimeStoreOperations,
+) -> None:
+    try:
+        cleanup_authority = _authorize_terminal_cleanup(
+            binding,
+            scope,
+            "RESERVATION_RELEASE",
+            authority_client,
+        )
+        store_operations.release_reservation(
+            session_factory,
+            command_id,
+            expected_dispatch_digest=expected_dispatch_digest,
+            private_scope=cleanup_authority,
+            private_binding=binding,
+        )
+    except Exception:
+        # A changed/absent/claimed row or uncertain cleanup stays intact for
+        # investigation; terminal authority must never permit another mutation.
+        return
+
+
 def handle_collection_dispatch(
     dispatch: W1Dispatch,
     *,
@@ -795,7 +829,19 @@ def handle_collection_dispatch(
         raise RuntimeAuthorizationError("collection runtime policy revision is stale")
 
     claim_token = uuid_factory()
-    private_scope = _authorize_write(binding, scope, private_authority_client)
+    try:
+        private_scope = _authorize_write(binding, scope, private_authority_client)
+    except _CurrentWriteSemanticallyDenied:
+        _release_reservation_after_semantic_denial(
+            session_factory,
+            validated.payload.command_id,
+            binding=binding,
+            scope=scope,
+            authority_client=private_authority_client,
+            expected_dispatch_digest=expected_dispatch_digest,
+            store_operations=operations,
+        )
+        raise
     claimed = operations.claim_attempt(
         session_factory,
         validated.payload.command_id,
