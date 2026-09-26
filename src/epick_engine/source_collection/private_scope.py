@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Self
 from uuid import UUID
 
 from sqlalchemy import select
@@ -15,6 +15,10 @@ from epick_engine.source_collection.persistence import (
     PrivateDeletionProjectTombstone,
 )
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
+
+if TYPE_CHECKING:
+    from epick_engine.source_collection.commit_gate_contracts import CommitGateCommand
+    from epick_engine.source_collection.w1_private_authority_contracts import GateAuthorityResponse
 
 SIGNED_64_MAX = 9_223_372_036_854_775_807
 
@@ -131,16 +135,149 @@ class PrivateWriteScope:
             raise PrivateScopeRejected("private scope job binding does not match")
 
 
-def lock_private_write_scope(session: Session, proof: PrivateWriteScope) -> None:
-    """Lock the owner fence first and reject deleted or non-current write scope."""
+@dataclass(frozen=True, slots=True)
+class PrivateGateAuthority:
+    """One exact W1-issued gate decision, distinct from current-write proof."""
 
-    if not isinstance(proof, PrivateWriteScope):
-        raise PrivateScopeRejected("a private write scope from an authority decision is required")
+    owner_user_id: UUID
+    owner_deletion_epoch: int
+    scope: PrivateDeletionScope
+    authority_ref: str
+    command_id: UUID
+    job_id: UUID
+    execution_fence: int
+    operation_id: UUID
+    operation_revision: int
+    action: Literal["PREPARE", "FINALIZE", "ABORT", "PURGE"]
+    phase: Literal["APPLY", "ACK_RELAY"]
+    result_digest: str
+    purge_owner_deletion_epoch: int | None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.owner_user_id, UUID):
+            raise PrivateScopeRejected("private gate authority owner must be a UUID")
+        if (
+            isinstance(self.owner_deletion_epoch, bool)
+            or not isinstance(self.owner_deletion_epoch, int)
+            or not 0 <= self.owner_deletion_epoch <= SIGNED_64_MAX
+        ):
+            raise PrivateScopeRejected("private gate authority owner epoch is invalid")
+        if not isinstance(self.scope, PrivateDeletionScope):
+            raise PrivateScopeRejected("private gate authority scope is invalid")
+        if not isinstance(self.authority_ref, str) or not self.authority_ref.strip():
+            raise PrivateScopeRejected("private gate authority reference is invalid")
+        for uuid_value, label in (
+            (self.command_id, "command"),
+            (self.job_id, "Job"),
+            (self.operation_id, "operation"),
+        ):
+            if not isinstance(uuid_value, UUID):
+                raise PrivateScopeRejected(f"private gate authority {label} must be a UUID")
+        for integer_value, label in (
+            (self.execution_fence, "execution fence"),
+            (self.operation_revision, "operation revision"),
+        ):
+            if (
+                isinstance(integer_value, bool)
+                or not isinstance(integer_value, int)
+                or not 1 <= integer_value <= SIGNED_64_MAX
+            ):
+                raise PrivateScopeRejected(f"private gate authority {label} is invalid")
+        if self.action not in {"PREPARE", "FINALIZE", "ABORT", "PURGE"}:
+            raise PrivateScopeRejected("private gate authority action is invalid")
+        if self.phase not in {"APPLY", "ACK_RELAY"}:
+            raise PrivateScopeRejected("private gate authority phase is invalid")
+        if (
+            not isinstance(self.result_digest, str)
+            or len(self.result_digest) != 71
+            or not self.result_digest.startswith("sha256:")
+        ):
+            raise PrivateScopeRejected("private gate authority digest is invalid")
+        try:
+            int(self.result_digest[7:], 16)
+        except ValueError:
+            raise PrivateScopeRejected("private gate authority digest is invalid") from None
+        if self.action == "PURGE":
+            if (
+                isinstance(self.purge_owner_deletion_epoch, bool)
+                or not isinstance(self.purge_owner_deletion_epoch, int)
+                or not 1 <= self.purge_owner_deletion_epoch <= SIGNED_64_MAX
+                or self.purge_owner_deletion_epoch <= self.owner_deletion_epoch
+            ):
+                raise PrivateScopeRejected("private gate authority purge epoch is invalid")
+        elif self.purge_owner_deletion_epoch is not None:
+            raise PrivateScopeRejected("private gate authority purge epoch is invalid")
+
+    @classmethod
+    def from_w1_response(cls, response: GateAuthorityResponse) -> Self:
+        from epick_engine.source_collection.w1_private_authority_contracts import (  # noqa: PLC0415
+            GateAuthorityResponse,
+        )
+
+        if not isinstance(response, GateAuthorityResponse):
+            raise PrivateScopeRejected("a W1 gate authority response is required")
+        try:
+            scope = PrivateDeletionScope.from_mapping(response.scope)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise PrivateScopeRejected("private gate authority scope is invalid") from exc
+        return cls(
+            owner_user_id=response.owner_user_id,
+            owner_deletion_epoch=response.owner_deletion_epoch,
+            scope=scope,
+            authority_ref=response.authority_ref,
+            command_id=response.command_id,
+            job_id=response.job_id,
+            execution_fence=response.execution_fence,
+            operation_id=response.operation_id,
+            operation_revision=response.operation_revision,
+            action=response.action,
+            phase=response.phase,
+            result_digest=response.result_digest,
+            purge_owner_deletion_epoch=response.purge_owner_deletion_epoch,
+        )
+
+    @property
+    def kind(self) -> Literal["ACCOUNT", "PROJECT"]:
+        return self.scope.kind
+
+    @property
+    def project_id(self) -> UUID | None:
+        return self.scope.project_id
+
+    def assert_bound_to(
+        self,
+        gate: CommitGateCommand,
+        *,
+        phase: Literal["APPLY", "ACK_RELAY"],
+    ) -> None:
+        from epick_engine.source_collection.commit_gate_contracts import (  # noqa: PLC0415
+            CommitGateCommand,
+        )
+
+        if not isinstance(gate, CommitGateCommand) or (
+            self.owner_user_id != gate.authenticated_owner_ref
+            or self.owner_deletion_epoch != gate.owner_deletion_epoch
+            or self.command_id != gate.command_id
+            or self.job_id != gate.job_id
+            or self.execution_fence != gate.execution_fence
+            or self.operation_id != gate.operation_id
+            or self.operation_revision != gate.operation_revision
+            or self.action != gate.action
+            or self.phase != phase
+            or self.result_digest != gate.result_digest
+            or self.purge_owner_deletion_epoch != gate.purge_owner_deletion_epoch
+        ):
+            raise PrivateScopeRejected("private gate authority binding does not match")
+
+
+def _lock_private_owner_state(
+    session: Session,
+    owner_user_id: UUID,
+) -> PrivateDeletionOwnerState:
     session.execute(
         postgresql_insert(PrivateDeletionOwnerState)
         .values(
-            owner_user_id=proof.owner_user_id,
+            owner_user_id=owner_user_id,
             latest_epoch=0,
             account_deleted=False,
         )
@@ -148,24 +285,76 @@ def lock_private_write_scope(session: Session, proof: PrivateWriteScope) -> None
     )
     owner_state = session.scalar(
         select(PrivateDeletionOwnerState)
-        .where(PrivateDeletionOwnerState.owner_user_id == proof.owner_user_id)
+        .where(PrivateDeletionOwnerState.owner_user_id == owner_user_id)
         .with_for_update()
     )
     if owner_state is None:
         raise RuntimeError("private deletion owner state row was not found")
+    return owner_state
+
+
+def _assert_current_private_scope(
+    session: Session,
+    *,
+    owner_state: PrivateDeletionOwnerState,
+    owner_user_id: UUID,
+    owner_deletion_epoch: int,
+    kind: Literal["ACCOUNT", "PROJECT"],
+    project_id: UUID | None,
+) -> None:
     if owner_state.account_deleted:
         raise PrivateScopeRejected("private write rejected by account tombstone")
-    if proof.owner_deletion_epoch != owner_state.latest_epoch:
+    if owner_deletion_epoch != owner_state.latest_epoch:
         raise PrivateScopeRejected("private write proof does not bind the current epoch")
-
-    if proof.kind == "PROJECT":
+    if kind == "PROJECT":
         tombstone = session.scalar(
             select(PrivateDeletionProjectTombstone)
             .where(
-                PrivateDeletionProjectTombstone.owner_user_id == proof.owner_user_id,
-                PrivateDeletionProjectTombstone.project_id == proof.project_id,
+                PrivateDeletionProjectTombstone.owner_user_id == owner_user_id,
+                PrivateDeletionProjectTombstone.project_id == project_id,
             )
             .with_for_update()
         )
         if tombstone is not None:
             raise PrivateScopeRejected("private write rejected by project tombstone")
+
+
+def lock_private_gate_scope(session: Session, decision: PrivateGateAuthority) -> None:
+    """Lock owner first and enforce current or historical gate policy."""
+
+    if not isinstance(decision, PrivateGateAuthority):
+        raise PrivateScopeRejected("a W1-issued private gate authority is required")
+    if decision.phase != "APPLY":
+        raise PrivateScopeRejected("private gate authority phase does not permit APPLY")
+    owner_state = _lock_private_owner_state(session, decision.owner_user_id)
+    if decision.action in {"PREPARE", "FINALIZE"}:
+        _assert_current_private_scope(
+            session,
+            owner_state=owner_state,
+            owner_user_id=decision.owner_user_id,
+            owner_deletion_epoch=decision.owner_deletion_epoch,
+            kind=decision.kind,
+            project_id=decision.project_id,
+        )
+    elif decision.action == "PURGE":
+        purge_epoch = decision.purge_owner_deletion_epoch
+        assert purge_epoch is not None
+        if purge_epoch < owner_state.latest_epoch:
+            raise PrivateScopeRejected("private gate PURGE would regress owner deletion epoch")
+
+
+def lock_private_write_scope(session: Session, proof: PrivateWriteScope) -> None:
+    """Lock the owner fence first and reject deleted or non-current write scope."""
+
+    if not isinstance(proof, PrivateWriteScope):
+        raise PrivateScopeRejected("a private write scope from an authority decision is required")
+
+    owner_state = _lock_private_owner_state(session, proof.owner_user_id)
+    _assert_current_private_scope(
+        session,
+        owner_state=owner_state,
+        owner_user_id=proof.owner_user_id,
+        owner_deletion_epoch=proof.owner_deletion_epoch,
+        kind=proof.kind,
+        project_id=proof.project_id,
+    )

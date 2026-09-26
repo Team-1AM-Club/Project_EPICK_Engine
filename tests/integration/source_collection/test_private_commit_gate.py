@@ -12,7 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event, Thread
+from time import monotonic, sleep
 from uuid import UUID, uuid4
 
 import pytest
@@ -24,6 +25,7 @@ from sqlalchemy import Engine, create_engine, event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from tests.support.commit_gate_inspection import inspect_private_gate
 
+from epick_engine.source_collection import private_scope as private_scope_module
 from epick_engine.source_collection.commit_gate_contracts import (
     CommitGateCommand,
     parse_commit_gate_command,
@@ -31,6 +33,7 @@ from epick_engine.source_collection.commit_gate_contracts import (
 )
 from epick_engine.source_collection.commit_gate_store import (
     CommitGateRejected,
+    PrivateCommitGateAck,
     PrivateCommitStage,
     PrivateStagedOutbox,
     _hash,
@@ -65,6 +68,7 @@ from epick_engine.source_collection.private_scope import (
 from epick_engine.source_collection.source_runtime_gate import (
     apply_collection_commit_gate as _apply_collection_commit_gate,
 )
+from epick_engine.source_collection.w1_private_authority_contracts import GateAuthorityResponse
 
 pytestmark = pytest.mark.approved_postgres
 NOW = datetime(2026, 9, 18, tzinfo=UTC)
@@ -156,17 +160,67 @@ def _trusted_scope(
     )
 
 
-def _trusted_gate_scope(gate: CommitGateCommand) -> PrivateWriteScope:
-    return PrivateWriteScope(
-        PrivateWriteAuthorityDecision(
-            owner_user_id=gate.authenticated_owner_ref,
-            owner_deletion_epoch=gate.owner_deletion_epoch,
-            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
-            authority_ref="w1:test-private-write-authority",
-            command_id=gate.command_id,
-            job_id=gate.job_id,
+def _gate_authority_response(
+    gate: CommitGateCommand,
+    *,
+    phase: str = "APPLY",
+    kind: str = "ACCOUNT",
+    project_id: UUID | None = None,
+    **overrides: object,
+) -> GateAuthorityResponse:
+    raw: dict[str, object] = {
+        "schema_version": "w1.private.w2-gate-authority.v1",
+        "owner_user_id": str(gate.authenticated_owner_ref),
+        "owner_deletion_epoch": gate.owner_deletion_epoch,
+        "command_id": str(gate.command_id),
+        "job_id": str(gate.job_id),
+        "execution_fence": gate.execution_fence,
+        "scope": (
+            {"type": "ACCOUNT"}
+            if kind == "ACCOUNT"
+            else {"type": "PROJECT", "project_id": str(project_id)}
+        ),
+        "operation_id": str(gate.operation_id),
+        "operation_revision": gate.operation_revision,
+        "action": gate.action,
+        "phase": phase,
+        "result_digest": gate.result_digest,
+        "purge_owner_deletion_epoch": gate.purge_owner_deletion_epoch,
+        "authority_ref": "w1:test-gate-apply-authority",
+    }
+    raw.update(overrides)
+    return GateAuthorityResponse.model_validate(raw)
+
+
+def _trusted_gate_authority(
+    gate: CommitGateCommand,
+    *,
+    kind: str = "ACCOUNT",
+    project_id: UUID | None = None,
+):
+    return private_scope_module.PrivateGateAuthority.from_w1_response(
+        _gate_authority_response(
+            gate,
+            kind=kind,
+            project_id=project_id,
         )
     )
+
+
+def _wait_for_postgres_lock(database_engine: Engine, backend_pid: int) -> None:
+    deadline = monotonic() + 2.0
+    with database_engine.connect() as connection:
+        while monotonic() < deadline:
+            if (
+                connection.scalar(
+                    text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                    {"pid": backend_pid},
+                )
+                == "Lock"
+            ):
+                return
+            sleep(0.01)
+    raise AssertionError("private gate transaction never waited on the owner lock")
 
 
 def stage_private_result(
@@ -184,7 +238,8 @@ def apply_commit_gate(
     gate: CommitGateCommand,
     **kwargs,
 ):
-    kwargs.setdefault("private_scope", _trusted_gate_scope(gate))
+    if "private_gate_authority" not in kwargs:
+        kwargs["private_gate_authority"] = _trusted_gate_authority(gate)
     return _apply_commit_gate(session, gate, **kwargs)
 
 
@@ -193,7 +248,8 @@ def apply_collection_commit_gate(
     gate: CommitGateCommand,
     **kwargs,
 ):
-    kwargs.setdefault("private_scope", _trusted_gate_scope(gate))
+    if "private_gate_authority" not in kwargs:
+        kwargs["private_gate_authority"] = _trusted_gate_authority(gate)
     return _apply_collection_commit_gate(session, gate, **kwargs)
 
 
@@ -252,7 +308,210 @@ def test_stage_requires_exact_trusted_scope_and_persists_explicit_attribution(
         assert project_stage.project_id == project_id
 
 
-def test_stage_and_missing_stage_purge_reject_stale_or_deleted_scope(session_factory) -> None:
+def test_gate_apply_requires_independent_exact_authority(session_factory) -> None:
+    command, result = _pair()
+    gate = _gate(command, result, "PREPARE", operation_id=uuid4(), revision=1)
+    with session_factory.begin() as session:
+        stage_private_result(
+            session,
+            command,
+            result,
+            message_id=uuid4(),
+            occurred_at=NOW,
+        )
+
+    with session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="gate authority"):
+            _apply_commit_gate(
+                session,
+                gate,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+                private_gate_authority=_trusted_scope(command),
+            )
+
+    mutations = (
+        {"operation_id": str(uuid4())},
+        {"operation_revision": gate.operation_revision + 1},
+        {"action": "ABORT"},
+        {"result_digest": f"sha256:{'0' * 64}"},
+        {"phase": "ACK_RELAY"},
+        {"scope": {"type": "PROJECT", "project_id": str(uuid4())}},
+    )
+    for mutation in mutations:
+        response = _gate_authority_response(gate, **mutation)
+        decision = private_scope_module.PrivateGateAuthority.from_w1_response(response)
+        with session_factory.begin() as session:
+            with pytest.raises(PrivateScopeRejected, match="gate authority|scope binding"):
+                _apply_commit_gate(
+                    session,
+                    gate,
+                    ack_message_id=uuid4(),
+                    occurred_at=NOW,
+                    private_gate_authority=decision,
+                )
+
+    with session_factory.begin() as session:
+        with pytest.raises(PrivateScopeRejected, match="gate authority"):
+            _apply_commit_gate(
+                session,
+                gate,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+                private_gate_authority=None,
+            )
+
+    with session_factory() as session:
+        stage = session.get(PrivateCommitStage, command.command_id)
+        assert stage is not None
+        assert stage.state == "STAGED"
+        assert stage.result_payload is not None
+        assert session.query(PrivateCommitGateAck).count() == 0
+
+
+@pytest.mark.parametrize("kind", ["ACCOUNT", "PROJECT"])
+@pytest.mark.parametrize(
+    ("purge_epoch", "accepted"),
+    [(4, False), (5, True), (6, True)],
+)
+def test_stage_less_purge_epoch_boundary_creates_only_control_shell(
+    session_factory,
+    kind: str,
+    purge_epoch: int,
+    accepted: bool,
+) -> None:
+    command, result = _pair()
+    project_id = uuid4() if kind == "PROJECT" else None
+    gate = _gate(
+        command,
+        result,
+        "PURGE",
+        operation_id=uuid4(),
+        revision=1,
+        epoch=purge_epoch,
+    )
+    with session_factory.begin() as session:
+        session.add(
+            PrivateDeletionOwnerState(
+                owner_user_id=command.authenticated_owner_ref,
+                latest_epoch=5,
+                account_deleted=kind == "ACCOUNT",
+            )
+        )
+        if project_id is not None:
+            session.add(
+                PrivateDeletionProjectTombstone(
+                    owner_user_id=command.authenticated_owner_ref,
+                    project_id=project_id,
+                    deletion_epoch=5,
+                )
+            )
+
+    authority = _trusted_gate_authority(gate, kind=kind, project_id=project_id)
+    if accepted:
+        with session_factory.begin() as session:
+            _apply_commit_gate(
+                session,
+                gate,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+                private_gate_authority=authority,
+            )
+    else:
+        with session_factory.begin() as session:
+            with pytest.raises(PrivateScopeRejected, match="regress"):
+                _apply_commit_gate(
+                    session,
+                    gate,
+                    ack_message_id=uuid4(),
+                    occurred_at=NOW,
+                    private_gate_authority=authority,
+                )
+
+    with session_factory() as session:
+        owner = session.get(PrivateDeletionOwnerState, command.authenticated_owner_ref)
+        assert owner is not None
+        assert owner.latest_epoch == 5
+        stage = session.get(PrivateCommitStage, command.command_id)
+        if accepted:
+            assert stage is not None
+            assert stage.state == "PURGED"
+            assert stage.result_payload is None
+            assert stage.max_purge_epoch == str(purge_epoch)
+        else:
+            assert stage is None
+
+
+def test_stage_less_abort_waits_for_owner_lock_before_creating_control_shell(
+    database_engine: Engine,
+    session_factory,
+) -> None:
+    command, result = _pair()
+    gate = _gate(command, result, "ABORT", operation_id=uuid4(), revision=1)
+    authority = _trusted_gate_authority(gate)
+    with session_factory.begin() as session:
+        session.add(
+            PrivateDeletionOwnerState(
+                owner_user_id=command.authenticated_owner_ref,
+                latest_epoch=0,
+                account_deleted=False,
+            )
+        )
+
+    ready = Event()
+    backend_pid: list[int] = []
+    outcomes: list[str] = []
+    errors: list[BaseException] = []
+
+    def apply_after_owner_lock() -> None:
+        try:
+            with session_factory.begin() as session:
+                backend_pid.append(int(session.scalar(text("SELECT pg_backend_pid()"))))
+                ready.set()
+                ack = _apply_commit_gate(
+                    session,
+                    gate,
+                    ack_message_id=uuid4(),
+                    occurred_at=NOW,
+                    private_gate_authority=authority,
+                )
+                outcomes.append(ack.outcome)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    with session_factory() as owner_session:
+        with owner_session.begin():
+            owner = owner_session.scalar(
+                select(PrivateDeletionOwnerState)
+                .where(PrivateDeletionOwnerState.owner_user_id == command.authenticated_owner_ref)
+                .with_for_update()
+            )
+            assert owner is not None
+            owner.latest_epoch = 2
+            worker = Thread(target=apply_after_owner_lock, daemon=True)
+            worker.start()
+            assert ready.wait(timeout=1)
+            _wait_for_postgres_lock(database_engine, backend_pid[0])
+            with session_factory() as observer:
+                assert observer.get(PrivateCommitStage, command.command_id) is None
+
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    assert errors == []
+    assert outcomes == ["APPLIED"]
+    with session_factory() as session:
+        stage = session.get(PrivateCommitStage, command.command_id)
+        owner = session.get(PrivateDeletionOwnerState, command.authenticated_owner_ref)
+        assert stage is not None
+        assert stage.state == "ABORTED"
+        assert stage.result_payload is None
+        assert owner is not None
+        assert owner.latest_epoch == 2
+
+
+def test_stage_rejects_stale_or_deleted_scope_but_historical_purge_is_allowed(
+    session_factory,
+) -> None:
     stale_command, stale_result = _pair()
     with session_factory.begin() as session:
         session.add(
@@ -302,20 +561,24 @@ def test_stage_and_missing_stage_purge_reject_stale_or_deleted_scope(session_fac
                 occurred_at=NOW,
                 private_scope=proof,
             )
-        with pytest.raises(PrivateScopeRejected, match="project tombstone"):
-            apply_commit_gate(
-                session,
-                _gate(
-                    deleted_command,
-                    deleted_result,
-                    "PURGE",
-                    operation_id=uuid4(),
-                    revision=1,
-                ),
-                ack_message_id=uuid4(),
-                occurred_at=NOW,
-                private_scope=proof,
-            )
+        purge = _gate(
+            deleted_command,
+            deleted_result,
+            "PURGE",
+            operation_id=uuid4(),
+            revision=1,
+        )
+        apply_commit_gate(
+            session,
+            purge,
+            ack_message_id=uuid4(),
+            occurred_at=NOW,
+            private_gate_authority=_trusted_gate_authority(
+                purge,
+                kind="PROJECT",
+                project_id=project_id,
+            ),
+        )
 
 
 def test_stage_prepare_are_invisible_and_finalize_is_owner_only(session_factory) -> None:
@@ -386,8 +649,14 @@ def _stage(session: Session, command: CollectionCommand, result: CollectionResul
     return stage_private_result(session, command, result, message_id=uuid4(), occurred_at=NOW)
 
 
-def _apply(session: Session, gate: CommitGateCommand):
-    return apply_commit_gate(session, gate, ack_message_id=uuid4(), occurred_at=NOW)
+def _apply(session: Session, gate: CommitGateCommand, **kwargs):
+    return apply_commit_gate(
+        session,
+        gate,
+        ack_message_id=uuid4(),
+        occurred_at=NOW,
+        **kwargs,
+    )
 
 
 def _state(session: Session, command: CollectionCommand):
@@ -521,8 +790,8 @@ def test_exact_inbox_replay_rejects_a_different_trusted_scope(session_factory) -
                 gate,
                 ack_message_id=uuid4(),
                 occurred_at=NOW,
-                private_scope=_trusted_scope(
-                    command,
+                private_gate_authority=_trusted_gate_authority(
+                    gate,
                     kind="PROJECT",
                     project_id=UUID("00000000-0000-4000-8000-000000000299"),
                 ),
@@ -576,7 +845,15 @@ def test_message_id_mutation_and_stage_payload_mutation_are_rejected(session_fac
             gate.model_copy(update={"execution_fence": True}),
         ]:
             with pytest.raises(CommitGateRejected):
-                _apply(session, changed)
+                _apply(
+                    session,
+                    changed,
+                    private_gate_authority=(
+                        _trusted_gate_authority(gate)
+                        if changed.execution_fence is True
+                        else _trusted_gate_authority(changed)
+                    ),
+                )
             assert _state(session, command) == before
         with pytest.raises(CommitGateRejected):
             stage_private_result(

@@ -105,6 +105,7 @@ from epick_engine.source_collection.policy import (
 )
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.private_scope import (
+    PrivateGateAuthority,
     PrivateScopeRejected,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
@@ -139,6 +140,7 @@ from epick_engine.source_collection.source_runtime_store import (
 from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
 from epick_engine.source_collection.w1_private_authority_contracts import (
     CurrentWriteScopeLookupResponse,
+    GateAuthorityResponse,
     PrivateWriteAuthorityResponse,
     W1PrivateBinding,
 )
@@ -705,17 +707,26 @@ class _AvailableDispatchLookup:
         )
 
 
-def _gate_scope(gate: CommitGateCommand) -> PrivateWriteScope:
-    return PrivateWriteScope(
-        PrivateWriteAuthorityDecision(
-            owner_user_id=gate.authenticated_owner_ref,
-            owner_deletion_epoch=gate.owner_deletion_epoch,
-            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
-            authority_ref="w1:test-runtime-authority",
-            command_id=gate.command_id,
-            job_id=gate.job_id,
-        )
+def _gate_authority(gate: CommitGateCommand) -> PrivateGateAuthority:
+    response = GateAuthorityResponse.model_validate(
+        {
+            "schema_version": "w1.private.w2-gate-authority.v1",
+            "owner_user_id": str(gate.authenticated_owner_ref),
+            "owner_deletion_epoch": gate.owner_deletion_epoch,
+            "command_id": str(gate.command_id),
+            "job_id": str(gate.job_id),
+            "execution_fence": gate.execution_fence,
+            "scope": {"type": "ACCOUNT"},
+            "operation_id": str(gate.operation_id),
+            "operation_revision": gate.operation_revision,
+            "action": gate.action,
+            "phase": "APPLY",
+            "result_digest": gate.result_digest,
+            "purge_owner_deletion_epoch": gate.purge_owner_deletion_epoch,
+            "authority_ref": "w1:test-runtime-gate-authority",
+        }
     )
+    return PrivateGateAuthority.from_w1_response(response)
 
 
 def reserve_collection_attempt(session, dispatch, *args, **kwargs):
@@ -761,7 +772,7 @@ def replay_staged_collection(session_factory, dispatch, **kwargs):
 
 
 def apply_commit_gate(session, gate, **kwargs):
-    kwargs.setdefault("private_scope", _gate_scope(gate))
+    kwargs.setdefault("private_gate_authority", _gate_authority(gate))
     return _apply_commit_gate(session, gate, **kwargs)
 
 

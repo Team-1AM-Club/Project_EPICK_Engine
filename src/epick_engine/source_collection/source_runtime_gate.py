@@ -29,8 +29,8 @@ from epick_engine.source_collection.persistence import (
     lock_source_policy_scope,
 )
 from epick_engine.source_collection.private_scope import (
+    PrivateGateAuthority,
     PrivateScopeRejected,
-    PrivateWriteScope,
 )
 from epick_engine.source_collection.w1_transport import W1WireContractError, _parse_wire
 
@@ -53,7 +53,7 @@ def _require_exact_integer_wire_types(raw: object, parsed: object) -> None:
 def _assert_gate_stage_binding(
     gate: CommitGateAckProposal,
     stage: PrivateCommitStage,
-    private_scope: PrivateWriteScope,
+    private_gate_authority: PrivateGateAuthority,
 ) -> None:
     if (
         stage.owner_ref != gate.authenticated_owner_ref
@@ -65,8 +65,8 @@ def _assert_gate_stage_binding(
     ):
         raise CommitGateRejected("collection commit-gate binding mismatch")
     if (
-        stage.private_scope_kind != private_scope.kind
-        or stage.project_id != private_scope.project_id
+        stage.private_scope_kind != private_gate_authority.kind
+        or stage.project_id != private_gate_authority.project_id
     ):
         raise PrivateScopeRejected("collection stage private scope does not match")
 
@@ -222,11 +222,11 @@ def apply_collection_candidate_transition(
     gate: CommitGateAckProposal,
     stage: PrivateCommitStage,
     *,
-    private_scope: PrivateWriteScope,
+    private_gate_authority: PrivateGateAuthority,
 ) -> None:
     """Apply the public half of a collection gate while its command lock is held."""
 
-    _assert_gate_stage_binding(gate, stage, private_scope)
+    _assert_gate_stage_binding(gate, stage, private_gate_authority)
     candidate = _lock_candidate(session, gate.command_id)
     if candidate is not None and (
         candidate.private_scope_kind != stage.private_scope_kind
@@ -308,7 +308,7 @@ def apply_collection_commit_gate(
     *,
     ack_message_id: UUID,
     occurred_at: datetime,
-    private_scope: PrivateWriteScope | None = None,
+    private_gate_authority: PrivateGateAuthority | None = None,
 ) -> CommitGateAckProposal:
     """Apply private gate state and collection promotion as one savepoint."""
 
@@ -319,9 +319,9 @@ def apply_collection_commit_gate(
             ack_message_id=ack_message_id,
             occurred_at=occurred_at,
             missing_stage_kind="COLLECTION",
-            private_scope=private_scope,
+            private_gate_authority=private_gate_authority,
         )
-        assert private_scope is not None
+        assert private_gate_authority is not None
         stage = session.get(
             PrivateCommitStage,
             ack.command_id,
@@ -333,7 +333,7 @@ def apply_collection_commit_gate(
             session,
             ack,
             stage,
-            private_scope=private_scope,
+            private_gate_authority=private_gate_authority,
         )
         session.flush()
         return ack

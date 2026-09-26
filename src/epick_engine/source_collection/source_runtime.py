@@ -30,6 +30,7 @@ from epick_engine.source_collection.commit_gate_runtime import (
     ConsumeResult,
     GateApplier,
     QueueDelivery,
+    _resolve_gate_apply_authority,
     _sender_matches,
     _strict_json_object,
 )
@@ -66,7 +67,11 @@ from epick_engine.source_collection.source_runtime_store import (
 from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
 from epick_engine.source_collection.w1_private_authority_contracts import (
     CurrentWriteScopeLookupResponse,
+    GateAuthorityResponse,
+    GatePhase,
+    GateScopeLookupResponse,
     PrivateWriteAuthorityResponse,
+    W1GateBinding,
     W1PrivateBinding,
 )
 from epick_engine.source_collection.w1_transport import (
@@ -110,6 +115,19 @@ class PrivateAuthorityClient(Protocol):
         scope: PrivateDeletionScope,
     ) -> PrivateWriteAuthorityResponse: ...
 
+    def lookup_gate_scope(
+        self,
+        gate: W1GateBinding,
+        phase: GatePhase,
+    ) -> GateScopeLookupResponse: ...
+
+    def authorize_gate(
+        self,
+        gate: W1GateBinding,
+        phase: GatePhase,
+        scope: PrivateDeletionScope,
+    ) -> GateAuthorityResponse: ...
+
 
 class CollectionInputProvider(Protocol):
     def load(self, command: CollectionCommand) -> StaticCollectionInput: ...
@@ -132,6 +150,8 @@ type SourceRuntimeMode = Literal["mixed", "collection", "gate"]
 
 
 class GateSessionFactory(Protocol):
+    def __call__(self) -> Session: ...
+
     def begin(self) -> AbstractContextManager[Session]: ...
 
 
@@ -900,16 +920,20 @@ def consume_source_runtime_once(
                 raise RuntimeError("source runtime receipt visibility is no longer active")
         else:
             gate = parse_commit_gate_command(payload)
-            if authority_provider is None:
-                raise RuntimeAuthorizationError("trusted private authority provider is required")
-            private_scope = PrivateWriteScope(authority_provider(gate))
+            if private_authority_client is None:
+                raise RuntimeAuthorizationError("protected W1 private authority client is required")
+            private_gate_authority = _resolve_gate_apply_authority(
+                session_factory,
+                gate,
+                private_authority_client,
+            )
             with session_factory.begin() as session:
                 ack = gate_applier(
                     session,
                     gate,
                     ack_message_id=message_id_factory(),
                     occurred_at=clock(),
-                    private_scope=private_scope,
+                    private_gate_authority=private_gate_authority,
                 )
                 persisted_ack = session.get(
                     PrivateCommitGateAck,

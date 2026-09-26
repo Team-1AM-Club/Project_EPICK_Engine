@@ -48,10 +48,16 @@ from epick_engine.source_collection.ct15_transport_controls import ControlledQue
 from epick_engine.source_collection.persistence import Base, PrivateDeletionOwnerState
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.private_scope import (
+    PrivateGateAuthority,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
 )
 from epick_engine.source_collection.source_runtime import build_collection_relay_authorizer
+from epick_engine.source_collection.w1_private_authority_contracts import (
+    GateAuthorityResponse,
+    GateScopeLookupResponse,
+    W1GateBinding,
+)
 from epick_engine.source_collection.w1_transport import LookupRequest, LookupResponse
 
 pytestmark = pytest.mark.approved_postgres
@@ -185,15 +191,65 @@ def _command_scope(command: CollectionCommand) -> PrivateWriteScope:
     )
 
 
-def _gate_authority(gate: CommitGateCommand) -> PrivateWriteAuthorityDecision:
-    return PrivateWriteAuthorityDecision(
-        owner_user_id=gate.authenticated_owner_ref,
-        owner_deletion_epoch=gate.owner_deletion_epoch,
-        scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
-        authority_ref="w1:test-delivery-authority",
-        command_id=gate.command_id,
-        job_id=gate.job_id,
+def _gate_payload(binding: W1GateBinding, phase: str) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "owner_user_id": str(binding.private.owner_user_id),
+        "owner_deletion_epoch": binding.private.owner_deletion_epoch,
+        "command_id": str(binding.private.command_id),
+        "job_id": str(binding.private.job_id),
+        "execution_fence": binding.private.execution_fence,
+        "operation_id": str(binding.operation_id),
+        "operation_revision": binding.operation_revision,
+        "action": binding.action,
+        "phase": phase,
+        "result_digest": binding.result_digest,
+    }
+    if binding.purge_owner_deletion_epoch is not None:
+        payload["purge_owner_deletion_epoch"] = binding.purge_owner_deletion_epoch
+    return payload
+
+
+def _gate_authority(gate: CommitGateCommand) -> PrivateGateAuthority:
+    binding = W1GateBinding.from_gate(gate)
+    response = GateAuthorityResponse.model_validate(
+        {
+            "schema_version": "w1.private.w2-gate-authority.v1",
+            **_gate_payload(binding, "APPLY"),
+            "scope": {"type": "ACCOUNT"},
+            "authority_ref": "w1:test-delivery-gate-authority",
+        }
     )
+    return PrivateGateAuthority.from_w1_response(response)
+
+
+class _GateAuthorityClient:
+    def lookup_gate_scope(
+        self,
+        gate: W1GateBinding,
+        phase: str,
+    ) -> GateScopeLookupResponse:
+        return GateScopeLookupResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-gate-scope-lookup.v1",
+                **_gate_payload(gate, phase),
+                "scope": {"type": "ACCOUNT"},
+            }
+        )
+
+    def authorize_gate(
+        self,
+        gate: W1GateBinding,
+        phase: str,
+        scope: PrivateDeletionScope,
+    ) -> GateAuthorityResponse:
+        return GateAuthorityResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-gate-authority.v1",
+                **_gate_payload(gate, phase),
+                "scope": scope.to_mapping(),
+                "authority_ref": "w1:test-delivery-gate-authority",
+            }
+        )
 
 
 def stage_private_result(session, command, result, **kwargs):
@@ -202,12 +258,12 @@ def stage_private_result(session, command, result, **kwargs):
 
 
 def apply_commit_gate(session, gate, **kwargs):
-    kwargs.setdefault("private_scope", PrivateWriteScope(_gate_authority(gate)))
+    kwargs.setdefault("private_gate_authority", _gate_authority(gate))
     return _apply_commit_gate(session, gate, **kwargs)
 
 
 def consume_once(session_factory, queue, expected_sender_id, **kwargs):
-    kwargs.setdefault("authority_provider", _gate_authority)
+    kwargs.setdefault("private_authority_client", _GateAuthorityClient())
     return _consume_once(session_factory, queue, expected_sender_id, **kwargs)
 
 

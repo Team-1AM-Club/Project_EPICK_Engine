@@ -28,9 +28,16 @@ from epick_engine.source_collection.commit_gate_store import (
 )
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.private_scope import (
+    PrivateGateAuthority,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
     lock_private_write_scope,
+)
+from epick_engine.source_collection.w1_private_authority_contracts import (
+    GateAuthorityResponse,
+    GatePhase,
+    GateScopeLookupResponse,
+    W1GateBinding,
 )
 from epick_engine.source_collection.w1_transport import W1WireContractError
 
@@ -82,7 +89,7 @@ class GateApplier(Protocol):
         *,
         ack_message_id: UUID,
         occurred_at: datetime,
-        private_scope: PrivateWriteScope | None = None,
+        private_gate_authority: PrivateGateAuthority | None = None,
     ) -> CommitGateAckProposal: ...
 
 
@@ -90,6 +97,21 @@ class PrivateWriteAuthorityProvider(Protocol):
     """Authenticate one commit-gate authority decision outside its wire body."""
 
     def __call__(self, gate: CommitGateCommand) -> PrivateWriteAuthorityDecision: ...
+
+
+class GateAuthorityClient(Protocol):
+    def lookup_gate_scope(
+        self,
+        gate: W1GateBinding,
+        phase: GatePhase,
+    ) -> GateScopeLookupResponse: ...
+
+    def authorize_gate(
+        self,
+        gate: W1GateBinding,
+        phase: GatePhase,
+        scope: PrivateDeletionScope,
+    ) -> GateAuthorityResponse: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +238,80 @@ def _lock_relay_scope(session: Session, command_id: UUID) -> PrivateWriteScope:
     return proof
 
 
+def _gate_response_matches(
+    response: GateScopeLookupResponse | GateAuthorityResponse,
+    gate: W1GateBinding,
+    *,
+    phase: GatePhase,
+) -> bool:
+    return (
+        response.owner_user_id == gate.private.owner_user_id
+        and response.owner_deletion_epoch == gate.private.owner_deletion_epoch
+        and response.command_id == gate.private.command_id
+        and response.job_id == gate.private.job_id
+        and response.execution_fence == gate.private.execution_fence
+        and response.operation_id == gate.operation_id
+        and response.operation_revision == gate.operation_revision
+        and response.action == gate.action
+        and response.phase == phase
+        and response.result_digest == gate.result_digest
+        and response.purge_owner_deletion_epoch == gate.purge_owner_deletion_epoch
+    )
+
+
+def _persisted_gate_scope(session: Session, gate: CommitGateCommand) -> PrivateDeletionScope | None:
+    stage = session.get(PrivateCommitStage, gate.command_id, populate_existing=True)
+    if stage is None:
+        return None
+    if (
+        stage.owner_ref != gate.authenticated_owner_ref
+        or stage.job_id != gate.job_id
+        or stage.execution_fence != str(gate.execution_fence)
+        or stage.owner_deletion_epoch != str(gate.owner_deletion_epoch)
+        or stage.result_digest != gate.result_digest
+    ):
+        raise RuntimeError("persisted private gate scope binding does not match")
+    if stage.private_scope_kind == "ACCOUNT" and stage.project_id is None:
+        return PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    if stage.private_scope_kind == "PROJECT" and isinstance(stage.project_id, UUID):
+        return PrivateDeletionScope(kind="PROJECT", project_id=stage.project_id)
+    raise RuntimeError("persisted private gate scope is unclassified")
+
+
+def _resolve_gate_apply_authority(
+    session_factory: SessionFactory,
+    gate: CommitGateCommand,
+    authority_client: GateAuthorityClient,
+) -> PrivateGateAuthority:
+    binding = W1GateBinding.from_gate(gate)
+    with session_factory() as session:
+        scope = _persisted_gate_scope(session, gate)
+    if scope is None:
+        lookup = authority_client.lookup_gate_scope(binding, "APPLY")
+        if not isinstance(lookup, GateScopeLookupResponse) or not _gate_response_matches(
+            lookup,
+            binding,
+            phase="APPLY",
+        ):
+            raise RuntimeError("W1 gate scope lookup is invalid")
+        try:
+            scope = PrivateDeletionScope.from_mapping(lookup.scope)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise RuntimeError("W1 gate scope lookup is invalid") from exc
+    response = authority_client.authorize_gate(binding, "APPLY", scope)
+    if (
+        not isinstance(response, GateAuthorityResponse)
+        or not _gate_response_matches(response, binding, phase="APPLY")
+        or response.scope != scope.to_mapping()
+    ):
+        raise RuntimeError("W1 gate APPLY authority is invalid")
+    decision = PrivateGateAuthority.from_w1_response(response)
+    decision.assert_bound_to(gate, phase="APPLY")
+    if decision.scope != scope:
+        raise RuntimeError("W1 gate APPLY authority scope is invalid")
+    return decision
+
+
 def consume_once(
     session_factory: SessionFactory,
     queue: Queue,
@@ -225,6 +321,7 @@ def consume_once(
     message_id_factory: Callable[[], UUID] = uuid4,
     apply_gate: GateApplier | None = None,
     authority_provider: PrivateWriteAuthorityProvider | None = None,
+    private_authority_client: GateAuthorityClient | None = None,
 ) -> ConsumeResult:
     """Consume at most one gate command; rejected receipts remain for retry/DLQ."""
 
@@ -245,16 +342,20 @@ def consume_once(
 
     gate_applier = apply_commit_gate if apply_gate is None else apply_gate
     try:
-        if authority_provider is None:
-            raise RuntimeError("trusted private authority provider is required")
-        private_scope = PrivateWriteScope(authority_provider(gate))
+        if private_authority_client is None:
+            raise RuntimeError("protected W1 private authority client is required")
+        private_gate_authority = _resolve_gate_apply_authority(
+            session_factory,
+            gate,
+            private_authority_client,
+        )
         with session_factory.begin() as session:
             ack = gate_applier(
                 session,
                 gate,
                 ack_message_id=message_id_factory(),
                 occurred_at=clock(),
-                private_scope=private_scope,
+                private_gate_authority=private_gate_authority,
             )
             persisted_ack = session.get(
                 PrivateCommitGateAck, ack.message_id, populate_existing=True

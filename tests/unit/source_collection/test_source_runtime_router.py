@@ -15,16 +15,22 @@ import pytest
 
 from epick_engine.source_collection.commit_gate_contracts import build_staged_result
 from epick_engine.source_collection.commit_gate_runtime import QueueDelivery
+from epick_engine.source_collection.commit_gate_store import (
+    PrivateCommitGateAck,
+    PrivateCommitStage,
+)
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
-from epick_engine.source_collection.private_scope import (
-    PrivateWriteAuthorityDecision,
-    PrivateWriteScope,
-)
+from epick_engine.source_collection.private_scope import PrivateGateAuthority
 from epick_engine.source_collection.source_runtime import (
     RuntimeAuthorizationError,
     build_collection_relay_authorizer,
     consume_source_runtime_once,
+)
+from epick_engine.source_collection.w1_private_authority_contracts import (
+    GateAuthorityResponse,
+    GateScopeLookupResponse,
+    W1GateBinding,
 )
 from epick_engine.source_collection.w1_transport import LookupRequest, LookupResponse
 
@@ -99,8 +105,12 @@ class GateSession:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def get(self, _model: object, _message_id: object, **_kwargs: object) -> PersistedAck | None:
-        return self.persisted_ack
+    def get(self, model: object, _message_id: object, **_kwargs: object) -> object | None:
+        if model is PrivateCommitStage:
+            return None
+        if model is PrivateCommitGateAck:
+            return self.persisted_ack
+        raise AssertionError("unexpected gate session model")
 
 
 class GateSessionFactory:
@@ -110,6 +120,9 @@ class GateSessionFactory:
 
     def begin(self) -> GateSession:
         self.begin_calls += 1
+        return self.session
+
+    def __call__(self) -> GateSession:
         return self.session
 
 
@@ -124,11 +137,11 @@ class RecordingGateApplier:
         *,
         ack_message_id: UUID,
         occurred_at: datetime,
-        private_scope: PrivateWriteScope,
+        private_gate_authority: PrivateGateAuthority,
     ) -> object:
         assert isinstance(ack_message_id, UUID)
         assert occurred_at == NOW
-        assert private_scope.authority_ref == "test:w1-authenticated"
+        assert private_gate_authority.authority_ref == "test:w1-gate-authority"
         self.gates.append(gate)
         session.persisted_ack = PersistedAck()
         return AppliedAck(message_id=ack_message_id)
@@ -151,6 +164,54 @@ class NeverRelayLookup:
     def lookup(self, _request: LookupRequest) -> LookupResponse:
         self.calls += 1
         raise AssertionError("this relay path must not perform a W1 lookup")
+
+
+def _gate_payload(binding: W1GateBinding, phase: str) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "owner_user_id": str(binding.private.owner_user_id),
+        "owner_deletion_epoch": binding.private.owner_deletion_epoch,
+        "command_id": str(binding.private.command_id),
+        "job_id": str(binding.private.job_id),
+        "execution_fence": binding.private.execution_fence,
+        "operation_id": str(binding.operation_id),
+        "operation_revision": binding.operation_revision,
+        "action": binding.action,
+        "phase": phase,
+        "result_digest": binding.result_digest,
+    }
+    if binding.purge_owner_deletion_epoch is not None:
+        payload["purge_owner_deletion_epoch"] = binding.purge_owner_deletion_epoch
+    return payload
+
+
+class FakePrivateAuthorityClient:
+    def lookup_gate_scope(
+        self,
+        gate: W1GateBinding,
+        phase: str,
+    ) -> GateScopeLookupResponse:
+        return GateScopeLookupResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-gate-scope-lookup.v1",
+                **_gate_payload(gate, phase),
+                "scope": {"type": "ACCOUNT"},
+            }
+        )
+
+    def authorize_gate(
+        self,
+        gate: W1GateBinding,
+        phase: str,
+        scope: PrivateDeletionScope,
+    ) -> GateAuthorityResponse:
+        return GateAuthorityResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-gate-authority.v1",
+                **_gate_payload(gate, phase),
+                "scope": scope.to_mapping(),
+                "authority_ref": "test:w1-gate-authority",
+            }
+        )
 
 
 class HeartbeatQueue(FakeQueue):
@@ -236,17 +297,6 @@ def _consume(
     gate_applier: object = UnexpectedCallable(),
     visibility_heartbeat_seconds: float | None = 0.01,
 ) -> object:
-    def trusted_authority(subject: object) -> PrivateWriteAuthorityDecision:
-        command = getattr(subject, "payload", subject)
-        return PrivateWriteAuthorityDecision(
-            owner_user_id=command.authenticated_owner_ref,
-            owner_deletion_epoch=command.owner_deletion_epoch,
-            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
-            authority_ref="test:w1-authenticated",
-            command_id=command.command_id,
-            job_id=command.job_id,
-        )
-
     def bound_collection_handler(
         dispatch: object,
         *,
@@ -255,7 +305,7 @@ def _consume(
         assert private_authority_client is collection_authority_client
         return collection_handler(dispatch)
 
-    collection_authority_client = object()
+    collection_authority_client = FakePrivateAuthorityClient()
 
     return consume_source_runtime_once(
         session_factory,
@@ -264,7 +314,6 @@ def _consume(
         mode=mode,
         collection_handler=bound_collection_handler,
         gate_applier=gate_applier,
-        authority_provider=trusted_authority,
         private_authority_client=collection_authority_client,
         clock=lambda: NOW,
         visibility_heartbeat_seconds=visibility_heartbeat_seconds,

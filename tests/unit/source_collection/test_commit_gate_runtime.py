@@ -8,14 +8,30 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
+
 from epick_engine.source_collection import commit_gate_runtime, commit_gate_store
+from epick_engine.source_collection.commit_gate_contracts import (
+    CommitGateCommand,
+    parse_commit_gate_command,
+)
 from epick_engine.source_collection.commit_gate_runtime import (
     MAX_MESSAGE_BYTES,
     QueueDelivery,
     consume_once,
 )
+from epick_engine.source_collection.commit_gate_store import (
+    PrivateCommitGateAck,
+    PrivateCommitStage,
+)
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
-from epick_engine.source_collection.private_scope import PrivateWriteAuthorityDecision
+from epick_engine.source_collection.private_scope import PrivateGateAuthority
+from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
+from epick_engine.source_collection.w1_private_authority_contracts import (
+    GateAuthorityResponse,
+    GateScopeLookupResponse,
+    W1GateBinding,
+)
 
 EXPECTED_SENDER_ID = "AROASYNTHETICROLE01"
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
@@ -65,14 +81,27 @@ class PersistedAck:
     delivered_at: datetime | None
 
 
+@dataclass
+class PersistedStage:
+    command_id: UUID
+    owner_ref: UUID
+    job_id: UUID
+    execution_fence: str
+    owner_deletion_epoch: str
+    result_digest: str
+    private_scope_kind: str
+    project_id: UUID | None
+
+
 @dataclass(frozen=True)
 class AppliedAck:
     message_id: UUID
 
 
 class GateSession:
-    def __init__(self) -> None:
+    def __init__(self, stage: PersistedStage | None = None) -> None:
         self.persisted_ack: PersistedAck | None = None
+        self.stage = stage
 
     def __enter__(self) -> GateSession:
         return self
@@ -80,26 +109,98 @@ class GateSession:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def get(self, _model: object, _message_id: object, **_kwargs: object) -> PersistedAck | None:
-        return self.persisted_ack
+    def get(self, model: object, _message_id: object, **_kwargs: object) -> object | None:
+        if model is PrivateCommitStage:
+            return self.stage
+        if model is PrivateCommitGateAck:
+            return self.persisted_ack
+        raise AssertionError("unexpected model lookup")
 
 
 class GateSessionFactory:
-    def __init__(self) -> None:
-        self.session = GateSession()
+    def __init__(self, stage: PersistedStage | None = None) -> None:
+        self.session = GateSession(stage)
+        self.begin_calls = 0
+        self.read_calls = 0
 
     def begin(self) -> GateSession:
+        self.begin_calls += 1
+        return self.session
+
+    def __call__(self) -> GateSession:
+        self.read_calls += 1
         return self.session
 
 
-def _trusted_authority(gate) -> PrivateWriteAuthorityDecision:
-    return PrivateWriteAuthorityDecision(
-        owner_user_id=gate.authenticated_owner_ref,
-        owner_deletion_epoch=gate.owner_deletion_epoch,
-        scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
-        authority_ref="w1:test-gate-authority",
-        command_id=gate.command_id,
-        job_id=gate.job_id,
+@dataclass
+class FakeGateAuthorityClient:
+    scope: PrivateDeletionScope
+    lookup_error: Exception | None = None
+    lookup_calls: list[tuple[W1GateBinding, str]] = field(default_factory=list)
+    authorize_calls: list[tuple[W1GateBinding, str, PrivateDeletionScope]] = field(
+        default_factory=list
+    )
+
+    @staticmethod
+    def _payload(gate: W1GateBinding, phase: str) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "owner_user_id": str(gate.private.owner_user_id),
+            "owner_deletion_epoch": gate.private.owner_deletion_epoch,
+            "command_id": str(gate.private.command_id),
+            "job_id": str(gate.private.job_id),
+            "execution_fence": gate.private.execution_fence,
+            "operation_id": str(gate.operation_id),
+            "operation_revision": gate.operation_revision,
+            "action": gate.action,
+            "phase": phase,
+            "result_digest": gate.result_digest,
+        }
+        if gate.purge_owner_deletion_epoch is not None:
+            payload["purge_owner_deletion_epoch"] = gate.purge_owner_deletion_epoch
+        return payload
+
+    def lookup_gate_scope(
+        self,
+        gate: W1GateBinding,
+        phase: str,
+    ) -> GateScopeLookupResponse:
+        self.lookup_calls.append((gate, phase))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return GateScopeLookupResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-gate-scope-lookup.v1",
+                **self._payload(gate, phase),
+                "scope": self.scope.to_mapping(),
+            }
+        )
+
+    def authorize_gate(
+        self,
+        gate: W1GateBinding,
+        phase: str,
+        scope: PrivateDeletionScope,
+    ) -> GateAuthorityResponse:
+        self.authorize_calls.append((gate, phase, scope))
+        return GateAuthorityResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-gate-authority.v1",
+                **self._payload(gate, phase),
+                "scope": scope.to_mapping(),
+                "authority_ref": "w1:test-gate-apply-authority",
+            }
+        )
+
+
+def _gate_delivery(action: str) -> tuple[CommitGateCommand, QueueDelivery]:
+    body = (
+        FIXTURES / f"w1_private_contract/private-w2-commit-gate-{action.lower()}.json"
+    ).read_text(encoding="utf-8")
+    gate = parse_commit_gate_command(json.loads(body))
+    return gate, QueueDelivery(
+        receipt_handle=f"stage-less-{action.lower()}-receipt",
+        body=body,
+        sender_id=f"{EXPECTED_SENDER_ID}:synthetic-session",
     )
 
 
@@ -245,7 +346,7 @@ def test_consume_once_keeps_private_gate_applier_as_its_default(monkeypatch) -> 
         *,
         ack_message_id: UUID,
         occurred_at: datetime,
-        private_scope: object,
+        private_gate_authority: object,
     ) -> object:
         assert isinstance(ack_message_id, UUID)
         assert occurred_at == datetime(2026, 9, 20, tzinfo=UTC)
@@ -271,7 +372,9 @@ def test_consume_once_keeps_private_gate_applier_as_its_default(monkeypatch) -> 
         EXPECTED_SENDER_ID,
         clock=lambda: datetime(2026, 9, 20, tzinfo=UTC),
         message_id_factory=uuid4,
-        authority_provider=_trusted_authority,
+        private_authority_client=FakeGateAuthorityClient(
+            PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+        ),
     )
 
     assert result.status == "APPLIED"
@@ -303,7 +406,7 @@ def test_consume_once_allows_explicit_collection_aware_applier(monkeypatch) -> N
         *,
         ack_message_id: UUID,
         occurred_at: datetime,
-        private_scope: object,
+        private_gate_authority: object,
     ) -> object:
         assert isinstance(ack_message_id, UUID)
         assert occurred_at == datetime(2026, 9, 20, tzinfo=UTC)
@@ -323,7 +426,9 @@ def test_consume_once_allows_explicit_collection_aware_applier(monkeypatch) -> N
         clock=lambda: datetime(2026, 9, 20, tzinfo=UTC),
         message_id_factory=uuid4,
         apply_gate=explicit_applier,
-        authority_provider=_trusted_authority,
+        private_authority_client=FakeGateAuthorityClient(
+            PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+        ),
     )
 
     assert result.status == "APPLIED"
@@ -348,4 +453,160 @@ def test_valid_gate_is_rejected_without_trusted_authority_provider() -> None:
     result = consume_once(NeverSessionFactory(), queue, EXPECTED_SENDER_ID)
 
     assert result.status == "REJECTED"
+    assert queue.deleted == []
+
+
+@pytest.mark.parametrize(
+    ("action", "scope"),
+    [
+        ("ABORT", PrivateDeletionScope(kind="ACCOUNT", project_id=None)),
+        ("PURGE", PrivateDeletionScope(kind="PROJECT", project_id=uuid4())),
+    ],
+)
+def test_stage_less_abort_purge_resolves_scope_without_guessing(
+    action: str,
+    scope: PrivateDeletionScope,
+) -> None:
+    gate, delivery = _gate_delivery(action)
+    queue = FakeQueue([delivery])
+    session_factory = GateSessionFactory()
+    client = FakeGateAuthorityClient(scope)
+    applied: list[object] = []
+
+    def apply_gate(
+        session: GateSession,
+        applied_gate: CommitGateCommand,
+        *,
+        ack_message_id: UUID,
+        occurred_at: datetime,
+        private_gate_authority: object,
+    ) -> AppliedAck:
+        assert applied_gate == gate
+        assert occurred_at == datetime(2026, 9, 20, tzinfo=UTC)
+        applied.append(private_gate_authority)
+        session.persisted_ack = PersistedAck(delivered_at=None)
+        return AppliedAck(message_id=ack_message_id)
+
+    result = consume_once(
+        session_factory,
+        queue,
+        EXPECTED_SENDER_ID,
+        clock=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+        message_id_factory=uuid4,
+        apply_gate=apply_gate,
+        private_authority_client=client,
+    )
+
+    assert result.status == "APPLIED"
+    assert len(client.lookup_calls) == 1
+    assert client.lookup_calls[0] == (W1GateBinding.from_gate(gate), "APPLY")
+    assert client.authorize_calls == [(W1GateBinding.from_gate(gate), "APPLY", scope)]
+    assert len(applied) == 1
+    authority = applied[0]
+    assert authority.phase == "APPLY"
+    assert authority.action == action
+    assert authority.scope == scope
+    assert session_factory.read_calls == 1
+    assert session_factory.begin_calls == 1
+    assert queue.deleted == [delivery.receipt_handle]
+
+
+def test_persisted_exact_stage_scope_skips_lookup_but_requires_fresh_apply_authority() -> None:
+    gate, delivery = _gate_delivery("PREPARE")
+    scope = PrivateDeletionScope(kind="PROJECT", project_id=uuid4())
+    stage = PersistedStage(
+        command_id=gate.command_id,
+        owner_ref=gate.authenticated_owner_ref,
+        job_id=gate.job_id,
+        execution_fence=str(gate.execution_fence),
+        owner_deletion_epoch=str(gate.owner_deletion_epoch),
+        result_digest=gate.result_digest,
+        private_scope_kind="PROJECT",
+        project_id=scope.project_id,
+    )
+    session_factory = GateSessionFactory(stage)
+    client = FakeGateAuthorityClient(scope)
+    queue = FakeQueue([delivery])
+
+    def apply_gate(
+        session: GateSession,
+        _gate: CommitGateCommand,
+        **kwargs: object,
+    ) -> AppliedAck:
+        authority = kwargs["private_gate_authority"]
+        assert isinstance(authority, PrivateGateAuthority)
+        assert authority.scope == scope
+        message_id = kwargs["ack_message_id"]
+        assert isinstance(message_id, UUID)
+        session.persisted_ack = PersistedAck(delivered_at=None)
+        return AppliedAck(message_id=message_id)
+
+    result = consume_once(
+        session_factory,
+        queue,
+        EXPECTED_SENDER_ID,
+        apply_gate=apply_gate,
+        private_authority_client=client,
+    )
+
+    assert result.status == "APPLIED"
+    assert client.lookup_calls == []
+    assert client.authorize_calls == [(W1GateBinding.from_gate(gate), "APPLY", scope)]
+
+
+def test_stage_less_gate_rejects_changed_authority_echo_before_transaction() -> None:
+    gate, delivery = _gate_delivery("ABORT")
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+
+    class ChangedEchoClient(FakeGateAuthorityClient):
+        def authorize_gate(
+            self,
+            gate: W1GateBinding,
+            phase: str,
+            scope: PrivateDeletionScope,
+        ) -> GateAuthorityResponse:
+            response = super().authorize_gate(gate, phase, scope)
+            return response.model_copy(update={"phase": "ACK_RELAY"})
+
+    session_factory = GateSessionFactory()
+    queue = FakeQueue([delivery])
+    client = ChangedEchoClient(scope)
+
+    result = consume_once(
+        session_factory,
+        queue,
+        EXPECTED_SENDER_ID,
+        private_authority_client=client,
+    )
+
+    assert result.status == "REJECTED"
+    assert session_factory.read_calls == 1
+    assert session_factory.begin_calls == 0
+    assert queue.deleted == []
+
+
+@pytest.mark.parametrize("error_code", ["HTTP_403", "HTTP_503", "TIMEOUT"])
+def test_stage_less_abort_purge_resolves_scope_without_guessing_on_lookup_failure(
+    error_code: str,
+) -> None:
+    gate, delivery = _gate_delivery("ABORT")
+    queue = FakeQueue([delivery])
+    session_factory = GateSessionFactory()
+    client = FakeGateAuthorityClient(
+        PrivateDeletionScope(kind="ACCOUNT", project_id=None),
+        lookup_error=W1LookupClientError(error_code),
+    )
+
+    result = consume_once(
+        session_factory,
+        queue,
+        EXPECTED_SENDER_ID,
+        private_authority_client=client,
+    )
+
+    assert result.status == "REJECTED"
+    assert client.lookup_calls == [(W1GateBinding.from_gate(gate), "APPLY")]
+    assert client.authorize_calls == []
+    assert session_factory.read_calls == 1
+    assert session_factory.begin_calls == 0
     assert queue.deleted == []

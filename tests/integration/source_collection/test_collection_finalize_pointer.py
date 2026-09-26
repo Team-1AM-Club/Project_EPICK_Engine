@@ -44,6 +44,7 @@ from epick_engine.source_collection.persistence import (
 )
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.private_scope import (
+    PrivateGateAuthority,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
 )
@@ -54,6 +55,7 @@ from epick_engine.source_collection.source_runtime_store import (
     claim_collection_attempt,
     reserve_collection_attempt,
 )
+from epick_engine.source_collection.w1_private_authority_contracts import GateAuthorityResponse
 
 pytestmark = pytest.mark.approved_postgres
 NOW = datetime(2026, 9, 20, 12, tzinfo=UTC)
@@ -73,6 +75,28 @@ def _trusted_scope(command: CollectionCommand | CommitGateCommand) -> PrivateWri
     )
 
 
+def _trusted_gate_authority(gate: CommitGateCommand) -> PrivateGateAuthority:
+    response = GateAuthorityResponse.model_validate(
+        {
+            "schema_version": "w1.private.w2-gate-authority.v1",
+            "owner_user_id": str(gate.authenticated_owner_ref),
+            "owner_deletion_epoch": gate.owner_deletion_epoch,
+            "command_id": str(gate.command_id),
+            "job_id": str(gate.job_id),
+            "execution_fence": gate.execution_fence,
+            "scope": {"type": "ACCOUNT"},
+            "operation_id": str(gate.operation_id),
+            "operation_revision": gate.operation_revision,
+            "action": gate.action,
+            "phase": "APPLY",
+            "result_digest": gate.result_digest,
+            "purge_owner_deletion_epoch": gate.purge_owner_deletion_epoch,
+            "authority_ref": "w1:test-finalize-gate-authority",
+        }
+    )
+    return PrivateGateAuthority.from_w1_response(response)
+
+
 def commit_collection_candidate(session_factory, dispatch, *args, **kwargs):
     kwargs.setdefault("private_scope", _trusted_scope(dispatch.payload))
     return _commit_collection_candidate(session_factory, dispatch, *args, **kwargs)
@@ -84,7 +108,7 @@ def stage_private_result(session, command, result, **kwargs):
 
 
 def apply_collection_commit_gate(session, gate, **kwargs):
-    kwargs.setdefault("private_scope", _trusted_scope(gate))
+    kwargs.setdefault("private_gate_authority", _trusted_gate_authority(gate))
     return _apply_collection_commit_gate(session, gate, **kwargs)
 
 
