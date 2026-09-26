@@ -1,10 +1,11 @@
 # W2 CT15 runtime — local implementation / deployment pending
 
 2026-09-27 private-authority runtime correction: current CT15 preflight requires
-exactly one Alembic head, `0011_private_ack_control_retention`. Revisions `0005`
-through `0010` are forward-migration starting points only, not CT15
+exactly one Alembic head, `0012_private_ack_wire_digest`. Revisions `0005`
+through `0011` are forward-migration starting points only, not CT15
 runtime-ready heads. The `0011` migration retains only the original ACK control
-graph needed for exact historical replay after private payload deletion.
+graph needed for exact historical replay after private payload deletion, and
+`0012` binds each retained ACK to the digest of its original canonical JSON wire.
 Preflight rejects older, unknown, multiple, and duplicate heads before it reads
 any queue metadata. The metadata-only preflight does not grant runtime authority.
 
@@ -94,7 +95,7 @@ historical 0008 CT15 observation must not be presented as current READY evidence
 
 Everything in this section is a dated historical snapshot, not current operator
 guidance. Current preflight and deployment instructions require the exact
-`0011_private_ack_control_retention` head described above and under Operator
+`0012_private_ack_wire_digest` head described above and under Operator
 commands.
 
 T095 local-service update (2026-09-20): full regression is now **1286 passed,
@@ -242,10 +243,15 @@ rendering Compose with secret interpolation into saved logs.
 
 Run from the Engine checkout with `uv run --no-sync epick-w2-ct15 <action>`, or
 the image entrypoint with the same action.
-A W1 operator applies Alembic through `0011_private_ack_control_retention` to the
-approved W2 DB before starting the runtime. Revisions `0004` through `0010` are
+A W1 operator applies Alembic through `0012_private_ack_wire_digest` to the
+approved W2 DB before starting the runtime. Revisions `0004` through `0011` are
 forward-migration starting points, not runtime-ready heads. Preflight never
 migrates the database.
+
+The `0011` to `0012` rollout requires a coordinated stop: stop every W2 writer
+and relay, apply and verify the digest backfill at the exact new head, then
+restart the new binaries. Mixed-version or online writes during this migration
+are unsupported.
 
 | Action | Behavior |
 | --- | --- |

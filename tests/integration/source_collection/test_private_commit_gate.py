@@ -776,6 +776,36 @@ def test_exact_replay_and_new_message_same_revision_reuse_ack_without_reapply(se
         assert _state(session, command)["stage_payloads"] == [None]
 
 
+@pytest.mark.parametrize("replay_path", ["inbox", "receipt"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("occurred_at", "2026-09-18T00:00:01Z"),
+        ("outcome", "DUPLICATE"),
+    ],
+)
+def test_gate_replay_rejects_changed_persisted_ack_wire(
+    session_factory,
+    replay_path,
+    field,
+    value,
+) -> None:
+    command, result = _pair()
+    gate = _gate(command, result, "PREPARE", operation_id=uuid4(), revision=1)
+    with session_factory.begin() as session:
+        _stage(session, command, result)
+        ack = _apply(session, gate)
+    with session_factory.begin() as session:
+        stored = session.get(PrivateCommitGateAck, ack.message_id)
+        assert stored is not None
+        stored.payload = {**stored.payload, field: value}
+
+    replay = gate if replay_path == "inbox" else gate.model_copy(update={"message_id": uuid4()})
+    with session_factory.begin() as session:
+        with pytest.raises(CommitGateRejected, match="invalid persisted private commit-gate ACK"):
+            _apply(session, replay)
+
+
 def test_exact_inbox_replay_rejects_a_different_trusted_scope(session_factory) -> None:
     command, result = _pair()
     gate = _gate(command, result, "PREPARE", operation_id=uuid4(), revision=1)
@@ -1719,7 +1749,7 @@ def test_postgres_statement_rejection_hides_private_data_and_preserves_caller_tr
 def test_migration_upgrade_matches_private_metadata_in_isolated_postgres(approved_postgres_url):
     root = Path(__file__).resolve().parents[3]
     scripts = ScriptDirectory.from_config(Config(root / "alembic.ini"))
-    assert scripts.get_heads() == ["0011_private_ack_control_retention"]
+    assert scripts.get_heads() == ["0012_private_ack_wire_digest"]
     admin = create_engine(approved_postgres_url)
     schema = f"epick_w2_gate_migration_{uuid4().hex}"
     with admin.begin() as connection:
@@ -1747,7 +1777,7 @@ def test_migration_upgrade_matches_private_metadata_in_isolated_postgres(approve
             connection.execute(text(f'SET LOCAL search_path TO "{schema}"'))
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("0011_private_ack_control_retention")
+            ).scalar_one() == ("0012_private_ack_wire_digest")
             private_names = {name for name in Base.metadata.tables if name.startswith("private_")}
 
             def include_object(obj, name, type_, reflected, compare_to):

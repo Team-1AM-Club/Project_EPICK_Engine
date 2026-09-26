@@ -1484,7 +1484,14 @@ def test_staged_send_race_with_deletion_is_owner_serialized(session_factory) -> 
     assert authority.cleanup_calls[0][2] == "STAGED_OUTBOX"
 
 
-def test_changed_ack_body_conflicts(session_factory) -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("occurred_at", "2026-09-19T01:02:04Z"),
+        ("outcome", "DUPLICATE"),
+    ],
+)
+def test_changed_ack_body_conflicts(session_factory, field, value) -> None:
     command, result = _pair()
     _stage(session_factory, command, result)
     assert relay_once(session_factory, FakeQueue()).status == "SENT"
@@ -1500,7 +1507,7 @@ def test_changed_ack_body_conflicts(session_factory) -> None:
     with session_factory.begin() as session:
         ack = session.scalar(select(PrivateCommitGateAck))
         assert ack is not None
-        ack.payload = {**ack.payload, "operation_revision": gate.operation_revision + 1}
+        ack.payload = {**ack.payload, field: value}
 
     authority = _GateAuthorityClient(expected_gate=W1GateBinding.from_gate(gate))
     outbound = FakeQueue()
@@ -1513,7 +1520,15 @@ def test_changed_ack_body_conflicts(session_factory) -> None:
 
     assert outcome.status == "SEND_FAILED"
     assert outbound.sent == []
-    assert len(authority.gate_authorize_calls) == 1
+    assert authority.lookup_calls == []
+    assert authority.write_authorize_calls == []
+    assert authority.gate_authorize_calls == []
+    with session_factory() as session:
+        ack = session.scalar(select(PrivateCommitGateAck))
+        assert ack is not None
+        assert ack.delivered_at is None
+        assert ack.relay_claim_token is None
+        assert ack.relay_claim_expires_at is None
 
 
 def test_staged_relay_still_runs_command_lookup(session_factory) -> None:
@@ -1606,8 +1621,10 @@ def test_delivery_migration_precedes_the_forward_non_destructive_head() -> None:
     deletion_revision = scripts.get_revision("0009_private_deletion_receipt")
     scope_v2_revision = scripts.get_revision("0010_private_deletion_scope_v2")
     ack_retention_revision = scripts.get_revision("0011_private_ack_control_retention")
+    ack_wire_revision = scripts.get_revision("0012_private_ack_wire_digest")
 
-    assert scripts.get_heads() == [ack_retention_revision.revision]
+    assert scripts.get_heads() == [ack_wire_revision.revision]
+    assert ack_wire_revision.down_revision == ack_retention_revision.revision
     assert ack_retention_revision.down_revision == scope_v2_revision.revision
     assert scope_v2_revision.down_revision == deletion_revision.revision
     assert deletion_revision.down_revision == runtime_revision.revision

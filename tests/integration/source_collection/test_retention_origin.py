@@ -61,7 +61,7 @@ from epick_engine.source_collection.persistence import (
 pytestmark = pytest.mark.approved_postgres
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_HEAD = "0011_private_ack_control_retention"
+MIGRATION_HEAD = "0012_private_ack_wire_digest"
 
 
 @pytest.fixture

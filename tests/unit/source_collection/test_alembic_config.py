@@ -26,7 +26,10 @@ def test_source_collection_migration_is_the_only_head() -> None:
 
     assert head is not None
     assert len(head) <= 64
-    assert scripts.get_heads() == ["0011_private_ack_control_retention"]
+    assert scripts.get_heads() == ["0012_private_ack_wire_digest"]
+    assert scripts.get_revision("0012_private_ack_wire_digest").down_revision == (
+        "0011_private_ack_control_retention"
+    )
     assert scripts.get_revision("0011_private_ack_control_retention").down_revision == (
         "0010_private_deletion_scope_v2"
     )
@@ -143,3 +146,10 @@ def test_private_ack_control_retention_migration_downgrade_is_unsupported() -> N
 
     with pytest.raises(RuntimeError, match="Destructive downgrade"):
         scripts.get_revision("0011_private_ack_control_retention").module.downgrade()
+
+
+def test_private_ack_wire_digest_migration_downgrade_is_unsupported() -> None:
+    scripts = ScriptDirectory.from_config(_alembic_config())
+
+    with pytest.raises(RuntimeError, match="Destructive downgrade"):
+        scripts.get_revision("0012_private_ack_wire_digest").module.downgrade()

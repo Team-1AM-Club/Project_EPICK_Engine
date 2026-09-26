@@ -47,6 +47,7 @@ from epick_engine.source_collection.commit_gate_contracts import (
 )
 from epick_engine.source_collection.commit_gate_store import (
     CommitGateRejected,
+    PrivateCommitGateAck,
     PrivateCommitStage,
     PrivateStagedOutbox,
     lock_private_command,
@@ -258,7 +259,7 @@ def test_collection_runtime_migration_backfills_0007_and_matches_metadata(
     approved_postgres_url: URL,
 ) -> None:
     scripts = ScriptDirectory.from_config(Config(PROJECT_ROOT / "alembic.ini"))
-    assert scripts.get_heads() == ["0011_private_ack_control_retention"]
+    assert scripts.get_heads() == ["0012_private_ack_wire_digest"]
     admin = create_engine(approved_postgres_url)
     schema = f"epick_w2_collection_runtime_{uuid4().hex}"
     command_id = uuid4()
@@ -315,7 +316,7 @@ def test_collection_runtime_migration_backfills_0007_and_matches_metadata(
             inspector = inspect(connection)
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0011_private_ack_control_retention"
+                == "0012_private_ack_wire_digest"
             )
 
             source_columns = {column["name"]: column for column in inspector.get_columns("sources")}
@@ -2894,6 +2895,43 @@ def test_collection_replay_returns_exact_staged_identity_without_public_revision
         assert source is not None
         assert source.next_observation_order == next_order_before
         assert events_after == events_before
+
+
+@pytest.mark.approved_postgres
+def test_collection_replay_rejects_changed_persisted_ack_wire(
+    runtime_session_factory: sessionmaker[Session],
+) -> None:
+    dispatch, effective_command, prepared, claim_token = _claimed_candidate_inputs(
+        runtime_session_factory
+    )
+    proposal = commit_collection_candidate(
+        runtime_session_factory,
+        dispatch,
+        effective_command,
+        prepared,
+        claim_token=claim_token,
+        staged_message_id=uuid4(),
+        occurred_at=NOW,
+    )
+    with runtime_session_factory.begin() as session:
+        apply_commit_gate(
+            session,
+            _gate(
+                dispatch,
+                "PREPARE",
+                result_digest=str(proposal.result_digest),
+                operation_id=uuid4(),
+                operation_revision=1,
+            ),
+            ack_message_id=uuid4(),
+            occurred_at=NOW,
+        )
+        ack = session.scalar(select(PrivateCommitGateAck))
+        assert ack is not None
+        ack.payload = {**ack.payload, "outcome": "DUPLICATE"}
+
+    with pytest.raises(CommitGateRejected, match="invalid persisted private commit-gate ACK"):
+        replay_staged_collection(runtime_session_factory, dispatch)
 
 
 @pytest.mark.approved_postgres

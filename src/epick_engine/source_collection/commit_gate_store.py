@@ -7,6 +7,7 @@ a savepoint is not a database commit and no relay/worker is registered here.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -158,6 +159,10 @@ class PrivateCommitGateAck(Base):
             "(relay_claim_token IS NULL) = (relay_claim_expires_at IS NULL)",
             name="relay_claim_fields_together",
         ),
+        CheckConstraint(
+            "wire_digest ~ '^sha256:[0-9a-f]{64}$'",
+            name="wire_digest_format",
+        ),
     )
 
     message_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
@@ -165,6 +170,7 @@ class PrivateCommitGateAck(Base):
         PostgreSQLUUID(as_uuid=True), ForeignKey("private_commit_stages.command_id"), nullable=False
     )
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    wire_digest: Mapped[str] = mapped_column(String(71), nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     relay_claim_token: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True), nullable=True
@@ -290,6 +296,22 @@ def _hash(raw: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def canonical_ack_wire(payload: dict[str, Any]) -> tuple[str, str]:
+    """Return the exact canonical ACK body and its durable SHA-256 identity."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("private commit-gate ACK payload must be an object")
+    body = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    digest = "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return body, digest
+
+
 def lock_private_command(session: Session, command_id: UUID) -> None:
     if session.get_bind().dialect.name != "postgresql":
         raise CommitGateRejected("private commit-gate storage requires PostgreSQL")
@@ -357,13 +379,33 @@ def _bound_row(
         raise PrivateScopeRejected("private commit-gate scope binding does not match")
 
 
-def _stored_ack(session: Session, message_id: UUID) -> CommitGateAckProposal:
-    row = session.get(PrivateCommitGateAck, message_id)
+def _stored_ack(
+    session: Session,
+    message_id: UUID,
+    *,
+    for_update: bool = False,
+) -> CommitGateAckProposal:
+    row = (
+        session.scalar(
+            select(PrivateCommitGateAck)
+            .where(PrivateCommitGateAck.message_id == message_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if for_update
+        else session.get(PrivateCommitGateAck, message_id, populate_existing=True)
+    )
     if row is None:
         raise CommitGateRejected("private commit-gate ACK unavailable")
     try:
-        return _parse_wire(row.payload, CommitGateAckProposal, label="persisted W2 gate ACK")
-    except W1WireContractError:
+        body, digest = canonical_ack_wire(row.payload)
+        if not isinstance(row.wire_digest, str) or not hmac.compare_digest(row.wire_digest, digest):
+            raise ValueError
+        ack = CommitGateAckProposal.model_validate_json(body, strict=True)
+        if ack.message_id != row.message_id or ack.command_id != row.command_id:
+            raise ValueError
+        return ack
+    except (TypeError, ValueError, UnicodeError, RecursionError):
         raise CommitGateRejected("invalid persisted private commit-gate ACK") from None
 
 
@@ -590,11 +632,14 @@ def apply_commit_gate(
             if staged is not None:
                 staged.payload = None
         _flush_private_storage(session)
+        ack_payload = ack.model_dump(mode="json")
+        _, ack_wire_digest = canonical_ack_wire(ack_payload)
         session.add(
             PrivateCommitGateAck(
                 message_id=ack.message_id,
                 command_id=gate.command_id,
-                payload=ack.model_dump(mode="json"),
+                payload=ack_payload,
+                wire_digest=ack_wire_digest,
             )
         )
         _flush_private_storage(session)

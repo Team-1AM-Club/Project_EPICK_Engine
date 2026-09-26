@@ -25,6 +25,7 @@ from epick_engine.source_collection.commit_gate_store import (
     PrivateStagedOutbox,
     _lock_command,
     apply_commit_gate,
+    canonical_ack_wire,
     cleanup_terminal_staged_outbox,
 )
 from epick_engine.source_collection.persistence import PrivateDeletionOwnerState
@@ -164,6 +165,7 @@ class _StagedRelaySubject:
 class _AckRelaySubject:
     ack: CommitGateAckProposal
     body: str
+    wire_digest: str
     payload: dict[str, object]
 
 
@@ -444,9 +446,21 @@ def _parse_ack_subject(
     *,
     message_id: UUID,
     command_id: UUID,
+    expected_body: str | None = None,
+    expected_wire_digest: str | None = None,
 ) -> _AckRelaySubject:
-    body = _wire_body(outbox.payload)
     try:
+        body, wire_digest = canonical_ack_wire(outbox.payload)
+        if not isinstance(outbox.wire_digest, str) or not hmac.compare_digest(
+            outbox.wire_digest, wire_digest
+        ):
+            raise ValueError("persisted private ACK digest does not match")
+        if expected_body is not None and body != expected_body:
+            raise ValueError("persisted private ACK body changed")
+        if expected_wire_digest is not None and not hmac.compare_digest(
+            wire_digest, expected_wire_digest
+        ):
+            raise ValueError("persisted private ACK digest changed")
         ack = CommitGateAckProposal.model_validate_json(body, strict=True)
     except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
         raise RuntimeError("persisted private ACK body is invalid") from exc
@@ -455,8 +469,31 @@ def _parse_ack_subject(
     return _AckRelaySubject(
         ack=ack,
         body=body,
+        wire_digest=wire_digest,
         payload=_strict_json_object(body, max_bytes=MAX_OUTBOUND_MESSAGE_BYTES),
     )
+
+
+def _outbox_matches_subject(
+    outbox: PrivateStagedOutbox | PrivateCommitGateAck,
+    subject: _RelaySubject,
+) -> bool:
+    if outbox.payload is None:
+        return False
+    if isinstance(subject, _AckRelaySubject):
+        if not isinstance(outbox, PrivateCommitGateAck):
+            return False
+        try:
+            body, wire_digest = canonical_ack_wire(outbox.payload)
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            return False
+        return (
+            isinstance(outbox.wire_digest, str)
+            and hmac.compare_digest(outbox.wire_digest, wire_digest)
+            and hmac.compare_digest(wire_digest, subject.wire_digest)
+            and body == subject.body
+        )
+    return isinstance(outbox, PrivateStagedOutbox) and _wire_body(outbox.payload) == subject.body
 
 
 def _load_relay_subject(
@@ -466,6 +503,7 @@ def _load_relay_subject(
     command_id: UUID,
     *,
     expected_body: str | None = None,
+    expected_wire_digest: str | None = None,
 ) -> _RelaySubject:
     with session_factory() as session:
         outbox = _get_relay_outbox(session, kind, message_id)
@@ -483,6 +521,8 @@ def _load_relay_subject(
                 outbox,
                 message_id=message_id,
                 command_id=command_id,
+                expected_body=expected_body,
+                expected_wire_digest=expected_wire_digest,
             )
         else:
             stored = _stored_relay_binding(session, command_id)
@@ -498,6 +538,8 @@ def _load_relay_subject(
             )
     if expected_body is not None and subject.body != expected_body:
         raise RuntimeError("persisted private relay body changed")
+    if expected_wire_digest is not None and not isinstance(subject, _AckRelaySubject):
+        raise RuntimeError("persisted private relay digest changed")
     return subject
 
 
@@ -692,12 +734,19 @@ def relay_once(
 ) -> RelayResult:
     """Relay one persisted wire, optionally scoped to a synthetic command."""
 
-    claimed: tuple[Literal["STAGED", "ACK"], UUID, UUID, UUID, str] | None = None
+    claimed: tuple[Literal["STAGED", "ACK"], UUID, UUID, UUID, str, str | None] | None = None
 
     def release_claim() -> None:
         if claimed is None or authority_client is None:
             return
-        kind, message_id, claimed_command_id, claim_token, claimed_body = claimed
+        (
+            kind,
+            message_id,
+            claimed_command_id,
+            claim_token,
+            claimed_body,
+            claimed_wire_digest,
+        ) = claimed
         try:
             subject = _load_relay_subject(
                 session_factory,
@@ -705,6 +754,7 @@ def relay_once(
                 message_id,
                 claimed_command_id,
                 expected_body=claimed_body,
+                expected_wire_digest=claimed_wire_digest,
             )
             try:
                 decision = _authorize_relay_subject(
@@ -729,8 +779,7 @@ def relay_once(
                     outbox is not None
                     and outbox.delivered_at is None
                     and outbox.relay_claim_token == claim_token
-                    and outbox.payload is not None
-                    and _wire_body(outbox.payload) == claimed_body
+                    and _outbox_matches_subject(outbox, subject)
                 ):
                     outbox.relay_claim_token = None
                     outbox.relay_claim_expires_at = None
@@ -844,14 +893,18 @@ def relay_once(
                 )
             ):
                 return RelayResult(status="EMPTY")
-            payload = outbox.payload
-            if payload is None:
-                return RelayResult(status="EMPTY")
-            if _wire_body(payload) != subject.body:
+            if not _outbox_matches_subject(outbox, subject):
                 raise RuntimeError("persisted queue payload changed during relay claim")
             outbox.relay_claim_token = claim_token
             outbox.relay_claim_expires_at = db_now + timedelta(seconds=claim_lease_seconds)
-        claimed = (kind, message_id, candidate_command_id, claim_token, subject.body)
+        claimed = (
+            kind,
+            message_id,
+            candidate_command_id,
+            claim_token,
+            subject.body,
+            subject.wire_digest if isinstance(subject, _AckRelaySubject) else None,
+        )
 
         send_subject = _load_relay_subject(
             session_factory,
@@ -859,6 +912,9 @@ def relay_once(
             message_id,
             candidate_command_id,
             expected_body=subject.body,
+            expected_wire_digest=(
+                subject.wire_digest if isinstance(subject, _AckRelaySubject) else None
+            ),
         )
         send_decision = _authorize_relay_subject(
             session_factory,
@@ -882,8 +938,7 @@ def relay_once(
                 or outbox.relay_claim_expires_at is None
             ):
                 raise RuntimeError("persisted queue payload changed during relay authorization")
-            payload = outbox.payload
-            if payload is None or _wire_body(payload) != send_subject.body:
+            if not _outbox_matches_subject(outbox, send_subject):
                 raise RuntimeError("persisted queue payload changed during relay authorization")
             if before_send is not None:
                 before_send(kind, send_subject.payload)
@@ -908,8 +963,7 @@ def relay_once(
                 or outbox.delivered_at is not None
                 or outbox.relay_claim_token != claim_token
                 or outbox.relay_claim_expires_at is None
-                or outbox.payload is None
-                or _wire_body(outbox.payload) != send_subject.body
+                or not _outbox_matches_subject(outbox, send_subject)
             ):
                 raise RuntimeError("persisted queue payload changed during relay send")
             outbox.delivered_at = clock()

@@ -175,11 +175,11 @@ def test_sdk_errors_do_not_expose_payload_or_receipt() -> None:
     assert caught.value.__suppress_context__
 
 
-def test_preflight_accepts_only_private_ack_control_retention_migration_head() -> None:
+def test_preflight_accepts_only_private_ack_wire_digest_migration_head() -> None:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0011_private_ack_control_retention"]
-    connection.scalars.return_value.all.return_value = ["0011_private_ack_control_retention"]
+    connection.scalar.side_effect = ["epick_ct15", "0012_private_ack_wire_digest"]
+    connection.scalars.return_value.all.return_value = ["0012_private_ack_wire_digest"]
     sdk = FakeSqs()
     result = preflight(engine, sdk, Ct15Settings.from_environment(environment()))
     assert result["status"] == "PREFLIGHT_PASSED"
@@ -197,10 +197,11 @@ def test_preflight_accepts_only_private_ack_control_retention_migration_head() -
         ("0008_collection_runtime",),
         ("0009_private_deletion_receipt",),
         ("0010_private_deletion_scope_v2",),
+        ("0011_private_ack_control_retention",),
         (),
         ("9999_unknown",),
-        ("0011_private_ack_control_retention", "9999_unknown"),
-        ("0011_private_ack_control_retention", "0011_private_ack_control_retention"),
+        ("0012_private_ack_wire_digest", "9999_unknown"),
+        ("0012_private_ack_wire_digest", "0012_private_ack_wire_digest"),
     ],
 )
 def test_preflight_does_not_claim_readiness_for_incompatible_migration(
@@ -227,8 +228,8 @@ def test_preflight_rejects_nonisolated_unencrypted_or_no_dlq_queue(bad_attribute
 
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0011_private_ack_control_retention"]
-    connection.scalars.return_value.all.return_value = ["0011_private_ack_control_retention"]
+    connection.scalar.side_effect = ["epick_ct15", "0012_private_ack_wire_digest"]
+    connection.scalars.return_value.all.return_value = ["0012_private_ack_wire_digest"]
     with pytest.raises(Ct15ConfigurationError):
         preflight(engine, BadQueue(), Ct15Settings.from_environment(environment()))
 

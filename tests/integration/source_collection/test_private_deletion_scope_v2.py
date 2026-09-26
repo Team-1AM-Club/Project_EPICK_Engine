@@ -33,6 +33,7 @@ from epick_engine.source_collection.commit_gate_store import (
     PrivateCommitStage,
     PrivateStagedOutbox,
     apply_commit_gate,
+    canonical_ack_wire,
     stage_private_result,
 )
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
@@ -460,6 +461,7 @@ def _add_private_inventory(
                         message_id=ack_id,
                         command_id=stage_command_id,
                         payload={"outcome": "FINALIZED"},
+                        wire_digest=canonical_ack_wire({"outcome": "FINALIZED"})[1],
                         delivered_at=None,
                         relay_claim_token=None,
                         relay_claim_expires_at=None,
@@ -848,6 +850,78 @@ def test_0011_forward_head_preserves_fk_and_check_constraints(
             }
             for table_name in child_tables
         } == foreign_keys_before
+
+
+@pytest.mark.approved_postgres
+def test_0012_backfills_ack_wire_digest_and_matches_metadata(
+    approved_postgres_url: URL,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _migration_schema(approved_postgres_url, monkeypatch) as (engine, config, schema):
+        alembic_command.upgrade(config, "0011_private_ack_control_retention")
+        command_id = uuid4()
+        ack_id = uuid4()
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO private_commit_stages ("
+                    "command_id, owner_ref, job_id, execution_fence, owner_deletion_epoch, "
+                    "result_digest, operation_revision, max_purge_epoch, state, result_payload"
+                    ") VALUES ("
+                    ":command_id, :owner_ref, :job_id, '1', '1', :result_digest, "
+                    "'0', '1', 'STAGED', CAST(:result_payload AS jsonb))"
+                ),
+                {
+                    "command_id": command_id,
+                    "owner_ref": uuid4(),
+                    "job_id": uuid4(),
+                    "result_digest": "sha256:" + "a" * 64,
+                    "result_payload": json.dumps({"private": "discarded"}),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO private_commit_gate_acks (message_id, command_id, payload) "
+                    "VALUES (:message_id, :command_id, CAST(:payload AS jsonb))"
+                ),
+                {
+                    "message_id": ack_id,
+                    "command_id": command_id,
+                    "payload": json.dumps(
+                        {"z": "한글", "a": {"n": 1, "flag": True}},
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+
+        alembic_command.upgrade(config, "0012_private_ack_wire_digest")
+
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT wire_digest FROM private_commit_gate_acks "
+                        "WHERE message_id = :message_id"
+                    ),
+                    {"message_id": ack_id},
+                )
+                == "sha256:9d31fb98903c4dce6fa90bd97a4de61b689f54895c9b911622720b36ec789ab4"
+            )
+        inspector = inspect(engine)
+        columns = {
+            column["name"]: column
+            for column in inspector.get_columns("private_commit_gate_acks", schema=schema)
+        }
+        assert columns["wire_digest"]["nullable"] is False
+        assert columns["wire_digest"]["type"].length == 71
+        constraints = {
+            constraint["name"]: " ".join(constraint["sqltext"].split()).lower()
+            for constraint in inspector.get_check_constraints(
+                "private_commit_gate_acks", schema=schema
+            )
+        }
+        assert "ck_private_commit_gate_acks_wire_digest_format" in constraints
+        assert "sha256:" in constraints["ck_private_commit_gate_acks_wire_digest_format"]
 
 
 @pytest.mark.approved_postgres

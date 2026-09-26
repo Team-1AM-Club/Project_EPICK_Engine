@@ -4115,12 +4115,12 @@ def replay_staged_collection(
 
     from epick_engine.source_collection.commit_gate_store import (
         CommitGateRejected,
-        PrivateCommitGateAck,
         PrivateCommitGateReceipt,
         PrivateCommitStage,
         PrivateStagedOutbox,
         _bound_row,
         _hash,
+        _stored_ack,
         lock_private_command,
     )
     from epick_engine.source_collection.source_runtime_store import (
@@ -4189,21 +4189,9 @@ def replay_staged_collection(
             ).all()
             receipts: list[CommitGateAckProposal] = []
             for receipt in receipt_rows:
-                ack_row = session.scalar(
-                    select(PrivateCommitGateAck)
-                    .where(PrivateCommitGateAck.message_id == receipt.ack_message_id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
-                if ack_row is None:
-                    raise CommitGateRejected("private commit-gate receipt ACK is unavailable")
-                try:
-                    ack = CommitGateAckProposal.model_validate(ack_row.payload)
-                except ValueError:
-                    raise CommitGateRejected("invalid persisted private commit-gate ACK") from None
+                ack = _stored_ack(session, receipt.ack_message_id, for_update=True)
                 if (
-                    ack.message_id != ack_row.message_id
-                    or ack.command_id != command.command_id
+                    ack.command_id != command.command_id
                     or ack.authenticated_owner_ref != command.authenticated_owner_ref
                     or ack.job_id != command.job_id
                     or str(ack.execution_fence) != command.execution_fence
