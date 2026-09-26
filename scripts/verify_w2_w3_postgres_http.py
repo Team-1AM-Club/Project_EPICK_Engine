@@ -43,10 +43,16 @@ from epick_engine.source_collection.persistence import (
     SourceVersion,
 )
 from epick_engine.source_collection.policy import Representation, UntrustedDocument, ValidatedTarget
+from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.source_runtime import handle_collection_dispatch
 from epick_engine.source_collection.source_runtime_input import (
     RuntimeSourceConfigFile,
     SqlAlchemyCollectionInputProvider,
+)
+from epick_engine.source_collection.w1_private_authority_contracts import (
+    CurrentWriteScopeLookupResponse,
+    PrivateWriteAuthorityResponse,
+    W1PrivateBinding,
 )
 from epick_engine.source_collection.w1_transport import (
     LookupResponse,
@@ -402,6 +408,46 @@ def _collect_product_source(session_factory: sessionmaker[Session]) -> dict[str,
                 command=received.payload,
             )
 
+    class _SyntheticAccountAuthority:
+        def _payload(self, binding: W1PrivateBinding) -> dict[str, object]:
+            assert binding == W1PrivateBinding.from_collection(dispatch.payload)
+            return {
+                "owner_user_id": binding.owner_user_id,
+                "owner_deletion_epoch": binding.owner_deletion_epoch,
+                "command_id": binding.command_id,
+                "job_id": binding.job_id,
+                "execution_fence": binding.execution_fence,
+            }
+
+        def lookup_current_scope(
+            self,
+            binding: W1PrivateBinding,
+        ) -> CurrentWriteScopeLookupResponse:
+            return CurrentWriteScopeLookupResponse.model_validate(
+                {
+                    "schema_version": "w1.private.w2-current-write-scope-lookup.v1",
+                    **self._payload(binding),
+                    "scope": {"type": "ACCOUNT"},
+                },
+                strict=True,
+            )
+
+        def authorize_write(
+            self,
+            binding: W1PrivateBinding,
+            scope: PrivateDeletionScope,
+        ) -> PrivateWriteAuthorityResponse:
+            assert scope == PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+            return PrivateWriteAuthorityResponse.model_validate(
+                {
+                    "schema_version": "w1.private.w2-write-authority.v1",
+                    **self._payload(binding),
+                    "scope": {"type": "ACCOUNT"},
+                    "authority_ref": "synthetic:w2-w3-postgres-http",
+                },
+                strict=True,
+            )
+
     class _FixtureCollector:
         def __init__(self) -> None:
             self.fetches = 0
@@ -438,6 +484,7 @@ def _collect_product_source(session_factory: sessionmaker[Session]) -> dict[str,
         dispatch,
         session_factory=session_factory,
         lookup_client=_AvailableLookup(),
+        private_authority_client=_SyntheticAccountAuthority(),
         input_provider=SqlAlchemyCollectionInputProvider(session_factory, config),
         collector_factory=lambda: collector,
         parser=extract_static_candidate,

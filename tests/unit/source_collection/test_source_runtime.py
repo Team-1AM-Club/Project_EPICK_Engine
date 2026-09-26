@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -417,6 +418,7 @@ def test_first_reservation_authority_failure_has_zero_writes_and_no_scope_probe(
     """Accepting an untrusted/failed scope lookup would permit a reservation write."""
 
     dispatch = _dispatch()
+    original = deepcopy(dispatch.model_dump(mode="python"))
     events: list[str] = []
     input_value = _RuntimeInput(policy_revision=3)
     execution_type, _instances = _execution_type(events, prepared="prepared")
@@ -427,16 +429,24 @@ def test_first_reservation_authority_failure_has_zero_writes_and_no_scope_probe(
         heartbeat_type=_heartbeat_type(events),
         execution_type=execution_type,
     )
+    cancelled = Event()
 
     class _FailingPrivateAuthorityClient(_TrustedPrivateAuthorityClient):
+        def __init__(self, received: W1Dispatch) -> None:
+            super().__init__(received)
+            self.bindings: list[W1PrivateBinding] = []
+
         def lookup_current_scope(
             self,
             binding: W1PrivateBinding,
         ) -> CurrentWriteScopeLookupResponse:
             self.events.append("scope")
+            self.bindings.append(binding)
             if failure == "http-503":
+                cancelled.set()
                 raise W1LookupClientError("HTTP_503")
             if failure == "timeout":
+                cancelled.set()
                 raise W1LookupClientError("TRANSPORT_FAILURE")
             payload = _binding_payload(binding)
             payload["owner_user_id"] = UUID("99999999-9999-4999-8999-999999999999")
@@ -450,24 +460,36 @@ def test_first_reservation_authority_failure_has_zero_writes_and_no_scope_probe(
             )
 
     authority = _FailingPrivateAuthorityClient(dispatch)
+    session_factory = _SessionFactory()
+    input_provider = _RuntimeInputProvider(input_value, events)
+    collector_factory = _UnexpectedCallable()
+    parser = _UnexpectedCallable()
+    uuid_factory = _UnexpectedCallable()
     with pytest.raises(RuntimeAuthorizationError):
         _handle_collection_dispatch(
             dispatch,
-            session_factory=_SessionFactory(),
+            session_factory=session_factory,
             lookup_client=_SequencedLookupClient(),
             private_authority_client=authority,
-            input_provider=_RuntimeInputProvider(input_value, events),
-            collector_factory=_UnexpectedCallable(),
-            parser=_UnexpectedCallable(),
+            input_provider=input_provider,
+            collector_factory=collector_factory,
+            parser=parser,
             runtime_config=_runtime_config(dispatch),
             clock=lambda: NOW,
-            uuid_factory=_UnexpectedCallable(),
+            uuid_factory=uuid_factory,
             store_operations=calls["operations"],
         )
 
     assert authority.events == ["scope"]
+    assert authority.bindings == [W1PrivateBinding.from_collection(dispatch.payload)]
+    assert cancelled.is_set() is (failure in {"http-503", "timeout"})
+    assert session_factory.calls == 1
+    assert len(calls["load"]) == 1
     assert calls["reserve"] == []
+    assert input_provider.commands == []
+    assert collector_factory.calls == parser.calls == uuid_factory.calls == 0
     assert events == []
+    assert dispatch.model_dump(mode="python") == original
 
 
 def test_initial_unavailable_lookup_has_no_db_or_execution_side_effects() -> None:

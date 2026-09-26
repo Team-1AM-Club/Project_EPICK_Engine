@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from scripts.verify_w2_w3_postgres_http import _collect_product_source
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
@@ -829,6 +830,23 @@ def test_first_reservation_requires_w1_scope_then_fresh_write_authority(
         assert attempt.project_id == project_id
         assert source.next_observation_order == 1
         assert session.scalar(select(func.count()).select_from(CollectionRuntimeAttempt)) == 1
+
+
+@pytest.mark.approved_postgres
+def test_synthetic_w2_w3_probe_supplies_exact_account_authority(
+    runtime_session_factory: sessionmaker[Session],
+) -> None:
+    """The synthetic direct caller must cross the same first-binding authority boundary."""
+
+    result = _collect_product_source(runtime_session_factory)
+
+    assert set(result) == {
+        "source_id",
+        "source_version_id",
+        "evidence_count",
+        "outbox_event_id",
+    }
+    assert cast(int, result["evidence_count"]) > 0
 
 
 @pytest.mark.approved_postgres
