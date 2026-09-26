@@ -122,6 +122,35 @@ def test_pinned_private_schema_hashes() -> None:
     } == expected
 
 
+def test_manifest_resolves_new_schema_revisions_without_relabeling_original_snapshots() -> None:
+    manifest = json.loads((PRIVATE_CONTRACTS / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["revision_provenance"] == {
+        "default_field": "revision",
+        "override_field": "files[].revision",
+    }
+    default_revision = manifest["revision"]
+    assert default_revision == "afec08a9602132e5e433b523b0b6804850440524"
+    pinned_revision = "8d80a6f0edddd350a1e0308751fdb19bf7318d76"
+    new_schema_files = {
+        "w2-current-write-scope-lookup.request.schema.json",
+        "w2-current-write-scope-lookup.response.schema.json",
+        "w2-gate-scope-lookup.request.schema.json",
+        "w2-gate-scope-lookup.response.schema.json",
+        "w2-terminal-cleanup-authority.request.schema.json",
+        "w2-terminal-cleanup-authority.response.schema.json",
+    }
+
+    resolved_revisions = {
+        entry["file"]: entry.get("revision", default_revision) for entry in manifest["files"]
+    }
+    assert {name: resolved_revisions[name] for name in new_schema_files} == {
+        name: pinned_revision for name in new_schema_files
+    }
+    assert {
+        revision for name, revision in resolved_revisions.items() if name not in new_schema_files
+    } == {default_revision}
+
+
 def test_current_scope_cannot_carry_candidate_or_authority() -> None:
     codec = _codec()
     request = {

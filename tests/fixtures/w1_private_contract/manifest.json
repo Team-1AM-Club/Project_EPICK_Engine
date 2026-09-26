@@ -1,6 +1,10 @@
 {
   "repository": "Team-1AM-Club/Project_EPICK_Service",
   "revision": "afec08a9602132e5e433b523b0b6804850440524",
+  "revision_provenance": {
+    "default_field": "revision",
+    "override_field": "files[].revision"
+  },
   "normalization": "UTF-8 with LF line endings",
   "purpose": "Offline contract snapshots only; no runtime authorization or integration completion.",
   "files": [
@@ -223,36 +227,42 @@
     {
       "file": "w2-current-write-scope-lookup.request.schema.json",
       "upstream_path": "backend/contracts/w1/v1/w2-current-write-scope-lookup.request.schema.json",
+      "revision": "8d80a6f0edddd350a1e0308751fdb19bf7318d76",
       "git_blob_sha": "217db51b188461541535373e8b2f0de829ef759f",
       "sha256": "6e408368995eba4d17144b963cf10c4ce11657e08ad8cacb93c566f1f4dd092f"
     },
     {
       "file": "w2-current-write-scope-lookup.response.schema.json",
       "upstream_path": "backend/contracts/w1/v1/w2-current-write-scope-lookup.response.schema.json",
+      "revision": "8d80a6f0edddd350a1e0308751fdb19bf7318d76",
       "git_blob_sha": "be75e04f472cf707b381b9f639f613d3aec4d156",
       "sha256": "7715bc88b2f293c571d95c60fead9d3bc9f5028e85e29e08003a1d089d693101"
     },
     {
       "file": "w2-gate-scope-lookup.request.schema.json",
       "upstream_path": "backend/contracts/w1/v1/w2-gate-scope-lookup.request.schema.json",
+      "revision": "8d80a6f0edddd350a1e0308751fdb19bf7318d76",
       "git_blob_sha": "fd6600322cd1fd6f5f165997e177bc9e31cac2e7",
       "sha256": "15ab35ae09dd449b4f0a7d0a0ba707508ef4110d0f898c17c84ca6e3185cf832"
     },
     {
       "file": "w2-gate-scope-lookup.response.schema.json",
       "upstream_path": "backend/contracts/w1/v1/w2-gate-scope-lookup.response.schema.json",
+      "revision": "8d80a6f0edddd350a1e0308751fdb19bf7318d76",
       "git_blob_sha": "9e1a93466e426330dddda8c3cc623f2aeba4b2a5",
       "sha256": "13615def394d4e0c48375a83fe1211574bc290bfbd6b4bbe8d8861ba13d2e3c0"
     },
     {
       "file": "w2-terminal-cleanup-authority.request.schema.json",
       "upstream_path": "backend/contracts/w1/v1/w2-terminal-cleanup-authority.request.schema.json",
+      "revision": "8d80a6f0edddd350a1e0308751fdb19bf7318d76",
       "git_blob_sha": "bf1b7103f4532ca27e020ca4a90151ef9f597c80",
       "sha256": "e2d1127c07fb88df249b2bc1294cc930b1191560d04408499587fc54a361e913"
     },
     {
       "file": "w2-terminal-cleanup-authority.response.schema.json",
       "upstream_path": "backend/contracts/w1/v1/w2-terminal-cleanup-authority.response.schema.json",
+      "revision": "8d80a6f0edddd350a1e0308751fdb19bf7318d76",
       "git_blob_sha": "7eadfd452520ea5f252ee000e2c477581d8d0261",
       "sha256": "cfba5f5c3886291430ff096fb61e8f09640ddc02e83de4cab26bf87338bbba88"
     }
