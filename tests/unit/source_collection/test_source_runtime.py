@@ -17,7 +17,11 @@ import pytest
 import epick_engine.source_collection.source_runtime as source_runtime
 from epick_engine.source_collection.contracts import CollectionStage
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
-from epick_engine.source_collection.private_scope import PrivateWriteScope
+from epick_engine.source_collection.private_scope import (
+    PrivateScopeRejected,
+    PrivateTerminalCleanupAuthority,
+    PrivateWriteScope,
+)
 from epick_engine.source_collection.source_runtime import (
     LookupGatedExecutionContext,
     RuntimeAuthorizationError,
@@ -34,11 +38,13 @@ from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
 from epick_engine.source_collection.w1_private_authority_contracts import (
     CurrentWriteScopeLookupResponse,
     PrivateWriteAuthorityResponse,
+    TerminalCleanupAuthorityResponse,
     W1PrivateBinding,
 )
 from epick_engine.source_collection.w1_transport import (
     LookupResponse,
     W1Dispatch,
+    W1WireContractError,
     parse_w1_dispatch,
 )
 
@@ -627,6 +633,123 @@ def test_each_collection_transaction_has_a_distinct_w1_decision(
         thread_renewals,
     ):
         assert all(kwargs["expected_dispatch_digest"] == expected_digest for _args, kwargs in calls)
+
+
+def test_cancelled_claim_uses_cleanup_not_current_write() -> None:
+    """A semantic current-write denial may release only the exact claimed row."""
+
+    dispatch = _dispatch()
+    binding = W1PrivateBinding.from_collection(dispatch.payload)
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    events: list[str] = []
+    released: list[dict[str, Any]] = []
+
+    class _CancelledAuthorityClient:
+        def authorize_write(
+            self,
+            received_binding: W1PrivateBinding,
+            received_scope: PrivateDeletionScope,
+        ) -> PrivateWriteAuthorityResponse:
+            assert received_binding == binding
+            assert received_scope == scope
+            events.append("write-denied")
+            raise W1LookupClientError("HTTP_403")
+
+        def authorize_terminal_cleanup(
+            self,
+            received_binding: W1PrivateBinding,
+            received_scope: PrivateDeletionScope,
+            cleanup_kind: str,
+        ) -> TerminalCleanupAuthorityResponse:
+            assert received_binding == binding
+            assert received_scope == scope
+            assert cleanup_kind == "CLAIM_RELEASE"
+            events.append("cleanup")
+            return TerminalCleanupAuthorityResponse.model_validate(
+                {
+                    "schema_version": "w1.private.w2-terminal-cleanup.v1",
+                    **_binding_payload(binding),
+                    "scope": scope.to_mapping(),
+                    "cleanup_kind": cleanup_kind,
+                    "authority_ref": "test:w1-terminal-cleanup",
+                    "allowed_effect": "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY",
+                },
+                strict=True,
+            )
+
+    def release_claim(*args: object, **kwargs: Any) -> object:
+        events.append("release")
+        released.append(kwargs)
+        return object()
+
+    source_runtime._release_after_clean_failure(
+        _SessionFactory(),
+        binding.command_id,
+        CLAIM_TOKEN,
+        binding=binding,
+        scope=scope,
+        authority_client=_CancelledAuthorityClient(),
+        expected_dispatch_digest=dispatch_digest(dispatch),
+        store_operations=source_runtime.RuntimeStoreOperations(release_claim=release_claim),
+    )
+
+    assert events == ["write-denied", "cleanup", "release"]
+    assert len(released) == 1
+    cleanup = released[0]["private_scope"]
+    assert isinstance(cleanup, PrivateTerminalCleanupAuthority)
+    assert cleanup.cleanup_kind == "CLAIM_RELEASE"
+    assert released[0]["private_binding"] == binding
+
+
+@pytest.mark.parametrize(
+    ("failure", "release_fails"),
+    [
+        (W1LookupClientError("HTTP_503"), False),
+        (W1LookupClientError("TIMEOUT"), False),
+        (W1WireContractError("malformed response"), False),
+        (None, True),
+    ],
+)
+def test_terminal_cleanup_is_not_fallback_for_uncertain_or_local_failure(
+    failure: Exception | None,
+    release_fails: bool,
+) -> None:
+    dispatch = _dispatch()
+    binding = W1PrivateBinding.from_collection(dispatch.payload)
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    cleanup_calls: list[str] = []
+
+    class _AuthorityClient(_TrustedPrivateAuthorityClient):
+        def authorize_write(
+            self,
+            received_binding: W1PrivateBinding,
+            received_scope: PrivateDeletionScope,
+        ) -> PrivateWriteAuthorityResponse:
+            if failure is not None:
+                raise failure
+            return super().authorize_write(received_binding, received_scope)
+
+        def authorize_terminal_cleanup(self, *args: object) -> TerminalCleanupAuthorityResponse:
+            cleanup_calls.append("cleanup")
+            raise AssertionError("terminal cleanup must not follow an uncertain or local failure")
+
+    def release_claim(*args: object, **kwargs: Any) -> object:
+        if release_fails:
+            raise PrivateScopeRejected("local binding mismatch")
+        return object()
+
+    source_runtime._release_after_clean_failure(
+        _SessionFactory(),
+        binding.command_id,
+        CLAIM_TOKEN,
+        binding=binding,
+        scope=scope,
+        authority_client=_AuthorityClient(dispatch),
+        expected_dispatch_digest=dispatch_digest(dispatch),
+        store_operations=source_runtime.RuntimeStoreOperations(release_claim=release_claim),
+    )
+
+    assert cleanup_calls == []
 
 
 @pytest.mark.parametrize("failure", ["wrong-echo", "http-503", "timeout"])

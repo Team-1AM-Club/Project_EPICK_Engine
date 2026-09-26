@@ -33,8 +33,10 @@ from epick_engine.source_collection.commit_gate_store import (
     CommitGateRejected,
     PrivateCommitGateAck,
     PrivateCommitGateInbox,
+    PrivateCommitGateReceipt,
     PrivateCommitStage,
     PrivateStagedOutbox,
+    cleanup_terminal_staged_outbox,
     lock_private_command,
 )
 from epick_engine.source_collection.commit_gate_store import (
@@ -49,6 +51,8 @@ from epick_engine.source_collection.persistence import Base, PrivateDeletionOwne
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.private_scope import (
     PrivateGateAuthority,
+    PrivateScopeRejected,
+    PrivateTerminalCleanupAuthority,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
 )
@@ -56,7 +60,9 @@ from epick_engine.source_collection.source_runtime import build_collection_relay
 from epick_engine.source_collection.w1_private_authority_contracts import (
     GateAuthorityResponse,
     GateScopeLookupResponse,
+    TerminalCleanupAuthorityResponse,
     W1GateBinding,
+    W1PrivateBinding,
 )
 from epick_engine.source_collection.w1_transport import LookupRequest, LookupResponse
 
@@ -189,6 +195,29 @@ def _command_scope(command: CollectionCommand) -> PrivateWriteScope:
             job_id=command.job_id,
         )
     )
+
+
+def _terminal_cleanup_authority(
+    command: CollectionCommand,
+    *,
+    cleanup_kind: str = "STAGED_OUTBOX",
+) -> PrivateTerminalCleanupAuthority:
+    binding = W1PrivateBinding.from_collection(command)
+    response = TerminalCleanupAuthorityResponse.model_validate(
+        {
+            "schema_version": "w1.private.w2-terminal-cleanup.v1",
+            "owner_user_id": binding.owner_user_id,
+            "owner_deletion_epoch": binding.owner_deletion_epoch,
+            "command_id": binding.command_id,
+            "job_id": binding.job_id,
+            "execution_fence": binding.execution_fence,
+            "scope": {"type": "ACCOUNT"},
+            "cleanup_kind": cleanup_kind,
+            "authority_ref": "w1:test-terminal-cleanup",
+            "allowed_effect": "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY",
+        }
+    )
+    return PrivateTerminalCleanupAuthority.from_w1_response(response)
 
 
 def _gate_payload(binding: W1GateBinding, phase: str) -> dict[str, object]:
@@ -893,6 +922,66 @@ def test_collection_lookup_full_command_mismatch_leaves_staged_delivery_unsent(
         )
         assert staged.delivered_at is None
         assert staged.relay_claim_token is None
+
+
+def test_terminal_staged_cleanup_never_sends_or_creates_gate(session_factory) -> None:
+    command, result = _pair()
+    _stage(session_factory, command, result)
+
+    with session_factory.begin() as session, pytest.raises(PrivateScopeRejected):
+        cleanup_terminal_staged_outbox(
+            session,
+            command.command_id,
+            private_cleanup_authority=_terminal_cleanup_authority(
+                command,
+                cleanup_kind="CLAIM_RELEASE",
+            ),
+        )
+
+    binding = W1PrivateBinding.from_collection(command)
+    malformed = TerminalCleanupAuthorityResponse.model_construct(
+        schema_version="w1.private.w2-terminal-cleanup.v1",
+        owner_user_id=binding.owner_user_id,
+        owner_deletion_epoch=binding.owner_deletion_epoch,
+        command_id=binding.command_id,
+        job_id=binding.job_id,
+        execution_fence=binding.execution_fence,
+        scope={"type": "ACCOUNT"},
+        cleanup_kind="STAGED_OUTBOX",
+        authority_ref="w1:test-terminal-cleanup",
+        allowed_effect="WRITE_TOO",
+    )
+    with pytest.raises(PrivateScopeRejected):
+        PrivateTerminalCleanupAuthority.from_w1_response(malformed)
+
+    with session_factory.begin() as session:
+        cleanup_terminal_staged_outbox(
+            session,
+            command.command_id,
+            private_cleanup_authority=_terminal_cleanup_authority(command),
+        )
+
+    queue = FakeQueue()
+    assert relay_once(session_factory, queue, command_id=command.command_id).status == "EMPTY"
+    assert queue.sent == []
+    with session_factory() as session:
+        stage = session.get(PrivateCommitStage, command.command_id)
+        staged = session.scalar(
+            select(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id == command.command_id)
+        )
+        assert stage is not None
+        assert stage.state == "STAGED"
+        assert stage.payload_purged is True
+        assert stage.result_payload is None
+        assert stage.operation_id is None
+        assert stage.operation_revision == "0"
+        assert staged is not None
+        assert staged.payload is None
+        assert staged.delivered_at is None
+        assert staged.relay_claim_token is None
+        assert session.scalar(select(func.count()).select_from(PrivateCommitGateAck)) == 0
+        assert session.scalar(select(func.count()).select_from(PrivateCommitGateReceipt)) == 0
+        assert session.scalar(select(func.count()).select_from(PrivateCommitGateInbox)) == 0
 
 
 def test_purge_before_relay_suppresses_staged_private_payload(session_factory) -> None:

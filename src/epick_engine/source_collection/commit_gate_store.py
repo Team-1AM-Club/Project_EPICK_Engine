@@ -45,8 +45,10 @@ from epick_engine.source_collection.persistence import Base, bind_private_write_
 from epick_engine.source_collection.private_scope import (
     PrivateGateAuthority,
     PrivateScopeRejected,
+    PrivateTerminalCleanupAuthority,
     PrivateWriteScope,
     lock_private_gate_scope,
+    lock_private_terminal_cleanup_scope,
     lock_private_write_scope,
 )
 from epick_engine.source_collection.w1_transport import (
@@ -234,6 +236,51 @@ def _prepare_staged_outbox_for_terminal(
     staged.relay_claim_token = None
     staged.relay_claim_expires_at = None
     return staged
+
+
+def cleanup_terminal_staged_outbox(
+    session: Session,
+    command_id: UUID,
+    *,
+    private_cleanup_authority: PrivateTerminalCleanupAuthority | None = None,
+) -> None:
+    """Tombstone one exact existing STAGED payload without creating gate state."""
+
+    if not isinstance(command_id, UUID):
+        raise CommitGateRejected("invalid private staged cleanup command")
+    if not isinstance(private_cleanup_authority, PrivateTerminalCleanupAuthority):
+        raise PrivateScopeRejected("a W1 terminal cleanup authority is required")
+    if (
+        private_cleanup_authority.cleanup_kind != "STAGED_OUTBOX"
+        or private_cleanup_authority.command_id != command_id
+    ):
+        raise PrivateScopeRejected("private staged cleanup authority binding does not match")
+    lock_private_terminal_cleanup_scope(session, private_cleanup_authority)
+    with _storage_transaction(session, command_id):
+        row = session.scalar(
+            select(PrivateCommitStage)
+            .where(PrivateCommitStage.command_id == command_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if row is None or row.state != "STAGED":
+            raise CommitGateRejected("private staged cleanup target is unavailable")
+        if (
+            row.owner_ref != private_cleanup_authority.owner_user_id
+            or row.job_id != private_cleanup_authority.job_id
+            or row.execution_fence != str(private_cleanup_authority.execution_fence)
+            or row.owner_deletion_epoch != str(private_cleanup_authority.owner_deletion_epoch)
+            or row.private_scope_kind != private_cleanup_authority.kind
+            or row.project_id != private_cleanup_authority.project_id
+        ):
+            raise PrivateScopeRejected("private staged cleanup scope does not match")
+        staged = _prepare_staged_outbox_for_terminal(session, command_id)
+        if staged is None:
+            raise CommitGateRejected("private staged cleanup outbox is unavailable")
+        row.payload_purged = True
+        row.result_payload = None
+        staged.payload = None
+        _flush_private_storage(session)
 
 
 def _hash(raw: dict[str, Any]) -> str:

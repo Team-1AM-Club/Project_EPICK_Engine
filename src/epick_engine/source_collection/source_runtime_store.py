@@ -23,9 +23,12 @@ from epick_engine.source_collection.persistence import (
 )
 from epick_engine.source_collection.private_scope import (
     PrivateScopeRejected,
+    PrivateTerminalCleanupAuthority,
     PrivateWriteScope,
+    lock_private_terminal_cleanup_scope,
     lock_private_write_scope,
 )
+from epick_engine.source_collection.w1_private_authority_contracts import W1PrivateBinding
 from epick_engine.source_collection.w1_transport import (
     W1CommandDispatch,
     W1DirectSourceRegistrationDispatch,
@@ -279,6 +282,51 @@ def _lock_reserved_attempt(
     return attempt
 
 
+def _lock_releasable_attempt(
+    session: Session,
+    command_id: UUID,
+    private_scope: PrivateWriteScope | PrivateTerminalCleanupAuthority | None,
+    private_binding: W1PrivateBinding | None,
+    expected_dispatch_digest: str,
+) -> CollectionRuntimeAttempt:
+    if isinstance(private_scope, PrivateWriteScope):
+        if private_binding is not None:
+            raise PrivateScopeRejected("current write release cannot carry cleanup binding")
+        return _lock_reserved_attempt(
+            session,
+            command_id,
+            private_scope,
+            expected_dispatch_digest,
+        )
+    if not isinstance(private_scope, PrivateTerminalCleanupAuthority):
+        raise PrivateScopeRejected("a private release authority is required")
+    if not isinstance(private_binding, W1PrivateBinding):
+        raise PrivateScopeRejected("terminal cleanup requires the original private binding")
+    private_scope.assert_bound_to(private_binding, cleanup_kind="CLAIM_RELEASE")
+    if private_scope.command_id != command_id:
+        raise PrivateScopeRejected("private cleanup command binding does not match")
+    lock_private_terminal_cleanup_scope(session, private_scope)
+    lock_private_command(session, command_id)
+    attempt = session.scalar(
+        select(CollectionRuntimeAttempt)
+        .where(CollectionRuntimeAttempt.command_id == command_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if attempt is None or attempt.state != "RESERVED":
+        raise CollectionRuntimeConflict("collection runtime attempt is not reserved")
+    if attempt.dispatch_digest != expected_dispatch_digest:
+        raise CollectionRuntimeConflict("collection runtime dispatch binding conflict")
+    if (
+        attempt.owner_ref != private_scope.owner_user_id
+        or attempt.job_id != private_scope.job_id
+        or attempt.private_scope_kind != private_scope.kind
+        or attempt.project_id != private_scope.project_id
+    ):
+        raise PrivateScopeRejected("collection runtime cleanup scope does not match")
+    return attempt
+
+
 def _database_now(session: Session) -> datetime:
     value = session.scalar(select(func.clock_timestamp()))
     if not isinstance(value, datetime):
@@ -369,17 +417,19 @@ def release_collection_claim(
     *,
     claim_token: UUID,
     expected_dispatch_digest: str,
-    private_scope: PrivateWriteScope | None = None,
+    private_scope: PrivateWriteScope | PrivateTerminalCleanupAuthority | None = None,
+    private_binding: W1PrivateBinding | None = None,
 ) -> CollectionRuntimeAttempt:
     """Release only the caller's active RESERVED claim in one root transaction."""
 
     _validate_claim_identity(command_id, claim_token)
     _validate_dispatch_digest_value(expected_dispatch_digest)
     with session_factory() as session, session.begin():
-        attempt = _lock_reserved_attempt(
+        attempt = _lock_releasable_attempt(
             session,
             command_id,
             private_scope,
+            private_binding,
             expected_dispatch_digest,
         )
         database_now = _database_now(session)

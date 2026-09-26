@@ -45,6 +45,7 @@ from epick_engine.source_collection.persistence import (
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.private_scope import (
     PrivateScopeRejected,
+    PrivateTerminalCleanupAuthority,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
 )
@@ -66,11 +67,13 @@ from epick_engine.source_collection.source_runtime_store import (
 )
 from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
 from epick_engine.source_collection.w1_private_authority_contracts import (
+    CleanupKind,
     CurrentWriteScopeLookupResponse,
     GateAuthorityResponse,
     GatePhase,
     GateScopeLookupResponse,
     PrivateWriteAuthorityResponse,
+    TerminalCleanupAuthorityResponse,
     W1GateBinding,
     W1PrivateBinding,
 )
@@ -87,6 +90,10 @@ from epick_engine.source_collection.w1_transport import (
 
 class RuntimeAuthorizationError(RuntimeError):
     """The W1 lookup or durable runtime state no longer authorizes execution."""
+
+
+class _CurrentWriteSemanticallyDenied(RuntimeAuthorizationError):
+    """A validated W1 HTTP 403 that may permit a separate cleanup request."""
 
 
 type SessionFactory = Callable[[], Session]
@@ -127,6 +134,13 @@ class PrivateAuthorityClient(Protocol):
         phase: GatePhase,
         scope: PrivateDeletionScope,
     ) -> GateAuthorityResponse: ...
+
+    def authorize_terminal_cleanup(
+        self,
+        binding: W1PrivateBinding,
+        scope: PrivateDeletionScope,
+        cleanup_kind: CleanupKind,
+    ) -> TerminalCleanupAuthorityResponse: ...
 
 
 class CollectionInputProvider(Protocol):
@@ -531,7 +545,11 @@ def _stored_attempt_scope(attempt: CollectionRuntimeAttempt) -> PrivateDeletionS
 
 
 def _response_matches_binding(
-    response: CurrentWriteScopeLookupResponse | PrivateWriteAuthorityResponse,
+    response: (
+        CurrentWriteScopeLookupResponse
+        | PrivateWriteAuthorityResponse
+        | TerminalCleanupAuthorityResponse
+    ),
     binding: W1PrivateBinding,
 ) -> bool:
     return (
@@ -600,7 +618,13 @@ def _authorize_write(
 ) -> PrivateWriteScope:
     try:
         response = authority_client.authorize_write(binding, scope)
-    except (W1LookupClientError, W1LookupError, W1WireContractError, ValueError, TypeError) as exc:
+    except W1LookupClientError as exc:
+        if exc.code == "HTTP_403":
+            raise _CurrentWriteSemanticallyDenied(
+                "W1 private write authority was semantically denied"
+            ) from exc
+        raise RuntimeAuthorizationError("W1 private write authority is invalid") from exc
+    except (W1LookupError, W1WireContractError, ValueError, TypeError) as exc:
         raise RuntimeAuthorizationError("W1 private write authority is invalid") from exc
     if (
         not isinstance(response, PrivateWriteAuthorityResponse)
@@ -623,6 +647,32 @@ def _authorize_write(
         raise RuntimeAuthorizationError("W1 private write authority is invalid") from exc
 
 
+def _authorize_terminal_cleanup(
+    binding: W1PrivateBinding,
+    scope: PrivateDeletionScope,
+    cleanup_kind: CleanupKind,
+    authority_client: PrivateAuthorityClient,
+) -> PrivateTerminalCleanupAuthority:
+    try:
+        response = authority_client.authorize_terminal_cleanup(binding, scope, cleanup_kind)
+    except (W1LookupClientError, W1LookupError, W1WireContractError, ValueError, TypeError) as exc:
+        raise RuntimeAuthorizationError("W1 terminal cleanup authority is invalid") from exc
+    if (
+        not isinstance(response, TerminalCleanupAuthorityResponse)
+        or not _response_matches_binding(response, binding)
+        or response.scope != scope.to_mapping()
+        or response.cleanup_kind != cleanup_kind
+        or response.allowed_effect != "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY"
+    ):
+        raise RuntimeAuthorizationError("W1 terminal cleanup authority is invalid")
+    try:
+        decision = PrivateTerminalCleanupAuthority.from_w1_response(response)
+        decision.assert_bound_to(binding, cleanup_kind=cleanup_kind)
+        return decision
+    except PrivateScopeRejected as exc:
+        raise RuntimeAuthorizationError("W1 terminal cleanup authority is invalid") from exc
+
+
 def _release_after_clean_failure(
     session_factory: SessionFactory,
     command_id: UUID,
@@ -636,6 +686,30 @@ def _release_after_clean_failure(
 ) -> None:
     try:
         private_scope = _authorize_write(binding, scope, authority_client)
+    except _CurrentWriteSemanticallyDenied:
+        try:
+            cleanup_authority = _authorize_terminal_cleanup(
+                binding,
+                scope,
+                "CLAIM_RELEASE",
+                authority_client,
+            )
+            store_operations.release_claim(
+                session_factory,
+                command_id,
+                claim_token=claim_token,
+                expected_dispatch_digest=expected_dispatch_digest,
+                private_scope=cleanup_authority,
+                private_binding=binding,
+            )
+        except Exception:
+            # A denied or uncertain terminal cleanup remains recoverable by
+            # DB-clock expiry; it must never become current write authority.
+            return
+        return
+    except Exception:
+        return
+    try:
         store_operations.release_claim(
             session_factory,
             command_id,

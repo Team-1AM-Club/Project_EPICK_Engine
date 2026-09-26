@@ -107,6 +107,7 @@ from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionSc
 from epick_engine.source_collection.private_scope import (
     PrivateGateAuthority,
     PrivateScopeRejected,
+    PrivateTerminalCleanupAuthority,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
 )
@@ -142,6 +143,7 @@ from epick_engine.source_collection.w1_private_authority_contracts import (
     CurrentWriteScopeLookupResponse,
     GateAuthorityResponse,
     PrivateWriteAuthorityResponse,
+    TerminalCleanupAuthorityResponse,
     W1PrivateBinding,
 )
 from epick_engine.source_collection.w1_transport import (
@@ -644,6 +646,27 @@ def _private_binding_payload(binding: W1PrivateBinding) -> dict[str, object]:
         "job_id": binding.job_id,
         "execution_fence": binding.execution_fence,
     }
+
+
+def _terminal_cleanup_authority(
+    binding: W1PrivateBinding,
+    expected_scope: PrivateDeletionScope,
+    *,
+    cleanup_kind: str = "CLAIM_RELEASE",
+    **overrides: object,
+) -> PrivateTerminalCleanupAuthority:
+    payload = {
+        "schema_version": "w1.private.w2-terminal-cleanup.v1",
+        **_private_binding_payload(binding),
+        "scope": expected_scope.to_mapping(),
+        "cleanup_kind": cleanup_kind,
+        "authority_ref": "w1:test-terminal-cleanup",
+        "allowed_effect": "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY",
+        **overrides,
+    }
+    return PrivateTerminalCleanupAuthority.from_w1_response(
+        TerminalCleanupAuthorityResponse.model_validate(payload)
+    )
 
 
 class _PrivateAuthorityClient:
@@ -2065,6 +2088,96 @@ def test_claim_uses_db_clock_is_busy_until_expiry_then_allows_takeover_renew_and
     assert released.claim_token is None
     assert released.claim_expires_at is None
     _assert_attempt_row_is_unlocked(runtime_session_factory, command_id)
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    ("overrides", "cleanup_kind"),
+    [
+        ({"owner_user_id": uuid4()}, "CLAIM_RELEASE"),
+        ({"job_id": uuid4()}, "CLAIM_RELEASE"),
+        ({"execution_fence": 2}, "CLAIM_RELEASE"),
+        ({"owner_deletion_epoch": 1}, "CLAIM_RELEASE"),
+        ({"scope": {"type": "PROJECT", "project_id": str(uuid4())}}, "CLAIM_RELEASE"),
+        ({}, "RESERVATION_RELEASE"),
+    ],
+)
+def test_cancelled_claim_uses_cleanup_rejects_changed_binding_and_absent_row(
+    runtime_session_factory: sessionmaker[Session],
+    overrides: dict[str, object],
+    cleanup_kind: str,
+) -> None:
+    company_id, source_id = _seed_source(runtime_session_factory)
+    dispatch = _dispatch(
+        command_id=uuid4(),
+        job_id=uuid4(),
+        owner_ref=uuid4(),
+        company_id=company_id,
+        source_id=source_id,
+    )
+    _runtime_attempt(runtime_session_factory, dispatch)
+    command_id = dispatch.payload.command_id
+    claim_token = uuid4()
+    claim_collection_attempt(
+        runtime_session_factory,
+        command_id,
+        claim_token=claim_token,
+        lease_seconds=30,
+    )
+    binding = W1PrivateBinding.from_collection(dispatch.payload)
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    authority = _terminal_cleanup_authority(
+        binding,
+        scope,
+        cleanup_kind=cleanup_kind,
+        **overrides,
+    )
+    with runtime_session_factory.begin() as session:
+        owner_state = session.get(PrivateDeletionOwnerState, binding.owner_user_id)
+        assert owner_state is not None
+        owner_state.latest_epoch = binding.owner_deletion_epoch + 1
+        owner_state.account_deleted = True
+
+    with pytest.raises((CollectionRuntimeConflict, PrivateScopeRejected)):
+        _release_collection_claim(
+            runtime_session_factory,
+            command_id,
+            claim_token=claim_token,
+            expected_dispatch_digest=dispatch_digest(dispatch),
+            private_scope=authority,
+            private_binding=binding,
+        )
+
+    with runtime_session_factory() as session:
+        attempt = session.get(CollectionRuntimeAttempt, command_id)
+        assert attempt is not None
+        assert attempt.claim_token == claim_token
+
+    valid_authority = _terminal_cleanup_authority(binding, scope)
+    released = _release_collection_claim(
+        runtime_session_factory,
+        command_id,
+        claim_token=claim_token,
+        expected_dispatch_digest=dispatch_digest(dispatch),
+        private_scope=valid_authority,
+        private_binding=binding,
+    )
+    assert released.claim_token is None
+    assert released.claim_expires_at is None
+
+    with runtime_session_factory.begin() as session:
+        attempt = session.get(CollectionRuntimeAttempt, command_id)
+        assert attempt is not None
+        session.delete(attempt)
+    with pytest.raises(CollectionRuntimeConflict):
+        _release_collection_claim(
+            runtime_session_factory,
+            command_id,
+            claim_token=claim_token,
+            expected_dispatch_digest=dispatch_digest(dispatch),
+            private_scope=valid_authority,
+            private_binding=binding,
+        )
 
 
 @pytest.mark.approved_postgres

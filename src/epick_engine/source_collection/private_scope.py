@@ -18,7 +18,11 @@ from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionSc
 
 if TYPE_CHECKING:
     from epick_engine.source_collection.commit_gate_contracts import CommitGateCommand
-    from epick_engine.source_collection.w1_private_authority_contracts import GateAuthorityResponse
+    from epick_engine.source_collection.w1_private_authority_contracts import (
+        GateAuthorityResponse,
+        TerminalCleanupAuthorityResponse,
+        W1PrivateBinding,
+    )
 
 SIGNED_64_MAX = 9_223_372_036_854_775_807
 
@@ -133,6 +137,103 @@ class PrivateWriteScope:
             raise PrivateScopeRejected("private scope command binding does not match")
         if self.job_id != job_id:
             raise PrivateScopeRejected("private scope job binding does not match")
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateTerminalCleanupAuthority:
+    """One exact W1 terminal-cleanup decision with no write semantics."""
+
+    owner_user_id: UUID
+    owner_deletion_epoch: int
+    scope: PrivateDeletionScope
+    authority_ref: str
+    command_id: UUID
+    job_id: UUID
+    execution_fence: int
+    cleanup_kind: Literal["RESERVATION_RELEASE", "CLAIM_RELEASE", "STAGED_OUTBOX"]
+    allowed_effect: Literal["OWNER_LOCKED_PRIVATE_CLEANUP_ONLY"]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.owner_user_id, UUID):
+            raise PrivateScopeRejected("private cleanup authority owner must be a UUID")
+        if (
+            isinstance(self.owner_deletion_epoch, bool)
+            or not isinstance(self.owner_deletion_epoch, int)
+            or not 0 <= self.owner_deletion_epoch <= SIGNED_64_MAX
+        ):
+            raise PrivateScopeRejected("private cleanup authority owner epoch is invalid")
+        if not isinstance(self.scope, PrivateDeletionScope):
+            raise PrivateScopeRejected("private cleanup authority scope is invalid")
+        if not isinstance(self.authority_ref, str) or not self.authority_ref.strip():
+            raise PrivateScopeRejected("private cleanup authority reference is invalid")
+        for uuid_value, label in (
+            (self.command_id, "command"),
+            (self.job_id, "Job"),
+        ):
+            if not isinstance(uuid_value, UUID):
+                raise PrivateScopeRejected(f"private cleanup authority {label} must be a UUID")
+        if (
+            isinstance(self.execution_fence, bool)
+            or not isinstance(self.execution_fence, int)
+            or not 1 <= self.execution_fence <= SIGNED_64_MAX
+        ):
+            raise PrivateScopeRejected("private cleanup authority execution fence is invalid")
+        if self.cleanup_kind not in {"RESERVATION_RELEASE", "CLAIM_RELEASE", "STAGED_OUTBOX"}:
+            raise PrivateScopeRejected("private cleanup authority kind is invalid")
+        if self.allowed_effect != "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY":
+            raise PrivateScopeRejected("private cleanup authority effect is invalid")
+
+    @classmethod
+    def from_w1_response(cls, response: TerminalCleanupAuthorityResponse) -> Self:
+        from epick_engine.source_collection.w1_private_authority_contracts import (  # noqa: PLC0415
+            TerminalCleanupAuthorityResponse,
+        )
+
+        if not isinstance(response, TerminalCleanupAuthorityResponse):
+            raise PrivateScopeRejected("a W1 terminal cleanup authority response is required")
+        try:
+            scope = PrivateDeletionScope.from_mapping(response.scope)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise PrivateScopeRejected("private cleanup authority scope is invalid") from exc
+        return cls(
+            owner_user_id=response.owner_user_id,
+            owner_deletion_epoch=response.owner_deletion_epoch,
+            scope=scope,
+            authority_ref=response.authority_ref,
+            command_id=response.command_id,
+            job_id=response.job_id,
+            execution_fence=response.execution_fence,
+            cleanup_kind=response.cleanup_kind,
+            allowed_effect=response.allowed_effect,
+        )
+
+    @property
+    def kind(self) -> Literal["ACCOUNT", "PROJECT"]:
+        return self.scope.kind
+
+    @property
+    def project_id(self) -> UUID | None:
+        return self.scope.project_id
+
+    def assert_bound_to(
+        self,
+        binding: W1PrivateBinding,
+        *,
+        cleanup_kind: Literal["RESERVATION_RELEASE", "CLAIM_RELEASE", "STAGED_OUTBOX"],
+    ) -> None:
+        from epick_engine.source_collection.w1_private_authority_contracts import (  # noqa: PLC0415
+            W1PrivateBinding,
+        )
+
+        if not isinstance(binding, W1PrivateBinding) or (
+            self.owner_user_id != binding.owner_user_id
+            or self.owner_deletion_epoch != binding.owner_deletion_epoch
+            or self.command_id != binding.command_id
+            or self.job_id != binding.job_id
+            or self.execution_fence != binding.execution_fence
+            or self.cleanup_kind != cleanup_kind
+        ):
+            raise PrivateScopeRejected("private cleanup authority binding does not match")
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +394,20 @@ def _lock_private_owner_state(
     return owner_state
 
 
+def _lock_existing_private_owner_state(
+    session: Session,
+    owner_user_id: UUID,
+) -> PrivateDeletionOwnerState:
+    owner_state = session.scalar(
+        select(PrivateDeletionOwnerState)
+        .where(PrivateDeletionOwnerState.owner_user_id == owner_user_id)
+        .with_for_update()
+    )
+    if owner_state is None:
+        raise PrivateScopeRejected("private cleanup owner state was not found")
+    return owner_state
+
+
 def _assert_current_private_scope(
     session: Session,
     *,
@@ -341,6 +456,19 @@ def lock_private_gate_scope(session: Session, decision: PrivateGateAuthority) ->
         assert purge_epoch is not None
         if purge_epoch < owner_state.latest_epoch:
             raise PrivateScopeRejected("private gate PURGE would regress owner deletion epoch")
+
+
+def lock_private_terminal_cleanup_scope(
+    session: Session,
+    decision: PrivateTerminalCleanupAuthority,
+) -> None:
+    """Lock an existing owner without requiring its old epoch to remain current."""
+
+    if not isinstance(decision, PrivateTerminalCleanupAuthority):
+        raise PrivateScopeRejected("a W1 terminal cleanup authority is required")
+    if decision.allowed_effect != "OWNER_LOCKED_PRIVATE_CLEANUP_ONLY":
+        raise PrivateScopeRejected("private cleanup authority effect is invalid")
+    _lock_existing_private_owner_state(session, decision.owner_user_id)
 
 
 def lock_private_write_scope(session: Session, proof: PrivateWriteScope) -> None:
