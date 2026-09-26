@@ -237,6 +237,85 @@ def _decode_strict_json(body: bytes) -> object:
         raise W1LookupClientError("INVALID_RESPONSE_BODY") from None
 
 
+def _post_bounded_json(
+    *,
+    endpoint: _LookupEndpoint,
+    bearer: str,
+    ssl_context: ssl.SSLContext,
+    transport: LookupHTTPTransport,
+    target: str,
+    request_payload: object,
+    timeout: float,
+) -> tuple[int, object]:
+    """Perform one direct HTTPS POST and return only bounded, strict JSON."""
+
+    body: bytes | None = None
+    request_encoding_failed = False
+    try:
+        body = json.dumps(
+            request_payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        request_encoding_failed = True
+    if request_encoding_failed or body is None:
+        raise W1LookupClientError("INVALID_REQUEST_BODY") from None
+    if len(body) > MAX_LOOKUP_REQUEST_BYTES:
+        raise W1LookupClientError("REQUEST_TOO_LARGE")
+
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {bearer}",
+        "Content-Length": str(len(body)),
+        "Content-Type": "application/json",
+        "X-EPICK-Service-Principal": "w2",
+    }
+    context = _require_verified_tls(ssl_context)
+    response: object | None = None
+    transport_failed = False
+    try:
+        response = transport.post(
+            host=endpoint.host,
+            port=endpoint.port,
+            target=target,
+            headers=headers,
+            body=body,
+            timeout=timeout,
+            ssl_context=context,
+            max_response_bytes=MAX_LOOKUP_RESPONSE_BYTES,
+        )
+    except Exception:
+        transport_failed = True
+    if transport_failed:
+        raise W1LookupClientError("TRANSPORT_FAILURE") from None
+
+    if not isinstance(response, LookupHTTPResponse):
+        raise W1LookupClientError("INVALID_TRANSPORT_RESPONSE")
+    if (
+        type(response.status) is not int
+        or not 100 <= response.status <= 599
+        or not isinstance(response.body, bytes)
+        or not isinstance(response.content_type, str | type(None))
+    ):
+        raise W1LookupClientError("INVALID_TRANSPORT_RESPONSE")
+    if len(response.body) > MAX_LOOKUP_RESPONSE_BYTES:
+        raise W1LookupClientError("RESPONSE_TOO_LARGE")
+    if not _json_content_type_supported(response.content_type):
+        raise W1LookupClientError("UNSUPPORTED_RESPONSE_CONTENT")
+
+    decoded: object | None = None
+    decode_error: str | None = None
+    try:
+        decoded = _decode_strict_json(response.body)
+    except W1LookupClientError as error:
+        decode_error = error.code
+    if decode_error is not None:
+        raise W1LookupClientError(decode_error) from None
+    return response.status, decoded
+
+
 class W1LookupClient:
     """One-shot protected lookup client backed by W1's strict wire codecs."""
 
@@ -268,58 +347,18 @@ class W1LookupClient:
         if not isinstance(request, LookupRequest):
             raise W1WireContractError("invalid W1 lookup request")
         validated_request = _revalidate_model(request, LookupRequest, label="W1 lookup request")
-        body = json.dumps(
-            validated_request.model_dump(mode="json", warnings="error"),
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        if len(body) > MAX_LOOKUP_REQUEST_BYTES:
-            raise W1LookupClientError("REQUEST_TOO_LARGE")
-
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self._bearer}",
-            "Content-Length": str(len(body)),
-            "Content-Type": "application/json",
-            "X-EPICK-Service-Principal": "w2",
-        }
-        context = _require_verified_tls(self._ssl_context)
-        response: object | None = None
-        transport_failed = False
-        try:
-            response = self._transport.post(
-                host=self._endpoint.host,
-                port=self._endpoint.port,
-                target=LOOKUP_TARGET,
-                headers=headers,
-                body=body,
-                timeout=self._timeout,
-                ssl_context=context,
-                max_response_bytes=MAX_LOOKUP_RESPONSE_BYTES,
-            )
-        except Exception:
-            transport_failed = True
-        if transport_failed:
-            raise W1LookupClientError("TRANSPORT_FAILURE") from None
-
-        if not isinstance(response, LookupHTTPResponse):
-            raise W1LookupClientError("INVALID_TRANSPORT_RESPONSE")
-        if (
-            type(response.status) is not int
-            or not isinstance(response.body, bytes)
-            or not isinstance(response.content_type, str | type(None))
-        ):
-            raise W1LookupClientError("INVALID_TRANSPORT_RESPONSE")
-        if len(response.body) > MAX_LOOKUP_RESPONSE_BYTES:
-            raise W1LookupClientError("RESPONSE_TOO_LARGE")
-        if not _json_content_type_supported(response.content_type):
-            raise W1LookupClientError("UNSUPPORTED_RESPONSE_CONTENT")
-
-        payload = _decode_strict_json(response.body)
+        http_status, payload = _post_bounded_json(
+            endpoint=self._endpoint,
+            bearer=self._bearer,
+            ssl_context=self._ssl_context,
+            transport=self._transport,
+            target=LOOKUP_TARGET,
+            request_payload=validated_request.model_dump(mode="json", warnings="error"),
+            timeout=self._timeout,
+        )
         return decode_lookup_response(
             payload,
-            http_status=response.status,
+            http_status=http_status,
             request=validated_request,
         )
 

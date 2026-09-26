@@ -12,6 +12,7 @@ from uuid import UUID
 
 import pytest
 
+from epick_engine.source_collection import w1_lookup_client
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.w1_private_authority_contracts import (
     W1GateBinding,
@@ -53,14 +54,17 @@ class _RecordingTransport:
 
 
 def _response(
-    module: ModuleType,
     payload: dict[str, object] | bytes,
     *,
     status: int = 200,
     content_type: str | None = "application/json; charset=utf-8",
 ) -> object:
     body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
-    return module.LookupHTTPResponse(status=status, content_type=content_type, body=body)
+    return w1_lookup_client.LookupHTTPResponse(
+        status=status,
+        content_type=content_type,
+        body=body,
+    )
 
 
 def _binding() -> W1PrivateBinding:
@@ -162,9 +166,7 @@ def test_private_client_posts_exact_protected_path_and_principal() -> None:
             },
         ),
     ]
-    transport = _RecordingTransport(
-        [_response(module, response) for _, _, response in request_cases]
-    )
+    transport = _RecordingTransport([_response(response) for _, _, response in request_cases])
     context = ssl.create_default_context()
     client = module.W1PrivateAuthorityClient(
         endpoint=ENDPOINT,
@@ -189,6 +191,8 @@ def test_private_client_posts_exact_protected_path_and_principal() -> None:
         assert call["host"] == "w1-private.example.test"
         assert call["port"] == 443
         assert call["target"] == target
+        assert call["timeout"] == w1_lookup_client.DEFAULT_LOOKUP_TIMEOUT_SECONDS
+        assert call["max_response_bytes"] == w1_lookup_client.MAX_LOOKUP_RESPONSE_BYTES
         assert call["headers"] == {
             "Accept": "application/json",
             "Authorization": f"Bearer {BEARER}",
@@ -234,32 +238,30 @@ def test_private_client_fail_closed_without_retry_or_secret_echo(
     error: Exception | None = None
     if failure.startswith("http-"):
         status = int(failure.removeprefix("http-"))
-        response = _response(module, {"private": raw_marker}, status=status)
+        response = _response({"private": raw_marker}, status=status)
         expected_code = f"HTTP_{status}"
     elif failure == "timeout":
         response = None
         error = TimeoutError(f"{endpoint_marker} {bearer_marker} {raw_marker}")
         expected_code = "TRANSPORT_FAILURE"
     elif failure == "malformed-json":
-        response = _response(module, b'{"private":"' + raw_marker.encode("utf-8"))
+        response = _response(b'{"private":"' + raw_marker.encode("utf-8"))
         expected_code = "INVALID_RESPONSE_BODY"
     elif failure == "oversized-json":
         oversized = json.dumps({"private": raw_marker + "x" * (64 * 1024)}).encode()
-        response = _response(module, oversized)
+        response = _response(oversized)
         expected_code = "RESPONSE_TOO_LARGE"
     elif failure == "wrong-content-type":
         response = _response(
-            module,
             {"private": raw_marker},
             content_type="text/html",
         )
         expected_code = "UNSUPPORTED_RESPONSE_CONTENT"
     elif failure == "redirect":
-        response = _response(module, {"private": raw_marker}, status=302)
+        response = _response({"private": raw_marker}, status=302)
         expected_code = "HTTP_302"
     else:
         response = _response(
-            module,
             {
                 **successful_payload,
                 "owner_user_id": "99999999-9999-4999-8999-999999999999",

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import ssl
-from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -12,13 +10,9 @@ from pydantic import BaseModel
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
 from epick_engine.source_collection.w1_lookup_client import (
     DEFAULT_LOOKUP_TIMEOUT_SECONDS,
-    MAX_LOOKUP_REQUEST_BYTES,
-    MAX_LOOKUP_RESPONSE_BYTES,
-    LookupHTTPResponse,
     LookupHTTPTransport,
     W1LookupClientError,
-    _decode_strict_json,
-    _json_content_type_supported,
+    _post_bounded_json,
     _require_verified_tls,
     _StdlibHTTPSLookupTransport,
     _validate_bearer,
@@ -139,72 +133,24 @@ class W1PrivateAuthorityClient:
         if target not in _PROTECTED_TARGETS:
             raise W1LookupClientError("INVALID_TARGET")
         try:
-            payload: dict[str, Any] = request.model_dump(
+            request_payload = request.model_dump(
                 mode="json",
                 warnings="error",
                 exclude_none=True,
             )
-            body = json.dumps(
-                payload,
-                allow_nan=False,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
         except (TypeError, ValueError):
             raise W1WireContractError("invalid W1 private authority request") from None
-        if len(body) > MAX_LOOKUP_REQUEST_BYTES:
-            raise W1LookupClientError("REQUEST_TOO_LARGE")
-
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self._bearer}",
-            "Content-Length": str(len(body)),
-            "Content-Type": "application/json",
-            "X-EPICK-Service-Principal": "w2",
-        }
-        context = _require_verified_tls(self._ssl_context)
-        response: object | None = None
-        transport_failed = False
-        try:
-            response = self._transport.post(
-                host=self._endpoint.host,
-                port=self._endpoint.port,
-                target=target,
-                headers=headers,
-                body=body,
-                timeout=DEFAULT_LOOKUP_TIMEOUT_SECONDS,
-                ssl_context=context,
-                max_response_bytes=MAX_LOOKUP_RESPONSE_BYTES,
-            )
-        except Exception:
-            transport_failed = True
-        if transport_failed:
-            raise W1LookupClientError("TRANSPORT_FAILURE") from None
-
-        if not isinstance(response, LookupHTTPResponse):
-            raise W1LookupClientError("INVALID_TRANSPORT_RESPONSE")
-        if (
-            type(response.status) is not int
-            or not 100 <= response.status <= 599
-            or not isinstance(response.body, bytes)
-            or not isinstance(response.content_type, str | type(None))
-        ):
-            raise W1LookupClientError("INVALID_TRANSPORT_RESPONSE")
-        if len(response.body) > MAX_LOOKUP_RESPONSE_BYTES:
-            raise W1LookupClientError("RESPONSE_TOO_LARGE")
-        if not _json_content_type_supported(response.content_type):
-            raise W1LookupClientError("UNSUPPORTED_RESPONSE_CONTENT")
-
-        decoded: object | None = None
-        decode_error: str | None = None
-        try:
-            decoded = _decode_strict_json(response.body)
-        except W1LookupClientError as error:
-            decode_error = error.code
-        if decode_error is not None:
-            raise W1LookupClientError(decode_error) from None
-        if response.status != 200:
-            raise W1LookupClientError(f"HTTP_{response.status}")
+        http_status, decoded = _post_bounded_json(
+            endpoint=self._endpoint,
+            bearer=self._bearer,
+            ssl_context=self._ssl_context,
+            transport=self._transport,
+            target=target,
+            request_payload=request_payload,
+            timeout=DEFAULT_LOOKUP_TIMEOUT_SECONDS,
+        )
+        if http_status != 200:
+            raise W1LookupClientError(f"HTTP_{http_status}")
         parsed = _parse_wire(decoded, response_model, label=response_label)
         validate_private_echo(request, parsed)
         return parsed
