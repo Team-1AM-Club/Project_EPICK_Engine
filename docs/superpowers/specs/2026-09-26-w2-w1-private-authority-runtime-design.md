@@ -1,9 +1,8 @@
 # W2–W1 private authority runtime design
 
-> Draft pending one W1 collection binding clarification. The user chose minimal
-> ACK replay-control retention across v2 deletion. W1 accepted that boundary and
-> provided a protected canonical-scope lookup for gates without a local binding.
-> The initial collection write still lacks a proven canonical scope source.
+> Draft for user review after W1 resolved the initial collection scope binding.
+> The user chose minimal ACK replay-control retention across v2 deletion. W1
+> provides separate protected scope lookups for current writes and issued gates.
 > These contracts are not yet implemented or jointly validated in W2.
 
 ## Purpose and boundary
@@ -39,6 +38,12 @@ pins the scope-lookup implementation to
 isolated-PostgreSQL verification (82 passed), not a W1/W2 round trip or
 deployment.
 
+W1's [initial current-write scope response](https://github.com/Team-1AM-Club/Project_EPICK_Service/blob/a95d0bd1c9c1f59d3fd4a72369dc4e1c5db9c324/md/deploy/W1_W2_T050_Initial_Write_Scope_Binding_Response_2026-09-26.md)
+pins the additional implementation to
+`8d80a6f0edddd350a1e0308751fdb19bf7318d76`. W1 reports 83 focused
+isolated-PostgreSQL passes and six later contract/unit passes; W2 and joint
+verification remain outstanding.
+
 The existing v2 deletion design's unconditional removal of ACK descendants is
 superseded for an undelivered gate ACK. The user selected retention of only the
 minimal replay-control records needed to finish that exact ACK, never the
@@ -72,6 +77,40 @@ decision only from a successful, validated response. Wire parsing or a local
 | Gate ACK claim/send/retry | Same gate route, `phase=ACK_RELAY` | Exact ACK's issued operation/revision/action and original binding, supported by W1 historical outbox evidence |
 | Existing terminal reservation, claim, or STAGED outbox cleanup | `POST /internal/v1/w2-private/terminal-cleanup-authority`, `w1.private.w2-terminal-cleanup.v1` | Exact binding and `cleanup_kind` of `RESERVATION_RELEASE`, `CLAIM_RELEASE`, or `STAGED_OUTBOX`; response effect must be `OWNER_LOCKED_PRIVATE_CLEANUP_ONLY` |
 
+Before the first Core collection or direct Source registration reservation,
+W2 calls W1's protected
+`POST /internal/v1/w2-private/current-write-scope-lookup` with
+`w1.private.w2-current-write-scope-lookup.v1`. The request uses only the
+original dispatch's authenticated owner, deletion epoch, command ID, Job ID,
+and positive integer execution fence; it contains no candidate scope or
+`project_ref`. W1 checks the stored W2 command payload's `project_ref` against
+its `Job.project_id`, current command/Job/owner/Project permission, lease, and
+fence, then returns canonical `ACCOUNT` only when `Job.project_id IS NULL`, or
+`PROJECT` with W1's canonical Project UUID. W2 validates the response schema
+and exact echo of every request binding field, then independently compares the
+received dispatch's `project_ref`: null only for `ACCOUNT`, exact canonical
+Project UUID only for `PROJECT`. A missing, malformed, or changed value fails
+closed. The response has no `authority_ref` and grants no write. Only after
+this comparison does W2 request a separate fresh current-write authority and
+atomically persist the original command–scope binding with its first
+reservation under the local owner lock. Re-delivery and restart compare the
+entire incoming command/owner/Job/fence/epoch/scope binding to that stored
+record; they neither overwrite it nor accept a changed `project_ref`. Later
+private writes use the persisted original scope but still require their own
+fresh W1 authority and local recheck. After cancellation or deletion, the
+current-write lookup may deny; existing state can only be disposed through
+terminal-cleanup authority with the stored original scope.
+
+The current-write lookup's request and response schemas are pinned at W1
+revision `8d80a6f0edddd350a1e0308751fdb19bf7318d76` under
+`backend/contracts/w1/v1/w2-current-write-scope-lookup.{request,response}.schema.json`.
+Their SHA-256 values are respectively
+`6e408368995eba4d17144b963cf10c4ce11657e08ad8cacb93c566f1f4dd092f`
+and `7715bc88b2f293c571d95c60fead9d3bc9f5028e85e29e08003a1d089d693101`.
+The existing v1 dispatch wire remains unchanged. W1's actual producer/relay
+test covers Core/direct and ACCOUNT/PROJECT combinations; W2 must separately
+test its received-message comparison and durable replay behavior.
+
 If a gate has no persisted W2 stage or other exact command-bound local scope,
 W2 first invokes W1's protected
 `POST /internal/v1/w2-private/gate-scope-lookup` with
@@ -99,21 +138,18 @@ The terminal-cleanup request and response are pinned to W1's
 `backend/contracts/w1/v1/w2-terminal-cleanup-authority.{request,response}.schema.json`
 with SHA256 respectively
 `e2d1127c07fb88df249b2bc1294cc930b1191560d04408499587fc54a361e913`
-and `cfba5f5c3886291430ff09640ddc02e83de4cab26bf87338bbba88`.
+and `cfba5f5c3886291430ff096fb61e8f09640ddc02e83de4cab26bf87338bbba88`.
 The write/gate-authority routes have Pydantic request/response models but no
 separate JSON Schema files at W1 revision
-`a99de8d39a53444508c4ef2def427eb6ed3c1c91`. W2 pins the
+`8d80a6f0edddd350a1e0308751fdb19bf7318d76`. W2 pins the
 `backend/app/runtime/w2_private_write_authority.py` model definitions at that
 full SHA and validates their exact fields, echo binding, and protected-error
 behavior in contract tests. The scope-lookup and terminal-cleanup JSON Schemas
 remain separately hash-pinned above. W2 must not synthesize scope from a null
-Project reference, URL, or payload text: collection derives canonical binding
-from a W1-authenticated canonical binding. The current dispatch has only a
-nullable string `project_ref`, not an explicit scope; the first reservation has
-no prior W2 stage. W1 must define how W2 obtains that binding without guessing
-ACCOUNT from null or probing candidate scopes. Gate/relay derives its scope
-from the persisted W2 stage or another exact command-bound local record and
-the gate or outbox record.
+Project reference, URL, or payload text: collection obtains it from W1's
+protected current-write lookup and verifies the received dispatch against it.
+Gate/relay derives its scope from the persisted W2 stage or another exact
+command-bound local record and the gate or outbox record.
 An absent or unclassified binding requires W1's canonical gate-scope lookup.
 A failed or malformed lookup fails closed; its response cannot authorize a
 later gate.
@@ -216,10 +252,12 @@ become permission for another effect. A separate exact terminal-cleanup query
 may follow a denied current write only for an existing row and only where W1
 permits that cleanup.
 
-The scope lookup follows the same fail-closed rule: `403` is not a prompt to
-try another scope, while `503` or timeout may retry with the unchanged original
-gate binding and a new lookup. A scope-lookup success followed by gate-authority
-`403` still forbids application or ACK send.
+Both scope lookups follow the same fail-closed rule: `401`/`403`/`422` never
+prompt another scope candidate, while `503` or timeout may retry with only the
+unchanged original current-write or gate binding and a new lookup. A
+current-write scope response followed by write-authority `403` still forbids
+reservation; a gate-scope response followed by gate-authority `403` still
+forbids application or ACK send.
 
 ## Verification and handoff
 
@@ -227,6 +265,11 @@ Focused tests must show a new W1 call for every reservation, claim, heartbeat,
 release, replay, stage, gate apply, relay claim/release, send, and retry;
 accurate canonical request binding; owner-lock order; and no mutation/send on
 denial, timeout, malformed reply, or local epoch/scope mismatch. PostgreSQL
+tests must cover first-reservation scope lookup and atomic original-binding
+storage for Core/direct × ACCOUNT/PROJECT, exact dispatch `project_ref` and
+response-echo comparison, re-delivery with a changed binding, stale
+owner/epoch/fence, missing or malformed Project UUID, `401`/`403`/`422`, and
+`503`/timeout without write or alternate-scope probing. PostgreSQL
 tests must cover deleted-owner historical ACK replay, terminal STAGED discard,
 W1-issued ABORT/PURGE after forward-write closure, ACK loss/restart, send
 success followed by completion-commit failure, deletion with an undelivered
@@ -235,8 +278,8 @@ Stage-less ACCOUNT/PROJECT ABORT/PURGE must cover lookup then independent
 authority, exact echoed binding, missing historical outbox, stale epoch,
 different owner, `403`/`503`/timeout, and restart/replay. Tests must establish
 that same-ID/same-body ACK replay is safe and same-ID/different-body is rejected.
-Unit and contract tests pin W1 schema versions and both terminal-cleanup and
-scope-lookup hashes. Joint W1/W2 verification must compare count-only drain
+Unit and contract tests pin W1 schema versions and current-write, gate-scope,
+and terminal-cleanup lookup hashes. Joint W1/W2 verification must compare count-only drain
 states without sharing raw private payloads.
 
 The W2 handoff gives W1 a clean pushed full SHA, exact adapter and seam
