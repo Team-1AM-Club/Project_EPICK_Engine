@@ -27,6 +27,7 @@ from epick_engine.source_collection.commit_gate_operator import (
     Ct15Settings,
     SqsGateQueue,
     create_ct15_engine,
+    create_private_authority_client,
     create_sqs_client,
     preflight,
 )
@@ -235,11 +236,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         engine = create_ct15_engine(settings)
         preflight(engine, client, settings)
+        private_authority_client = create_private_authority_client(settings)
         sessions = sessionmaker(engine, expire_on_commit=False)
         outcome = (
-            consume_once(sessions, queue, settings.expected_w1_sender_id)
+            consume_once(
+                sessions,
+                queue,
+                settings.expected_w1_sender_id,
+                private_authority_client=private_authority_client,
+            )
             if args.mode in {"retain", "retain-finalize"}
-            else relay_once(sessions, queue, command_id=command.command_id)
+            else relay_once(
+                sessions,
+                queue,
+                command_id=command.command_id,
+                authority_client=private_authority_client,
+            )
         )
         evidence = queue.evidence()
         print(json.dumps({"status": outcome.status, **evidence}, sort_keys=True))

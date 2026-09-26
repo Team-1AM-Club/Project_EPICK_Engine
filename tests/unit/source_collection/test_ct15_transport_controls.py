@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -28,6 +29,27 @@ from epick_engine.source_collection.ct15_transport_controls import (
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 NOW = datetime(2026, 9, 20, tzinfo=UTC)
 SENDER = "AROASYNTHETICROLE01"
+CONFIGURED_SENDER = "AROASYNTHETICW1ROLE12"
+
+
+def ct15_environment() -> dict[str, str]:
+    return {
+        "W2_CT15_ENABLED": "true",
+        "W2_CT15_GATE_ONLY_QUEUE_APPROVED": "true",
+        "W2_CT15_DATABASE_URL": "postgresql+psycopg://synthetic@localhost/epick_ct15",
+        "W2_CT15_REGION": "ap-northeast-2",
+        "W2_CT15_COMMAND_QUEUE_URL": (
+            "https://sqs.ap-northeast-2.amazonaws.com/123456789012/test-ct15-command"
+        ),
+        "W2_CT15_INBOUND_QUEUE_URL": (
+            "https://sqs.ap-northeast-2.amazonaws.com/123456789012/test-ct15-inbound"
+        ),
+        "W2_CT15_EXPECTED_W1_SENDER_ID": CONFIGURED_SENDER,
+        "W2_CT15_RUNTIME_LABEL": "epick-ct15-synthetic",
+        "W1_LOOKUP_ENDPOINT": "https://lookup.example.test/internal/v1/job-commands/lookup",
+        "W1_LOOKUP_BEARER": "BEARER-CANARY",
+        "W1_LOOKUP_CA_FILE": "/run/epick/source-runtime/w1-ca.pem",
+    }
 
 
 @dataclass
@@ -241,6 +263,153 @@ def test_scope_mismatch_incoming_keeps_receipt_and_outputs_no_body():
     assert wrapper.evidence()["messages"] == []
 
 
+@pytest.mark.parametrize("mode", ["retain", "retain-finalize"])
+def test_cli_retain_paths_inject_same_configured_private_authority_client(
+    monkeypatch, tmp_path, capsys, mode
+):
+    from epick_engine.source_collection import ct15_transport_controls as module
+
+    command, _ = pair()
+    path = tmp_path / "command.json"
+    path.write_text(command.model_dump_json(), encoding="utf-8")
+    settings = module.Ct15Settings.from_environment(ct15_environment())
+    authority_client = object()
+    factory_settings = []
+    observed = []
+    finalize = gate("FINALIZE")
+    sdk = SimpleNamespace(
+        receive_message=lambda **_kwargs: {
+            "Messages": [
+                {
+                    "Body": _wire_body(finalize.model_dump(mode="json")),
+                    "ReceiptHandle": "private-receipt",
+                    "Attributes": {"SenderId": CONFIGURED_SENDER},
+                }
+            ]
+        },
+        delete_message=lambda **_kwargs: pytest.fail("retained receipt must not be deleted"),
+        send_message=lambda **_kwargs: pytest.fail("retain control must not send"),
+    )
+
+    monkeypatch.setenv("W2_CT15_TRANSPORT_CONTROLS", "true")
+    monkeypatch.setattr(module.Ct15Settings, "from_environment", lambda _env: settings)
+    monkeypatch.setattr(module, "create_sqs_client", lambda _settings: sdk)
+    monkeypatch.setattr(
+        module, "create_ct15_engine", lambda _settings: SimpleNamespace(dispose=lambda: None)
+    )
+    monkeypatch.setattr(module, "preflight", lambda *_args: {})
+    monkeypatch.setattr(module, "sessionmaker", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        module,
+        "create_private_authority_client",
+        lambda actual_settings: factory_settings.append(actual_settings) or authority_client,
+    )
+
+    def strict_consume_once(_sessions, queue, expected_sender_id, *, private_authority_client):
+        observed.append(private_authority_client)
+        assert expected_sender_id == CONFIGURED_SENDER
+        delivery = queue.receive()[0]
+        queue.delete(delivery.receipt_handle)
+        return SimpleNamespace(status="APPLIED")
+
+    monkeypatch.setattr(module, "consume_once", strict_consume_once)
+
+    assert main([mode, "--run-id", "ct15-test", "--command", str(path)]) == 0
+    assert factory_settings == [settings]
+    assert observed == [authority_client]
+    output = json.loads(capsys.readouterr().out)
+    assert output["control_applied"] is True
+    assert output["delete_suppressed_count"] == 1
+
+
+def test_cli_relay_control_injects_same_configured_private_authority_client(
+    monkeypatch, tmp_path, capsys
+):
+    from epick_engine.source_collection import ct15_transport_controls as module
+
+    command, result = pair()
+    path = tmp_path / "command.json"
+    path.write_text(command.model_dump_json(), encoding="utf-8")
+    settings = module.Ct15Settings.from_environment(ct15_environment())
+    authority_client = object()
+    factory_settings = []
+    observed = []
+    sent = []
+
+    def confirm_send(**kwargs):
+        body = kwargs["MessageBody"]
+        sent.append(body)
+        return {
+            "MessageId": "synthetic-message-id",
+            "MD5OfMessageBody": hashlib.md5(
+                body.encode("utf-8"), usedforsecurity=False
+            ).hexdigest(),
+        }
+
+    sdk = SimpleNamespace(
+        send_message=confirm_send,
+        receive_message=lambda **_kwargs: pytest.fail("relay control must not receive"),
+        delete_message=lambda **_kwargs: pytest.fail("relay control must not delete"),
+    )
+
+    monkeypatch.setenv("W2_CT15_TRANSPORT_CONTROLS", "true")
+    monkeypatch.setattr(module.Ct15Settings, "from_environment", lambda _env: settings)
+    monkeypatch.setattr(module, "create_sqs_client", lambda _settings: sdk)
+    monkeypatch.setattr(
+        module, "create_ct15_engine", lambda _settings: SimpleNamespace(dispose=lambda: None)
+    )
+    monkeypatch.setattr(module, "preflight", lambda *_args: {})
+    monkeypatch.setattr(module, "sessionmaker", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        module,
+        "create_private_authority_client",
+        lambda actual_settings: factory_settings.append(actual_settings) or authority_client,
+    )
+
+    def strict_relay_once(_sessions, queue, *, command_id, authority_client):
+        observed.append(authority_client)
+        assert command_id == command.command_id
+        staged = build_staged_result(command, result, message_id=uuid4(), occurred_at=NOW)
+        queue.send(_wire_body(staged.model_dump(mode="json")))
+        return SimpleNamespace(status="SENT")
+
+    monkeypatch.setattr(module, "relay_once", strict_relay_once)
+
+    assert main(["duplicate", "--run-id", "ct15-test", "--command", str(path)]) == 0
+    assert factory_settings == [settings]
+    assert observed == [authority_client]
+    assert len(sent) == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["control_applied"] is True
+    assert output["send_count"] == 2
+
+
+def test_cli_missing_w1_configuration_fails_before_transport_effects(monkeypatch, tmp_path, capsys):
+    from epick_engine.source_collection import ct15_transport_controls as module
+
+    command, _ = pair()
+    path = tmp_path / "command.json"
+    path.write_text(command.model_dump_json(), encoding="utf-8")
+    values = ct15_environment()
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("W1_LOOKUP_BEARER")
+    monkeypatch.setenv("W2_CT15_TRANSPORT_CONTROLS", "true")
+    effects = []
+    monkeypatch.setattr(
+        module, "create_sqs_client", lambda _settings: effects.append("transport-created")
+    )
+    monkeypatch.setattr(
+        module,
+        "create_private_authority_client",
+        lambda _settings: effects.append("authority-created"),
+    )
+
+    assert main(["duplicate", "--run-id", "ct15-test", "--command", str(path)]) == 1
+    assert effects == []
+    assert json.loads(capsys.readouterr().out) == {"status": "CT15_CONTROL_FAILED"}
+
+
 @pytest.mark.parametrize("status", ["EMPTY", "SENT", "APPLIED"])
 def test_cli_untriggered_control_is_not_success(monkeypatch, tmp_path, capsys, status):
     from epick_engine.source_collection import ct15_transport_controls as module
@@ -260,9 +429,18 @@ def test_cli_untriggered_control_is_not_success(monkeypatch, tmp_path, capsys, s
     )
     monkeypatch.setattr(module, "preflight", lambda *_args: {})
     monkeypatch.setattr(module, "sessionmaker", lambda *_args, **_kwargs: object())
+    expected_authority_client = object()
     monkeypatch.setattr(
-        module, "relay_once", lambda *_args, **_kwargs: SimpleNamespace(status=status)
+        module,
+        "create_private_authority_client",
+        lambda _settings: expected_authority_client,
     )
+
+    def strict_relay_once(*_args, authority_client: object, **_kwargs):
+        assert authority_client is expected_authority_client
+        return SimpleNamespace(status=status)
+
+    monkeypatch.setattr(module, "relay_once", strict_relay_once)
     assert main(["drop-ack", "--run-id", "ct15-test", "--command", str(path)]) == 2
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == status
