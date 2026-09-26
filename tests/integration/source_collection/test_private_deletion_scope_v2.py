@@ -20,12 +20,19 @@ from sqlalchemy import Engine, create_engine, event, inspect, select, text
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session, sessionmaker
 
+from epick_engine.source_collection.commit_gate_contracts import (
+    CommitGateCommand,
+    parse_commit_gate_command,
+    staged_result_digest,
+)
 from epick_engine.source_collection.commit_gate_store import (
+    CommitGateRejected,
     PrivateCommitGateAck,
     PrivateCommitGateInbox,
     PrivateCommitGateReceipt,
     PrivateCommitStage,
     PrivateStagedOutbox,
+    apply_commit_gate,
     stage_private_result,
 )
 from epick_engine.source_collection.contracts import CollectionCommand, CollectionResult
@@ -52,12 +59,14 @@ from epick_engine.source_collection.private_deletion_v2 import (
     PrivateDeletionScope,
 )
 from epick_engine.source_collection.private_scope import (
+    PrivateGateAuthority,
     PrivateScopeRejected,
     PrivateWriteAuthorityDecision,
     PrivateWriteScope,
     ScopeUnclassified,
 )
 from epick_engine.source_collection.source_runtime_store import reserve_collection_attempt
+from epick_engine.source_collection.w1_private_authority_contracts import GateAuthorityResponse
 from epick_engine.source_collection.w1_transport import W1Dispatch, parse_w1_dispatch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -490,16 +499,17 @@ def _add_private_inventory(
 def _proof(
     *,
     owner_user_id: UUID,
-    project_id: UUID,
+    project_id: UUID | None,
     command_id: UUID,
     job_id: UUID,
     epoch: int = 0,
+    kind: Literal["ACCOUNT", "PROJECT"] = "PROJECT",
 ) -> PrivateWriteScope:
     return PrivateWriteScope(
         PrivateWriteAuthorityDecision(
             owner_user_id=owner_user_id,
             owner_deletion_epoch=epoch,
-            scope=PrivateDeletionScope(kind="PROJECT", project_id=project_id),
+            scope=PrivateDeletionScope(kind=kind, project_id=project_id),
             authority_ref="w1:test-deletion-v2",
             command_id=command_id,
             job_id=job_id,
@@ -544,7 +554,7 @@ def _runtime_dispatch(
 def _stage_pair(
     *,
     owner_user_id: UUID,
-    project_id: UUID,
+    project_id: UUID | None,
     public: _PublicIds,
 ) -> tuple[CollectionCommand, CollectionResult]:
     raw = json.loads(
@@ -555,7 +565,7 @@ def _stage_pair(
         command_id=str(command_id),
         job_id=str(job_id),
         authenticated_owner_ref=str(owner_user_id),
-        project_ref=str(project_id),
+        project_ref=str(project_id) if project_id is not None else None,
         company_id=str(public.company_id),
         source_id=str(public.source_id),
         owner_deletion_epoch=0,
@@ -573,6 +583,66 @@ def _stage_pair(
         required_action["context"]["source_id"] = str(public.source_id)
     return CollectionCommand.model_validate(raw["command"]), CollectionResult.model_validate(
         raw["result"]
+    )
+
+
+def _gate(
+    command: CollectionCommand,
+    result: CollectionResult,
+    action: Literal["PREPARE", "FINALIZE", "ABORT"],
+    *,
+    operation_id: UUID,
+    revision: int,
+) -> CommitGateCommand:
+    raw = json.loads(
+        (FIXTURES / f"w1_private_contract/private-w2-commit-gate-{action.lower()}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    raw.update(
+        message_id=str(uuid4()),
+        operation_id=str(operation_id),
+        operation_revision=revision,
+        command_id=str(command.command_id),
+        job_id=str(command.job_id),
+        authenticated_owner_ref=str(command.authenticated_owner_ref),
+        execution_fence=int(command.execution_fence),
+        owner_deletion_epoch=command.owner_deletion_epoch,
+        result_digest=staged_result_digest(command, result),
+    )
+    return parse_commit_gate_command(raw)
+
+
+def _gate_authority(
+    gate: CommitGateCommand,
+    *,
+    kind: Literal["ACCOUNT", "PROJECT"],
+    project_id: UUID | None,
+) -> PrivateGateAuthority:
+    scope = (
+        {"type": "ACCOUNT"}
+        if kind == "ACCOUNT"
+        else {"type": "PROJECT", "project_id": str(project_id)}
+    )
+    return PrivateGateAuthority.from_w1_response(
+        GateAuthorityResponse.model_validate(
+            {
+                "schema_version": "w1.private.w2-gate-authority.v1",
+                "owner_user_id": str(gate.authenticated_owner_ref),
+                "owner_deletion_epoch": gate.owner_deletion_epoch,
+                "command_id": str(gate.command_id),
+                "job_id": str(gate.job_id),
+                "execution_fence": gate.execution_fence,
+                "scope": scope,
+                "operation_id": str(gate.operation_id),
+                "operation_revision": gate.operation_revision,
+                "action": gate.action,
+                "phase": "APPLY",
+                "result_digest": gate.result_digest,
+                "purge_owner_deletion_epoch": gate.purge_owner_deletion_epoch,
+                "authority_ref": "w1:test-deletion-ack-control",
+            }
+        )
     )
 
 
@@ -719,6 +789,68 @@ def test_0010_private_deletion_fk_topology_matches_safe_delete_order(
 
 
 @pytest.mark.approved_postgres
+def test_0011_forward_head_preserves_fk_and_check_constraints(
+    approved_postgres_url: URL,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _migration_schema(approved_postgres_url, monkeypatch) as (engine, config, schema):
+        alembic_command.upgrade(config, "0010_private_deletion_scope_v2")
+        before = inspect(engine)
+        child_tables = (
+            "private_staged_outbox",
+            "private_commit_gate_acks",
+            "private_commit_gate_receipts",
+            "private_commit_gate_inbox",
+        )
+        foreign_keys_before = {
+            table_name: {
+                (
+                    tuple(fk["constrained_columns"]),
+                    fk["referred_table"],
+                    tuple(fk["referred_columns"]),
+                    fk["options"].get("ondelete"),
+                )
+                for fk in before.get_foreign_keys(table_name, schema=schema)
+            }
+            for table_name in child_tables
+        }
+
+        alembic_command.upgrade(config, "0011_private_ack_control_retention")
+        after = inspect(engine)
+
+        version_columns = {
+            column["name"]: column for column in after.get_columns("alembic_version", schema=schema)
+        }
+        assert version_columns["version_num"]["type"].length == 64
+        columns = {
+            column["name"]: column
+            for column in after.get_columns("private_commit_stages", schema=schema)
+        }
+        assert columns["payload_purged"]["nullable"] is False
+        assert str(columns["payload_purged"]["default"]).lower() == "false"
+        constraints = {
+            constraint["name"]: " ".join(constraint["sqltext"].split()).lower()
+            for constraint in after.get_check_constraints("private_commit_stages", schema=schema)
+        }
+        assert "ck_private_commit_stages_payload_matches_state" in constraints
+        payload_constraint = constraints["ck_private_commit_stages_payload_matches_state"]
+        assert "payload_purged" in payload_constraint
+        assert "result_payload is null" in payload_constraint
+        assert {
+            table_name: {
+                (
+                    tuple(fk["constrained_columns"]),
+                    fk["referred_table"],
+                    tuple(fk["referred_columns"]),
+                    fk["options"].get("ondelete"),
+                )
+                for fk in after.get_foreign_keys(table_name, schema=schema)
+            }
+            for table_name in child_tables
+        } == foreign_keys_before
+
+
+@pytest.mark.approved_postgres
 @pytest.mark.parametrize("unknown_parent", ["attempt", "deduplication", "runtime", "stage"])
 def test_v2_project_deletion_rolls_back_on_any_unclassified_owner_row(
     session_factory: sessionmaker[Session],
@@ -764,7 +896,7 @@ def test_v2_project_deletion_rolls_back_on_any_unclassified_owner_row(
 
 
 @pytest.mark.approved_postgres
-def test_v2_project_deletion_isolates_projects_owners_and_removes_stage_descendants(
+def test_v2_project_deletion_isolates_projects_owners_and_removes_ackless_stages(
     session_factory: sessionmaker[Session],
 ) -> None:
     with session_factory.begin() as session:
@@ -786,7 +918,6 @@ def test_v2_project_deletion_isolates_projects_owners_and_removes_stage_descenda
             project_id=PROJECT_A,
             public=public,
             label="owner-a-project-a",
-            stage_children=True,
         )
         same_owner_other_project = _add_private_inventory(
             session,
@@ -950,7 +1081,6 @@ def test_v2_account_deletion_preserves_other_owner_and_public_history(
             project_id=None,
             public=public,
             label="owner-a-account",
-            stage_children=True,
         )
         owner_a_project = _add_private_inventory(
             session,
@@ -959,7 +1089,6 @@ def test_v2_account_deletion_preserves_other_owner_and_public_history(
             project_id=PROJECT_A,
             public=public,
             label="owner-a-project",
-            stage_children=True,
         )
         owner_a_unknown = _add_private_inventory(
             session,
@@ -968,7 +1097,6 @@ def test_v2_account_deletion_preserves_other_owner_and_public_history(
             project_id=PROJECT_B,
             public=public,
             label="owner-a-unknown",
-            stage_children=True,
         )
         owner_b = _add_private_inventory(
             session,
@@ -1001,6 +1129,218 @@ def test_v2_account_deletion_preserves_other_owner_and_public_history(
         assert session.get(SourceObservation, public.observation_id) is not None
         assert session.get(ParserExecution, public.parser_execution_id) is not None
         assert session.get(OutboxEvent, public.outbox_event_id) is not None
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    ("kind", "project_id"),
+    [("ACCOUNT", None), ("PROJECT", PROJECT_A)],
+)
+def test_deletion_scrubs_payload_but_keeps_original_ack_control(
+    session_factory: sessionmaker[Session],
+    kind: Literal["ACCOUNT", "PROJECT"],
+    project_id: UUID | None,
+) -> None:
+    with session_factory.begin() as session:
+        public = _seed_public(session)
+        target_pairs = [
+            _stage_pair(
+                owner_user_id=OWNER_A,
+                project_id=project_id,
+                public=public,
+            )
+            for _ in range(2)
+        ]
+        gates: list[CommitGateCommand] = []
+        ack_ids: list[UUID] = []
+        staged_ids: list[UUID] = []
+        ack_payloads: list[dict[str, object]] = []
+        for (command, result), action in zip(target_pairs, ("PREPARE", "ABORT"), strict=True):
+            staged_id = uuid4()
+            stage_private_result(
+                session,
+                command,
+                result,
+                message_id=staged_id,
+                occurred_at=NOW,
+                private_scope=_proof(
+                    owner_user_id=OWNER_A,
+                    project_id=project_id,
+                    command_id=command.command_id,
+                    job_id=command.job_id,
+                    kind=kind,
+                ),
+            )
+            gate = _gate(
+                command,
+                result,
+                action,
+                operation_id=uuid4(),
+                revision=1,
+            )
+            ack_id = uuid4()
+            ack = apply_commit_gate(
+                session,
+                gate,
+                ack_message_id=ack_id,
+                occurred_at=NOW,
+                private_gate_authority=_gate_authority(
+                    gate,
+                    kind=kind,
+                    project_id=project_id,
+                ),
+            )
+            gates.append(gate)
+            ack_ids.append(ack_id)
+            staged_ids.append(staged_id)
+            ack_payloads.append(ack.model_dump(mode="json"))
+        session.get(PrivateCommitGateAck, ack_ids[0]).delivered_at = NOW
+        session.get(PrivateCommitGateAck, ack_ids[1]).delivered_at = None
+        selected_without_ack = _add_private_inventory(
+            session,
+            owner_user_id=OWNER_A,
+            kind=kind,
+            project_id=project_id,
+            public=public,
+            label=f"{kind.lower()}-without-ack",
+        )
+        same_owner_other_project = None
+        if kind == "PROJECT":
+            same_owner_other_project = _add_private_inventory(
+                session,
+                owner_user_id=OWNER_A,
+                kind="PROJECT",
+                project_id=PROJECT_B,
+                public=public,
+                label="same-owner-other-project-ack-control",
+                stage_children=True,
+            )
+        foreign_owner = _add_private_inventory(
+            session,
+            owner_user_id=OWNER_B,
+            kind="PROJECT",
+            project_id=PROJECT_FOREIGN,
+            public=public,
+            label="foreign-owner-ack-control",
+            stage_children=True,
+        )
+
+    with session_factory.begin() as session:
+        assert (
+            _apply_v2(
+                session,
+                _command(kind=kind, project_id=project_id),
+            )
+            == "APPLIED"
+        )
+
+    with session_factory.begin() as session:
+        assert not any(_ids_exist(session, selected_without_ack).values())
+        if same_owner_other_project is not None:
+            assert all(_ids_exist(session, same_owner_other_project).values())
+        assert all(_ids_exist(session, foreign_owner).values())
+        for index, ((command, _), gate, ack_id, staged_id) in enumerate(
+            zip(target_pairs, gates, ack_ids, staged_ids, strict=True)
+        ):
+            stage = session.get(PrivateCommitStage, command.command_id)
+            assert stage is not None
+            assert stage.payload_purged is True
+            assert stage.result_payload is None
+            assert session.get(PrivateStagedOutbox, staged_id) is None
+            stored_ack = session.get(PrivateCommitGateAck, ack_id)
+            assert stored_ack is not None
+            assert stored_ack.payload == ack_payloads[index]
+            assert stored_ack.delivered_at == (NOW if index == 0 else None)
+            receipt = session.get(
+                PrivateCommitGateReceipt,
+                (gate.operation_id, str(gate.operation_revision)),
+            )
+            inbox = session.get(PrivateCommitGateInbox, gate.message_id)
+            assert receipt is not None and receipt.ack_message_id == ack_id
+            assert inbox is not None and inbox.ack_message_id == ack_id
+
+        replay_gate = gates[1]
+        replay = apply_commit_gate(
+            session,
+            replay_gate,
+            ack_message_id=uuid4(),
+            occurred_at=NOW,
+            private_gate_authority=_gate_authority(
+                replay_gate,
+                kind=kind,
+                project_id=project_id,
+            ),
+        )
+        assert replay.message_id == ack_ids[1]
+        assert replay.model_dump(mode="json") == ack_payloads[1]
+
+        changed_body = replay_gate.model_copy(
+            update={"issued_at": datetime(2032, 1, 2, 3, 5, tzinfo=UTC)}
+        )
+        with pytest.raises(CommitGateRejected, match="message conflict"):
+            apply_commit_gate(
+                session,
+                changed_body,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+                private_gate_authority=_gate_authority(
+                    changed_body,
+                    kind=kind,
+                    project_id=project_id,
+                ),
+            )
+
+        # Isolate the payload marker from the owner tombstone/fence: even if a
+        # current scope were restored, deletion cannot resurrect the scrubbed stage.
+        owner_state = session.get(PrivateDeletionOwnerState, OWNER_A)
+        assert owner_state is not None
+        owner_state.latest_epoch = 0
+        owner_state.account_deleted = False
+        if project_id is not None:
+            tombstone = session.get(
+                PrivateDeletionProjectTombstone,
+                (OWNER_A, project_id),
+            )
+            assert tombstone is not None
+            session.delete(tombstone)
+        session.flush()
+
+        purged_command, purged_result = target_pairs[0]
+        with pytest.raises(CommitGateRejected, match="payload was purged"):
+            stage_private_result(
+                session,
+                purged_command,
+                purged_result,
+                message_id=staged_ids[0],
+                occurred_at=NOW,
+                private_scope=_proof(
+                    owner_user_id=OWNER_A,
+                    project_id=project_id,
+                    command_id=purged_command.command_id,
+                    job_id=purged_command.job_id,
+                    kind=kind,
+                ),
+            )
+
+        finalize = _gate(
+            purged_command,
+            purged_result,
+            "FINALIZE",
+            operation_id=gates[0].operation_id,
+            revision=2,
+        )
+        with pytest.raises(CommitGateRejected, match="payload was purged"):
+            apply_commit_gate(
+                session,
+                finalize,
+                ack_message_id=uuid4(),
+                occurred_at=NOW,
+                private_gate_authority=_gate_authority(
+                    finalize,
+                    kind=kind,
+                    project_id=project_id,
+                ),
+            )
 
 
 @pytest.mark.approved_postgres

@@ -15,6 +15,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -65,7 +66,9 @@ class PrivateCommitStage(Base):
         ),
         CheckConstraint(
             "(state IN ('ABORTED', 'PURGED') AND result_payload IS NULL) OR "
-            "(state IN ('STAGED', 'PREPARED', 'FINALIZED') AND result_payload IS NOT NULL)",
+            "(state IN ('STAGED', 'PREPARED', 'FINALIZED') AND ("
+            "(payload_purged AND result_payload IS NULL) OR "
+            "(NOT payload_purged AND result_payload IS NOT NULL)))",
             name="payload_matches_state",
         ),
         CheckConstraint(
@@ -108,6 +111,12 @@ class PrivateCommitStage(Base):
         String(16),
         default="PRIVATE_ONLY",
         server_default=text("'PRIVATE_ONLY'"),
+        nullable=False,
+    )
+    payload_purged: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
         nullable=False,
     )
     result_payload: Mapped[dict[str, Any] | None] = mapped_column(
@@ -360,6 +369,8 @@ def stage_private_result(
                 stage_kind=stage_kind,
                 private_scope=private_scope,
             )
+            if row.payload_purged:
+                raise CommitGateRejected("private staged-result payload was purged")
             if row.state in {"ABORTED", "PURGED"}:
                 raise CommitGateRejected("private staged-result command is terminal")
             existing = session.scalar(
@@ -501,10 +512,14 @@ def apply_commit_gate(
         if gate.action in {"ABORT", "PURGE"}:
             staged = _prepare_staged_outbox_for_terminal(session, gate.command_id)
         if gate.action == "PREPARE":
+            if row.payload_purged:
+                raise CommitGateRejected("private commit-gate payload was purged")
             if row.state != "STAGED":
                 raise CommitGateRejected("private commit-gate PREPARE requires STAGED")
             row.state = "PREPARED"
         elif gate.action == "FINALIZE":
+            if row.payload_purged:
+                raise CommitGateRejected("private commit-gate payload was purged")
             if row.state != "PREPARED":
                 raise CommitGateRejected("private commit-gate FINALIZE requires PREPARED")
             row.state = "FINALIZED"
@@ -573,6 +588,8 @@ def read_finalized_result(
         .execution_options(populate_existing=True)
     )
     if row is None:
+        return None
+    if row.payload_purged:
         return None
     try:
         return _parse_wire(

@@ -29,10 +29,12 @@ from sqlalchemy import (
     and_,
     create_engine,
     delete,
+    exists,
     func,
     or_,
     select,
     text,
+    update,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
@@ -1480,19 +1482,48 @@ def apply_private_deletion_v2(
         stage_scope = PrivateCommitStage.owner_ref == command.owner_user_id
 
     stage_ids = select(PrivateCommitStage.command_id).where(stage_scope)
-    session.execute(
-        delete(PrivateCommitGateReceipt).where(PrivateCommitGateReceipt.command_id.in_(stage_ids))
+    retained_stage_ids = select(PrivateCommitStage.command_id).where(
+        stage_scope,
+        exists(
+            select(PrivateCommitGateAck.message_id).where(
+                PrivateCommitGateAck.command_id == PrivateCommitStage.command_id
+            )
+        ),
     )
-    session.execute(
-        delete(PrivateCommitGateInbox).where(PrivateCommitGateInbox.command_id.in_(stage_ids))
+    disposable_stage_ids = select(PrivateCommitStage.command_id).where(
+        stage_scope,
+        ~exists(
+            select(PrivateCommitGateAck.message_id).where(
+                PrivateCommitGateAck.command_id == PrivateCommitStage.command_id
+            )
+        ),
     )
     session.execute(
         delete(PrivateStagedOutbox).where(PrivateStagedOutbox.command_id.in_(stage_ids))
     )
     session.execute(
-        delete(PrivateCommitGateAck).where(PrivateCommitGateAck.command_id.in_(stage_ids))
+        delete(PrivateCommitGateReceipt).where(
+            PrivateCommitGateReceipt.command_id.in_(disposable_stage_ids)
+        )
     )
-    session.execute(delete(PrivateCommitStage).where(stage_scope))
+    session.execute(
+        delete(PrivateCommitGateInbox).where(
+            PrivateCommitGateInbox.command_id.in_(disposable_stage_ids)
+        )
+    )
+    session.execute(
+        delete(PrivateCommitGateAck).where(
+            PrivateCommitGateAck.command_id.in_(disposable_stage_ids)
+        )
+    )
+    session.execute(
+        delete(PrivateCommitStage).where(PrivateCommitStage.command_id.in_(disposable_stage_ids))
+    )
+    session.execute(
+        update(PrivateCommitStage)
+        .where(PrivateCommitStage.command_id.in_(retained_stage_ids))
+        .values(result_payload=None, payload_purged=True)
+    )
 
     session.execute(delete(CollectionAttempt).where(attempt_scope))
     session.execute(delete(RequestDeduplication).where(deduplication_scope))

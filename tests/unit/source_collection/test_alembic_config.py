@@ -25,8 +25,11 @@ def test_source_collection_migration_is_the_only_head() -> None:
     head = scripts.get_current_head()
 
     assert head is not None
-    assert len(head) <= 32
-    assert scripts.get_heads() == ["0010_private_deletion_scope_v2"]
+    assert len(head) <= 64
+    assert scripts.get_heads() == ["0011_private_ack_control_retention"]
+    assert scripts.get_revision("0011_private_ack_control_retention").down_revision == (
+        "0010_private_deletion_scope_v2"
+    )
     assert scripts.get_revision("0010_private_deletion_scope_v2").down_revision == (
         "0009_private_deletion_receipt"
     )
@@ -133,3 +136,10 @@ def test_private_deletion_scope_v2_migration_downgrade_is_unsupported() -> None:
 
     with pytest.raises(RuntimeError, match="Destructive downgrade"):
         scripts.get_revision("0010_private_deletion_scope_v2").module.downgrade()
+
+
+def test_private_ack_control_retention_migration_downgrade_is_unsupported() -> None:
+    scripts = ScriptDirectory.from_config(_alembic_config())
+
+    with pytest.raises(RuntimeError, match="Destructive downgrade"):
+        scripts.get_revision("0011_private_ack_control_retention").module.downgrade()
