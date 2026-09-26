@@ -57,6 +57,7 @@ from epick_engine.source_collection.source_runtime_store import (
     CollectionRuntimeConflict,
     _validated_dispatch,
     claim_collection_attempt,
+    dispatch_digest,
     load_bound_collection_attempt,
     release_collection_claim,
     renew_collection_claim,
@@ -376,7 +377,8 @@ class _ClaimHeartbeat:
         lease_seconds: int,
         interval_seconds: float,
         renew_claim: Callable[..., CollectionRuntimeAttempt],
-        private_scope: PrivateWriteScope,
+        authority_provider: Callable[[], PrivateWriteScope],
+        expected_dispatch_digest: str,
     ) -> None:
         self._session_factory = session_factory
         self._command_id = command_id
@@ -384,7 +386,8 @@ class _ClaimHeartbeat:
         self._lease_seconds = lease_seconds
         self._interval_seconds = interval_seconds
         self._renew_claim = renew_claim
-        self._private_scope = private_scope
+        self._authority_provider = authority_provider
+        self._expected_dispatch_digest = expected_dispatch_digest
         self._stop = Event()
         self._lost = Event()
         self._thread = Thread(
@@ -412,12 +415,14 @@ class _ClaimHeartbeat:
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):
             try:
+                private_scope = self._authority_provider()
                 self._renew_claim(
                     self._session_factory,
                     self._command_id,
                     claim_token=self._claim_token,
                     lease_seconds=self._lease_seconds,
-                    private_scope=self._private_scope,
+                    expected_dispatch_digest=self._expected_dispatch_digest,
+                    private_scope=private_scope,
                 )
             except Exception:
                 self._lost.set()
@@ -568,7 +573,7 @@ def _lookup_initial_scope(
     return scope
 
 
-def _authorize_reservation(
+def _authorize_write(
     binding: W1PrivateBinding,
     scope: PrivateDeletionScope,
     authority_client: PrivateAuthorityClient,
@@ -602,14 +607,20 @@ def _release_after_clean_failure(
     session_factory: SessionFactory,
     command_id: UUID,
     claim_token: UUID,
-    private_scope: PrivateWriteScope,
+    *,
+    binding: W1PrivateBinding,
+    scope: PrivateDeletionScope,
+    authority_client: PrivateAuthorityClient,
+    expected_dispatch_digest: str,
     store_operations: RuntimeStoreOperations,
 ) -> None:
     try:
+        private_scope = _authorize_write(binding, scope, authority_client)
         store_operations.release_claim(
             session_factory,
             command_id,
             claim_token=claim_token,
+            expected_dispatch_digest=expected_dispatch_digest,
             private_scope=private_scope,
         )
     except Exception:
@@ -630,7 +641,6 @@ def handle_collection_dispatch(
     clock: Clock,
     uuid_factory: UUIDFactory,
     store_operations: RuntimeStoreOperations | None = None,
-    private_scope: PrivateWriteScope | None = None,
     private_authority_client: PrivateAuthorityClient | None = None,
 ) -> StagedResultProposal:
     """Execute an initial POLICY dispatch through durable PERSIST, never DELIVER."""
@@ -655,9 +665,10 @@ def handle_collection_dispatch(
         else state.private_scope
     )
     _assert_dispatch_project_ref(validated, scope)
-    private_scope = _authorize_reservation(binding, scope, private_authority_client)
+    expected_dispatch_digest = dispatch_digest(validated)
 
     if state is not None and state.state in {"PERSISTED", "FINALIZED"}:
+        private_scope = _authorize_write(binding, scope, private_authority_client)
         return operations.replay_candidate(
             session_factory,
             validated,
@@ -673,6 +684,7 @@ def handle_collection_dispatch(
     if state is not None and state.effective_policy_revision != input_value.policy_revision:
         raise RuntimeAuthorizationError("collection runtime policy revision is stale")
 
+    private_scope = _authorize_write(binding, scope, private_authority_client)
     with session_factory() as session, session.begin():
         attempt = operations.reserve_attempt(
             session,
@@ -689,11 +701,13 @@ def handle_collection_dispatch(
         raise RuntimeAuthorizationError("collection runtime policy revision is stale")
 
     claim_token = uuid_factory()
+    private_scope = _authorize_write(binding, scope, private_authority_client)
     claimed = operations.claim_attempt(
         session_factory,
         validated.payload.command_id,
         claim_token=claim_token,
         lease_seconds=runtime_config.claim_lease_seconds,
+        expected_dispatch_digest=expected_dispatch_digest,
         private_scope=private_scope,
     )
     if claimed.attempt_id != attempt_id:
@@ -701,8 +715,11 @@ def handle_collection_dispatch(
             session_factory,
             validated.payload.command_id,
             claim_token,
-            private_scope,
-            operations,
+            binding=binding,
+            scope=scope,
+            authority_client=private_authority_client,
+            expected_dispatch_digest=expected_dispatch_digest,
+            store_operations=operations,
         )
         raise CollectionRuntimeConflict("collection runtime attempt identity conflict")
 
@@ -720,7 +737,12 @@ def handle_collection_dispatch(
             lease_seconds=runtime_config.claim_lease_seconds,
             interval_seconds=runtime_config.heartbeat_interval_seconds,
             renew_claim=operations.renew_claim,
-            private_scope=private_scope,
+            authority_provider=lambda: _authorize_write(
+                binding,
+                scope,
+                private_authority_client,
+            ),
+            expected_dispatch_digest=expected_dispatch_digest,
         )
         heartbeat.start()
         heartbeat_started = True
@@ -751,11 +773,13 @@ def handle_collection_dispatch(
             policy_revision=effective_policy_revision,
         )
         heartbeat.ensure_active()
+        private_scope = _authorize_write(binding, scope, private_authority_client)
         operations.renew_claim(
             session_factory,
             validated.payload.command_id,
             claim_token=claim_token,
             lease_seconds=runtime_config.claim_lease_seconds,
+            expected_dispatch_digest=expected_dispatch_digest,
             private_scope=private_scope,
         )
         heartbeat.stop_and_join()
@@ -764,6 +788,7 @@ def handle_collection_dispatch(
         close_attempted = True
         execution.close()
         cleanup_confirmed = True
+        private_scope = _authorize_write(binding, scope, private_authority_client)
         return operations.commit_candidate(
             session_factory,
             validated,
@@ -798,8 +823,11 @@ def handle_collection_dispatch(
                 session_factory,
                 validated.payload.command_id,
                 claim_token,
-                private_scope,
-                operations,
+                binding=binding,
+                scope=scope,
+                authority_client=private_authority_client,
+                expected_dispatch_digest=expected_dispatch_digest,
+                store_operations=operations,
             )
         raise
 
@@ -813,6 +841,7 @@ def consume_source_runtime_once(
     collection_handler: Callable[..., object],
     gate_applier: GateApplier = apply_collection_commit_gate,
     authority_provider: PrivateWriteAuthorityProvider | None = None,
+    private_authority_client: PrivateAuthorityClient | None = None,
     clock: Clock,
     message_id_factory: Callable[[], UUID] = uuid4,
     visibility_heartbeat_seconds: float | None = None,
@@ -849,9 +878,8 @@ def consume_source_runtime_once(
     try:
         if is_collection:
             dispatch = parse_w1_dispatch(payload)
-            if authority_provider is None:
-                raise RuntimeAuthorizationError("trusted private authority provider is required")
-            private_scope = PrivateWriteScope(authority_provider(dispatch))
+            if private_authority_client is None:
+                raise RuntimeAuthorizationError("protected W1 private authority client is required")
             extend_visibility = getattr(queue, "extend_visibility", None)
             if visibility_heartbeat_seconds is None or extend_visibility is None:
                 raise RuntimeError("source runtime visibility heartbeat is required")
@@ -862,7 +890,10 @@ def consume_source_runtime_once(
             )
             heartbeat.start()
             try:
-                collection_handler(dispatch, private_scope=private_scope)
+                collection_handler(
+                    dispatch,
+                    private_authority_client=private_authority_client,
+                )
             finally:
                 heartbeat.stop_and_join()
             if heartbeat.lost:

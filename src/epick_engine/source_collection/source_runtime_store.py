@@ -233,10 +233,20 @@ def _validate_lease_seconds(lease_seconds: int) -> None:
         raise CollectionRuntimeConflict("collection runtime lease must be positive")
 
 
+def _validate_dispatch_digest_value(expected_dispatch_digest: str) -> None:
+    if (
+        not isinstance(expected_dispatch_digest, str)
+        or len(expected_dispatch_digest) != 64
+        or any(character not in "0123456789abcdef" for character in expected_dispatch_digest)
+    ):
+        raise CollectionRuntimeConflict("expected collection runtime dispatch digest is invalid")
+
+
 def _lock_reserved_attempt(
     session: Session,
     command_id: UUID,
     private_scope: PrivateWriteScope | None,
+    expected_dispatch_digest: str,
 ) -> CollectionRuntimeAttempt:
     if private_scope is None or private_scope.job_id is None:
         raise PrivateScopeRejected("a command- and job-bound private write scope is required")
@@ -257,6 +267,8 @@ def _lock_reserved_attempt(
     )
     if attempt is None or attempt.state != "RESERVED":
         raise CollectionRuntimeConflict("collection runtime attempt is not reserved")
+    if attempt.dispatch_digest != expected_dispatch_digest:
+        raise CollectionRuntimeConflict("collection runtime dispatch binding conflict")
     if (
         attempt.owner_ref != private_scope.owner_user_id
         or attempt.job_id != private_scope.job_id
@@ -289,14 +301,21 @@ def claim_collection_attempt(
     *,
     claim_token: UUID,
     lease_seconds: int,
+    expected_dispatch_digest: str,
     private_scope: PrivateWriteScope | None = None,
 ) -> CollectionRuntimeAttempt:
     """Claim a RESERVED attempt in one self-contained DB-clock transaction."""
 
     _validate_claim_identity(command_id, claim_token)
     _validate_lease_seconds(lease_seconds)
+    _validate_dispatch_digest_value(expected_dispatch_digest)
     with session_factory() as session, session.begin():
-        attempt = _lock_reserved_attempt(session, command_id, private_scope)
+        attempt = _lock_reserved_attempt(
+            session,
+            command_id,
+            private_scope,
+            expected_dispatch_digest,
+        )
         database_now = _database_now(session)
         if (
             attempt.claim_token is not None
@@ -317,14 +336,21 @@ def renew_collection_claim(
     *,
     claim_token: UUID,
     lease_seconds: int,
+    expected_dispatch_digest: str,
     private_scope: PrivateWriteScope | None = None,
 ) -> CollectionRuntimeAttempt:
     """Renew only the caller's active RESERVED claim using the database clock."""
 
     _validate_claim_identity(command_id, claim_token)
     _validate_lease_seconds(lease_seconds)
+    _validate_dispatch_digest_value(expected_dispatch_digest)
     with session_factory() as session, session.begin():
-        attempt = _lock_reserved_attempt(session, command_id, private_scope)
+        attempt = _lock_reserved_attempt(
+            session,
+            command_id,
+            private_scope,
+            expected_dispatch_digest,
+        )
         database_now = _database_now(session)
         if (
             attempt.claim_token != claim_token
@@ -342,13 +368,20 @@ def release_collection_claim(
     command_id: UUID,
     *,
     claim_token: UUID,
+    expected_dispatch_digest: str,
     private_scope: PrivateWriteScope | None = None,
 ) -> CollectionRuntimeAttempt:
     """Release only the caller's active RESERVED claim in one root transaction."""
 
     _validate_claim_identity(command_id, claim_token)
+    _validate_dispatch_digest_value(expected_dispatch_digest)
     with session_factory() as session, session.begin():
-        attempt = _lock_reserved_attempt(session, command_id, private_scope)
+        attempt = _lock_reserved_attempt(
+            session,
+            command_id,
+            private_scope,
+            expected_dispatch_digest,
+        )
         database_now = _database_now(session)
         if (
             attempt.claim_token != claim_token

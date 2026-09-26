@@ -250,10 +250,12 @@ def _consume(
     def bound_collection_handler(
         dispatch: object,
         *,
-        private_scope: PrivateWriteScope,
+        private_authority_client: object,
     ) -> object:
-        assert private_scope.authority_ref == "test:w1-authenticated"
+        assert private_authority_client is collection_authority_client
         return collection_handler(dispatch)
+
+    collection_authority_client = object()
 
     return consume_source_runtime_once(
         session_factory,
@@ -263,6 +265,7 @@ def _consume(
         collection_handler=bound_collection_handler,
         gate_applier=gate_applier,
         authority_provider=trusted_authority,
+        private_authority_client=collection_authority_client,
         clock=lambda: NOW,
         visibility_heartbeat_seconds=visibility_heartbeat_seconds,
     )

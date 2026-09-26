@@ -730,6 +730,7 @@ def test_failure_finalize_advances_latest_observation_without_replacing_current_
         dispatch.payload.command_id,
         claim_token=claim_token,
         lease_seconds=30,
+        expected_dispatch_digest=reserved.dispatch_digest,
         private_scope=private_scope,
     )
     failure_prepared = _failure_prepared(

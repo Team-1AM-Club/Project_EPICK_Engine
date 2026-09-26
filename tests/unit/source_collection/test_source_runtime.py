@@ -17,10 +17,7 @@ import pytest
 import epick_engine.source_collection.source_runtime as source_runtime
 from epick_engine.source_collection.contracts import CollectionStage
 from epick_engine.source_collection.private_deletion_v2 import PrivateDeletionScope
-from epick_engine.source_collection.private_scope import (
-    PrivateWriteAuthorityDecision,
-    PrivateWriteScope,
-)
+from epick_engine.source_collection.private_scope import PrivateWriteScope
 from epick_engine.source_collection.source_runtime import (
     LookupGatedExecutionContext,
     RuntimeAuthorizationError,
@@ -29,7 +26,10 @@ from epick_engine.source_collection.source_runtime import (
     handle_collection_dispatch as _handle_collection_dispatch,
 )
 from epick_engine.source_collection.source_runtime_input import RuntimeSourceConfigFile
-from epick_engine.source_collection.source_runtime_store import CollectionRuntimeConflict
+from epick_engine.source_collection.source_runtime_store import (
+    CollectionRuntimeConflict,
+    dispatch_digest,
+)
 from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
 from epick_engine.source_collection.w1_private_authority_contracts import (
     CurrentWriteScopeLookupResponse,
@@ -54,19 +54,6 @@ def _dispatch(*, resume_stage: str = "policy", policy_revision: int | None = Non
     raw["payload"]["resume_stage"] = resume_stage
     raw["payload"]["policy_revision"] = policy_revision
     return parse_w1_dispatch(raw)
-
-
-def _trusted_scope(dispatch: W1Dispatch) -> PrivateWriteScope:
-    return PrivateWriteScope(
-        PrivateWriteAuthorityDecision(
-            owner_user_id=dispatch.payload.authenticated_owner_ref,
-            owner_deletion_epoch=dispatch.payload.owner_deletion_epoch,
-            scope=PrivateDeletionScope(kind="ACCOUNT", project_id=None),
-            authority_ref="test:w1-authenticated",
-            command_id=dispatch.payload.command_id,
-            job_id=dispatch.payload.job_id,
-        )
-    )
 
 
 def _binding_payload(binding: W1PrivateBinding) -> dict[str, object]:
@@ -123,7 +110,6 @@ def handle_collection_dispatch(dispatch: W1Dispatch, **kwargs: Any) -> object:
 
     return _handle_collection_dispatch(
         dispatch,
-        private_scope=_trusted_scope(dispatch),
         private_authority_client=_TrustedPrivateAuthorityClient(dispatch),
         **kwargs,
     )
@@ -408,6 +394,239 @@ class _SequencedLookupClient:
         if self._unavailable_call == len(self.dispatches):
             return _not_found(dispatch)
         return _available(dispatch)
+
+
+def test_each_collection_transaction_has_a_distinct_w1_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reusing one authority_ref would let revocation miss later DB transactions."""
+
+    dispatch = _dispatch()
+    expected_digest = dispatch_digest(dispatch)
+    real_heartbeat_type = source_runtime._ClaimHeartbeat
+
+    class _DistinctAuthorityClient(_TrustedPrivateAuthorityClient):
+        def __init__(self, received: W1Dispatch) -> None:
+            super().__init__(received)
+            self.authority_refs: list[str] = []
+
+        def authorize_write(
+            self,
+            binding: W1PrivateBinding,
+            scope: PrivateDeletionScope,
+        ) -> PrivateWriteAuthorityResponse:
+            self.events.append("write")
+            authority_ref = f"test:w1-decision:{len(self.authority_refs) + 1}"
+            self.authority_refs.append(authority_ref)
+            return PrivateWriteAuthorityResponse.model_validate(
+                {
+                    "schema_version": "w1.private.w2-write-authority.v1",
+                    **_binding_payload(binding),
+                    "scope": scope.to_mapping(),
+                    "authority_ref": authority_ref,
+                },
+                strict=True,
+            )
+
+    class _OneRenewalHeartbeat:
+        lost = False
+
+        def __init__(
+            self,
+            session_factory: object,
+            command_id: UUID,
+            claim_token: UUID,
+            **kwargs: Any,
+        ) -> None:
+            self._session_factory = session_factory
+            self._command_id = command_id
+            self._claim_token = claim_token
+            self._lease_seconds = kwargs["lease_seconds"]
+            self._renew_claim = kwargs["renew_claim"]
+            self._authority_provider = kwargs.get("authority_provider")
+            self._legacy_scope = kwargs.get("private_scope")
+            self._expected_dispatch_digest = kwargs.get("expected_dispatch_digest")
+
+        def start(self) -> None:
+            scope = (
+                self._authority_provider()
+                if self._authority_provider is not None
+                else self._legacy_scope
+            )
+            renewal_kwargs: dict[str, object] = {
+                "claim_token": self._claim_token,
+                "lease_seconds": self._lease_seconds,
+                "private_scope": scope,
+            }
+            if self._expected_dispatch_digest is not None:
+                renewal_kwargs["expected_dispatch_digest"] = self._expected_dispatch_digest
+            self._renew_claim(
+                self._session_factory,
+                self._command_id,
+                **renewal_kwargs,
+            )
+
+        def ensure_active(self) -> None:
+            return None
+
+        def stop_and_join(self) -> None:
+            return None
+
+    authority = _DistinctAuthorityClient(dispatch)
+    operation_refs: list[tuple[str, str]] = []
+
+    def record_operations(
+        name: str, calls: list[tuple[tuple[object, ...], dict[str, Any]]]
+    ) -> None:
+        for _args, kwargs in calls:
+            scope = kwargs["private_scope"]
+            assert isinstance(scope, PrivateWriteScope)
+            operation_refs.append((name, scope.authority_ref))
+
+    success_events: list[str] = []
+    success_input = _RuntimeInput(policy_revision=3)
+    success_execution, _instances = _execution_type(success_events, prepared="prepared")
+    success_calls = _patch_runtime_happy_path(
+        monkeypatch,
+        events=success_events,
+        input_value=success_input,
+        heartbeat_type=_OneRenewalHeartbeat,
+        execution_type=success_execution,
+    )
+    assert (
+        _handle_collection_dispatch(
+            dispatch,
+            session_factory=_SessionFactory(),
+            lookup_client=_SequencedLookupClient(),
+            private_authority_client=authority,
+            input_provider=_RuntimeInputProvider(success_input, success_events),
+            collector_factory=lambda: object(),
+            parser=lambda candidate: candidate,
+            runtime_config=_runtime_config(dispatch),
+            clock=lambda: NOW,
+            uuid_factory=_uuid_factory(CLAIM_TOKEN, STAGED_MESSAGE_ID),
+            store_operations=success_calls["operations"],
+        )
+        == "staged-proposal"
+    )
+    record_operations("reservation", success_calls["reserve"])
+    record_operations("claim", success_calls["claim"])
+    record_operations("renew", success_calls["renew"])
+    record_operations("candidate-commit", success_calls["commit"])
+
+    replay_events: list[str] = []
+    replay_input = _RuntimeInput(policy_revision=3)
+    replay_execution, _instances = _execution_type(replay_events, prepared="unused")
+    replay_calls = _patch_runtime_happy_path(
+        monkeypatch,
+        events=replay_events,
+        input_value=replay_input,
+        heartbeat_type=_OneRenewalHeartbeat,
+        execution_type=replay_execution,
+        attempt_state=("PERSISTED", 3, ATTEMPT_ID),
+    )
+    assert (
+        _handle_collection_dispatch(
+            dispatch,
+            session_factory=_SessionFactory(),
+            lookup_client=_SequencedLookupClient(),
+            private_authority_client=authority,
+            input_provider=_RuntimeInputProvider(replay_input, replay_events),
+            collector_factory=lambda: object(),
+            parser=lambda candidate: candidate,
+            runtime_config=_runtime_config(dispatch),
+            clock=lambda: NOW,
+            uuid_factory=_uuid_factory(),
+            store_operations=replay_calls["operations"],
+        )
+        == "replayed-proposal"
+    )
+    record_operations("replay", replay_calls["replay"])
+
+    failure_events: list[str] = []
+    failure_input = _RuntimeInput(policy_revision=3)
+    failure_execution, _instances = _execution_type(
+        failure_events,
+        prepared="unused",
+        fail_run=True,
+    )
+    failure_calls = _patch_runtime_happy_path(
+        monkeypatch,
+        events=failure_events,
+        input_value=failure_input,
+        heartbeat_type=_OneRenewalHeartbeat,
+        execution_type=failure_execution,
+    )
+    with pytest.raises(TimeoutError, match="synthetic fetch timeout"):
+        _handle_collection_dispatch(
+            dispatch,
+            session_factory=_SessionFactory(),
+            lookup_client=_SequencedLookupClient(),
+            private_authority_client=authority,
+            input_provider=_RuntimeInputProvider(failure_input, failure_events),
+            collector_factory=lambda: object(),
+            parser=lambda candidate: candidate,
+            runtime_config=_runtime_config(dispatch),
+            clock=lambda: NOW,
+            uuid_factory=_uuid_factory(CLAIM_TOKEN),
+            store_operations=failure_calls["operations"],
+        )
+    record_operations("reservation", failure_calls["reserve"])
+    record_operations("claim", failure_calls["claim"])
+    record_operations("heartbeat-renew", failure_calls["renew"])
+    record_operations("normal-release", failure_calls["release"])
+
+    thread_renewed = Event()
+    thread_renewals: list[tuple[tuple[object, ...], dict[str, Any]]] = []
+
+    def record_thread_renewal(*args: object, **kwargs: Any) -> None:
+        thread_renewals.append((args, kwargs))
+        thread_renewed.set()
+        raise RuntimeError("stop deterministic heartbeat after one renewal")
+
+    binding = W1PrivateBinding.from_collection(dispatch.payload)
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    real_heartbeat = real_heartbeat_type(
+        _SessionFactory(),
+        dispatch.payload.command_id,
+        CLAIM_TOKEN,
+        lease_seconds=120,
+        interval_seconds=0.001,
+        renew_claim=record_thread_renewal,
+        authority_provider=lambda: source_runtime._authorize_write(binding, scope, authority),
+        expected_dispatch_digest=expected_digest,
+    )
+    real_heartbeat.start()
+    assert thread_renewed.wait(timeout=1.0)
+    real_heartbeat.stop_and_join()
+    assert real_heartbeat.lost is True
+    record_operations("thread-heartbeat-renew", thread_renewals)
+
+    labels = [name for name, _ref in operation_refs]
+    assert labels == [
+        "reservation",
+        "claim",
+        "renew",
+        "renew",
+        "candidate-commit",
+        "replay",
+        "reservation",
+        "claim",
+        "heartbeat-renew",
+        "normal-release",
+        "thread-heartbeat-renew",
+    ]
+    refs = [ref for _name, ref in operation_refs]
+    assert len(refs) == len(set(refs)) == len(authority.authority_refs)
+    for calls in (
+        success_calls["claim"],
+        success_calls["renew"],
+        failure_calls["claim"],
+        failure_calls["renew"],
+        failure_calls["release"],
+        thread_renewals,
+    ):
+        assert all(kwargs["expected_dispatch_digest"] == expected_digest for _args, kwargs in calls)
 
 
 @pytest.mark.parametrize("failure", ["wrong-echo", "http-503", "timeout"])

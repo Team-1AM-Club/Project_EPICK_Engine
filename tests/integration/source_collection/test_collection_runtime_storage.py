@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
 from typing import Any, cast
@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import epick_engine.source_collection.commit_gate_store as commit_gate_store_module
 import epick_engine.source_collection.persistence as persistence_module
+import epick_engine.source_collection.source_runtime as source_runtime_module
 from epick_engine.source_collection.collector import (
     StaticFetchResult,
     StaticResponseCandidate,
@@ -56,6 +57,7 @@ from epick_engine.source_collection.commit_gate_store import (
 from epick_engine.source_collection.contracts import (
     AccessClass,
     CollectionResult,
+    CollectionStage,
     DateValue,
     ExtractionStatus,
     Locator,
@@ -134,6 +136,7 @@ from epick_engine.source_collection.source_runtime_store import (
 from epick_engine.source_collection.source_runtime_store import (
     reserve_collection_attempt as _reserve_collection_attempt,
 )
+from epick_engine.source_collection.w1_lookup_client import W1LookupClientError
 from epick_engine.source_collection.w1_private_authority_contracts import (
     CurrentWriteScopeLookupResponse,
     PrivateWriteAuthorityResponse,
@@ -595,6 +598,7 @@ def _dispatch(
 
 
 _TEST_PRIVATE_SCOPES: dict[UUID, PrivateWriteScope] = {}
+_TEST_PRIVATE_DISPATCH_DIGESTS: dict[UUID, str] = {}
 
 
 def _trusted_scope(dispatch: W1Dispatch) -> PrivateWriteScope:
@@ -717,11 +721,16 @@ def _gate_scope(gate: CommitGateCommand) -> PrivateWriteScope:
 def reserve_collection_attempt(session, dispatch, *args, **kwargs):
     scope = kwargs.setdefault("private_scope", _trusted_scope(dispatch))
     _TEST_PRIVATE_SCOPES[dispatch.payload.command_id] = scope
+    _TEST_PRIVATE_DISPATCH_DIGESTS[dispatch.payload.command_id] = dispatch_digest(dispatch)
     return _reserve_collection_attempt(session, dispatch, *args, **kwargs)
 
 
 def _scope_kwargs(command_id: UUID, kwargs: dict[str, Any]) -> None:
     kwargs.setdefault("private_scope", _TEST_PRIVATE_SCOPES.get(command_id))
+    kwargs.setdefault(
+        "expected_dispatch_digest",
+        _TEST_PRIVATE_DISPATCH_DIGESTS.get(command_id),
+    )
 
 
 def claim_collection_attempt(session_factory, command_id, **kwargs):
@@ -742,6 +751,7 @@ def release_collection_claim(session_factory, command_id, **kwargs):
 def commit_collection_candidate(session_factory, dispatch, *args, **kwargs):
     scope = kwargs.setdefault("private_scope", _trusted_scope(dispatch))
     _TEST_PRIVATE_SCOPES[dispatch.payload.command_id] = scope
+    _TEST_PRIVATE_DISPATCH_DIGESTS[dispatch.payload.command_id] = dispatch_digest(dispatch)
     return _commit_collection_candidate(session_factory, dispatch, *args, **kwargs)
 
 
@@ -905,6 +915,184 @@ def test_first_reservation_requires_w1_scope_then_fresh_write_authority_rejects_
 
 
 @pytest.mark.approved_postgres
+def test_revocation_between_claim_and_commit_prevents_public_and_private_writes(
+    runtime_session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim-time decision must not authorize renew, commit, or stale-digest takeover."""
+
+    company_id, source_id = _seed_source(runtime_session_factory)
+    dispatch = _dispatch(
+        command_id=uuid4(),
+        job_id=uuid4(),
+        owner_ref=uuid4(),
+        company_id=company_id,
+        source_id=source_id,
+        decision_id=UUID("51000000-0000-4000-8000-000000000011"),
+    )
+    scope = PrivateDeletionScope(kind="ACCOUNT", project_id=None)
+    with runtime_session_factory.begin() as session:
+        source = session.get(Source, source_id)
+        assert source is not None
+        source.source_type = SourceType.COMPANY_WEBSITE.value
+        pointer_before = (
+            source.latest_observation_id,
+            source.current_source_version_id,
+            source.first_collected_at,
+            source.last_collected_at,
+            source.last_promoted_observation_order,
+        )
+
+    class _RevokedAfterClaimAuthority(_PrivateAuthorityClient):
+        def __init__(self) -> None:
+            super().__init__(scope)
+            self.successful_authority_refs: list[str] = []
+            self.write_calls = 0
+
+        def authorize_write(
+            self,
+            binding: W1PrivateBinding,
+            requested_scope: PrivateDeletionScope,
+        ) -> PrivateWriteAuthorityResponse:
+            self.events.append("write")
+            self.write_calls += 1
+            if self.write_calls >= 3:
+                raise W1LookupClientError("revoked after claim")
+            authority_ref = f"w1:test:revocation:{self.write_calls}"
+            self.successful_authority_refs.append(authority_ref)
+            return PrivateWriteAuthorityResponse.model_validate(
+                {
+                    "schema_version": "w1.private.w2-write-authority.v1",
+                    **_private_binding_payload(binding),
+                    "scope": requested_scope.to_mapping(),
+                    "authority_ref": authority_ref,
+                },
+                strict=True,
+            )
+
+    class _NoopHeartbeat:
+        lost = False
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def start(self) -> None:
+            return None
+
+        def ensure_active(self) -> None:
+            return None
+
+        def stop_and_join(self) -> None:
+            return None
+
+    class _PreparedButUncommittedExecution:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.closed = False
+
+        def run_once(self, context: object) -> object:
+            enter_stage = cast(Any, context).enter_stage
+            enter_stage(CollectionStage.POLICY, policy_revision=3)
+            enter_stage(CollectionStage.FETCH, policy_revision=3)
+            enter_stage(CollectionStage.PARSE, policy_revision=3)
+            return object()
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(source_runtime_module, "_ClaimHeartbeat", _NoopHeartbeat)
+    monkeypatch.setattr(
+        source_runtime_module,
+        "StaticCollectionExecution",
+        _PreparedButUncommittedExecution,
+    )
+    authority = _RevokedAfterClaimAuthority()
+    attempt_id, claim_token, staged_message_id = uuid4(), uuid4(), uuid4()
+
+    def reject_reused_commit(*args: object, **kwargs: object) -> object:
+        pytest.fail("commit was reached with claim-time authority")
+
+    store_operations = source_runtime_module.RuntimeStoreOperations(
+        load_attempt=load_bound_collection_attempt,
+        reserve_attempt=_reserve_collection_attempt,
+        claim_attempt=_claim_collection_attempt,
+        renew_claim=_renew_collection_claim,
+        release_claim=_release_collection_claim,
+        commit_candidate=reject_reused_commit,
+        replay_candidate=_replay_staged_collection,
+    )
+    with pytest.raises(RuntimeAuthorizationError, match="private write authority"):
+        handle_collection_dispatch(
+            dispatch,
+            session_factory=runtime_session_factory,
+            lookup_client=_AvailableDispatchLookup(),
+            private_authority_client=authority,
+            input_provider=SqlAlchemyCollectionInputProvider(
+                runtime_session_factory,
+                _source_runtime_config({source_id: 3}),
+            ),
+            collector_factory=object,
+            parser=extract_static_candidate,
+            runtime_config=_source_runtime_config({source_id: 3}),
+            clock=lambda: NOW,
+            uuid_factory=_uuid_factory(attempt_id, claim_token, staged_message_id),
+            store_operations=store_operations,
+        )
+
+    assert authority.events == ["scope", "write", "write", "write", "write"]
+    assert authority.successful_authority_refs == [
+        "w1:test:revocation:1",
+        "w1:test:revocation:2",
+    ]
+    assert len(set(authority.successful_authority_refs)) == 2
+    with runtime_session_factory.begin() as session:
+        attempt = session.get(CollectionRuntimeAttempt, dispatch.payload.command_id)
+        source = session.get(Source, source_id)
+        assert attempt is not None and source is not None
+        assert attempt.state == "RESERVED"
+        assert attempt.claim_token == claim_token
+        assert (
+            source.latest_observation_id,
+            source.current_source_version_id,
+            source.first_collected_at,
+            source.last_collected_at,
+            source.last_promoted_observation_order,
+        ) == pointer_before
+        assert session.get(PrivateCommitStage, dispatch.payload.command_id) is None
+        assert session.scalar(select(func.count()).select_from(PrivateStagedOutbox)) == 0
+        assert session.scalar(select(func.count()).select_from(SourceObservation)) == 0
+        assert session.scalar(select(func.count()).select_from(SourceVersion)) == 0
+        attempt.claim_expires_at = NOW - timedelta(seconds=1)
+
+    changed_dispatch = _dispatch(
+        command_id=dispatch.payload.command_id,
+        job_id=dispatch.payload.job_id,
+        owner_ref=dispatch.payload.authenticated_owner_ref,
+        company_id=company_id,
+        source_id=source_id,
+        decision_id=UUID("51000000-0000-4000-8000-000000000012"),
+    )
+    with pytest.raises(CollectionRuntimeConflict, match="dispatch"):
+        _claim_collection_attempt(
+            runtime_session_factory,
+            dispatch.payload.command_id,
+            claim_token=uuid4(),
+            lease_seconds=30,
+            expected_dispatch_digest=dispatch_digest(changed_dispatch),
+            private_scope=_scope_for_dispatch(
+                dispatch,
+                scope,
+                authority_ref="w1:test:revocation:takeover",
+            ),
+        )
+    with runtime_session_factory() as session:
+        attempt = session.get(CollectionRuntimeAttempt, dispatch.payload.command_id)
+        assert attempt is not None
+        assert attempt.dispatch_digest == dispatch_digest(dispatch)
+        assert attempt.claim_token == claim_token
+        assert attempt.claim_expires_at == NOW - timedelta(seconds=1)
+
+
+@pytest.mark.approved_postgres
 @pytest.mark.parametrize(
     "changed",
     [
@@ -941,6 +1129,10 @@ def test_replayed_dispatch_cannot_change_original_scope_or_digest(
     )
     project_scope = PrivateDeletionScope(kind="PROJECT", project_id=project_id)
     with runtime_session_factory.begin() as session:
+        source = session.get(Source, source_id)
+        assert source is not None
+        source.source_type = SourceType.COMPANY_WEBSITE.value
+        session.flush()
         _reserve_collection_attempt(
             session,
             original,
@@ -1056,6 +1248,7 @@ def test_runtime_reservation_and_claim_lifecycle_require_current_trusted_scope(
             command_id,
             claim_token=uuid4(),
             lease_seconds=30,
+            expected_dispatch_digest=dispatch_digest(dispatch),
         )
     claim_token = uuid4()
     claim_collection_attempt(
@@ -2842,7 +3035,6 @@ def test_full_runtime_handler_persists_candidate_after_fresh_stages_without_deli
         runtime_config=_source_runtime_config({source_id: 3}),
         clock=lambda: NOW,
         uuid_factory=uuid4,
-        private_scope=_trusted_scope(dispatch),
         private_authority_client=_PrivateAuthorityClient(
             PrivateDeletionScope(kind="ACCOUNT", project_id=None)
         ),
