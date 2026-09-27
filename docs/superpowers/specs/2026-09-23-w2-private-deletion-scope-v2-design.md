@@ -123,14 +123,16 @@ may still produce public, shareable Source data only when the normal
 collection policy and its own authorization allow that independent write;
 it must not re-create a deleted private result.
 
-After the W2 transaction commits, W1 purges its own private references by
-the authenticated account/Project scope, not by a W1-supplied list of W2 IDs.
-Only successful purge permits W1 ACK application. A purge or ACK failure
-leaves the W2 receipt intact and the W1 target pending. W1 retries the exact
-same `deletion_id`, epoch, scope, and body. While that epoch is still latest,
-W2 returns `DUPLICATE` and repeats the scope-based W1 purge and ACK steps
-without repeating destructive DB work. A receipt below the latest owner
-epoch is `STALE` even for the same deletion ID and never purges or ACKs.
+After the W2 transaction commits, W2 POSTs one exact v2 ACK to W1's
+authenticated private callback. W1 purges its own private references by the
+authenticated account/Project scope, not by a W1-supplied list of W2 IDs, and
+applies that ACK in the same W1 transaction. W2 does not call a separate W1
+purge endpoint. A callback or W1 transaction failure leaves the W2 receipt
+intact and the W1 target pending. W1 retries the exact same `deletion_id`,
+epoch, scope, and command body. While that epoch is still latest, W2 returns
+`DUPLICATE` and retries the single W1 callback without repeating destructive
+DB work. A receipt below the latest owner epoch is `STALE` even for the same
+deletion ID and never calls the W1 callback.
 W1 must not start another deletion epoch for the owner until the previous
 purge and ACK have completed. This serialization is required; no implicit
 carry-forward of an unfinished purge is assumed.

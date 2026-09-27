@@ -47,6 +47,7 @@ from epick_engine.source_collection.persistence import (
 from epick_engine.source_collection.policy import Representation as FetchRepresentation
 from epick_engine.source_collection.policy import UntrustedDocument, ValidatedTarget
 from epick_engine.source_collection.private_deletion_v2 import (
+    PrivateDeletionAckV2,
     PrivateDeletionCommandV2,
     PrivateDeletionScope,
     process_private_deletion_v2,
@@ -417,14 +418,11 @@ class _Queue:
 
 
 @dataclass
-class _DeletionSideEffects:
-    events: list[str] = field(default_factory=list)
+class _DeletionAckCallback:
+    acknowledgements: list[PrivateDeletionAckV2] = field(default_factory=list)
 
-    def purge_private_scope(self, *, owner_user_id: UUID, scope: PrivateDeletionScope) -> None:
-        self.events.append("purge")
-
-    def acknowledge(self, *, deletion_id: UUID, deletion_epoch: int) -> None:
-        self.events.append("acknowledge")
+    def acknowledge(self, *, acknowledgement: PrivateDeletionAckV2) -> None:
+        self.acknowledgements.append(acknowledgement)
 
 
 def _gate(proposal: StagedResultProposal) -> CommitGateCommand:
@@ -611,7 +609,7 @@ def test_core_direct_account_project_round_trip_with_revocation_and_restart(
             allow_nan=False,
         )
 
-    deletion_side_effects = _DeletionSideEffects()
+    deletion_callback = _DeletionAckCallback()
     deletion = process_private_deletion_v2(
         session_factory,
         PrivateDeletionCommandV2(
@@ -620,10 +618,10 @@ def test_core_direct_account_project_round_trip_with_revocation_and_restart(
             deletion_epoch=1,
             scope=scopes[ack_proposal.command.command_id],
         ),
-        deletion_side_effects,
+        deletion_callback,
     )
     assert deletion is not None and deletion.outcome == "APPLIED"
-    assert deletion_side_effects.events == ["purge", "acknowledge"]
+    assert deletion_callback.acknowledgements == [deletion]
 
     restarted_session_factory = sessionmaker(
         database_engine,

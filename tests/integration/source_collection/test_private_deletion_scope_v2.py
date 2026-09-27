@@ -56,6 +56,7 @@ from epick_engine.source_collection.persistence import (
     SourceVersion,
 )
 from epick_engine.source_collection.private_deletion_v2 import (
+    PrivateDeletionAckV2,
     PrivateDeletionCommandV2,
     PrivateDeletionScope,
 )
@@ -164,25 +165,14 @@ class _InventoryIds:
 
 
 @dataclass
-class _PrivateDeletionSideEffectsV2:
-    events: list[tuple[str, object]] = field(default_factory=list)
-    fail_purge: bool = False
-    fail_acknowledge: bool = False
+class _PrivateDeletionAckCallbackV2:
+    acknowledgements: list[PrivateDeletionAckV2] = field(default_factory=list)
+    fail: bool = False
 
-    def purge_private_scope(
-        self,
-        *,
-        owner_user_id: UUID,
-        scope: PrivateDeletionScope,
-    ) -> None:
-        self.events.append(("purge", (owner_user_id, scope)))
-        if self.fail_purge:
-            raise RuntimeError("synthetic scope purge failure")
-
-    def acknowledge(self, *, deletion_id: UUID, deletion_epoch: int) -> None:
-        self.events.append(("acknowledge", (deletion_id, deletion_epoch)))
-        if self.fail_acknowledge:
-            raise RuntimeError("synthetic acknowledgement failure")
+    def acknowledge(self, *, acknowledgement: PrivateDeletionAckV2) -> None:
+        self.acknowledgements.append(acknowledgement)
+        if self.fail:
+            raise RuntimeError("synthetic W1 acknowledgement callback failure")
 
 
 def _command(
@@ -212,13 +202,13 @@ def _apply_v2(session: Session, command: PrivateDeletionCommandV2) -> str:
 def _process_v2(
     session_factory: sessionmaker[Session],
     command: PrivateDeletionCommandV2,
-    side_effects: _PrivateDeletionSideEffectsV2,
+    callback: _PrivateDeletionAckCallbackV2,
 ):
     from epick_engine.source_collection.private_deletion_v2 import (  # noqa: PLC0415
         process_private_deletion_v2,
     )
 
-    return process_private_deletion_v2(session_factory, command, side_effects)
+    return process_private_deletion_v2(session_factory, command, callback)
 
 
 def _seed_public(session: Session) -> _PublicIds:
@@ -999,7 +989,7 @@ def test_v2_project_deletion_rolls_back_on_any_unclassified_owner_row(
     session_factory: sessionmaker[Session],
     unknown_parent: str,
 ) -> None:
-    side_effects = _PrivateDeletionSideEffectsV2()
+    callback = _PrivateDeletionAckCallbackV2()
     command = _command(kind="PROJECT", project_id=PROJECT_A)
     with session_factory.begin() as session:
         public = _seed_public(session)
@@ -1031,11 +1021,11 @@ def test_v2_project_deletion_rolls_back_on_any_unclassified_owner_row(
         before = _private_snapshot(session, OWNER_A)
 
     with pytest.raises(ScopeUnclassified):
-        _process_v2(session_factory, command, side_effects)
+        _process_v2(session_factory, command, callback)
 
     with session_factory() as session:
         assert _private_snapshot(session, OWNER_A) == before
-    assert side_effects.events == []
+    assert callback.acknowledgements == []
 
 
 @pytest.mark.approved_postgres
@@ -1081,15 +1071,12 @@ def test_v2_project_deletion_isolates_projects_owners_and_removes_ackless_stages
             stage_children=True,
         )
 
-    side_effects = _PrivateDeletionSideEffectsV2()
+    callback = _PrivateDeletionAckCallbackV2()
     command = _command(kind="PROJECT", project_id=PROJECT_A)
-    ack = _process_v2(session_factory, command, side_effects)
+    ack = _process_v2(session_factory, command, callback)
 
     assert ack is not None and ack.outcome == "APPLIED"
-    assert side_effects.events == [
-        ("purge", (OWNER_A, command.scope)),
-        ("acknowledge", (command.deletion_id, 1)),
-    ]
+    assert callback.acknowledgements == [ack]
     with session_factory() as session:
         assert not any(_ids_exist(session, selected).values())
         assert all(_ids_exist(session, same_owner_other_project).values())
@@ -1254,7 +1241,7 @@ def test_v2_account_deletion_preserves_other_owner_and_public_history(
     ack = _process_v2(
         session_factory,
         _command(kind="ACCOUNT"),
-        _PrivateDeletionSideEffectsV2(),
+        _PrivateDeletionAckCallbackV2(),
     )
 
     assert ack is not None and ack.outcome == "APPLIED"
@@ -1573,31 +1560,36 @@ def test_v2_epoch_boundaries_same_epoch_conflict_and_old_same_id_stale(
 
 
 @pytest.mark.approved_postgres
-def test_v2_purge_failure_retries_same_receipt_after_restart(
+def test_v2_callback_failure_retries_same_receipt_after_restart(
     session_factory: sessionmaker[Session],
 ) -> None:
     command = _command(kind="PROJECT", project_id=PROJECT_A)
-    first_process = _PrivateDeletionSideEffectsV2(fail_purge=True)
-    with pytest.raises(RuntimeError, match="scope purge"):
+    first_process = _PrivateDeletionAckCallbackV2(fail=True)
+    with pytest.raises(RuntimeError, match="acknowledgement callback"):
         _process_v2(session_factory, command, first_process)
-    assert first_process.events == [("purge", (OWNER_A, command.scope))]
+    assert first_process.acknowledgements == [
+        PrivateDeletionAckV2(
+            deletion_id=command.deletion_id,
+            owner_user_id=OWNER_A,
+            deletion_epoch=1,
+            scope=command.scope,
+            outcome="APPLIED",
+        )
+    ]
     with session_factory() as session:
         receipt = session.get(PrivateDeletionReceipt, command.deletion_id)
         assert receipt is not None and receipt.contract_version == "w2.private-deletion.v2"
 
-    restarted_process = _PrivateDeletionSideEffectsV2()
+    restarted_process = _PrivateDeletionAckCallbackV2()
     duplicate_ack = _process_v2(session_factory, command, restarted_process)
     assert duplicate_ack is not None and duplicate_ack.outcome == "DUPLICATE"
-    assert restarted_process.events == [
-        ("purge", (OWNER_A, command.scope)),
-        ("acknowledge", (command.deletion_id, 1)),
-    ]
+    assert restarted_process.acknowledgements == [duplicate_ack]
 
     newer = _command(deletion_epoch=2, kind="PROJECT", project_id=PROJECT_B)
-    assert _process_v2(session_factory, newer, _PrivateDeletionSideEffectsV2()) is not None
-    stale_effects = _PrivateDeletionSideEffectsV2()
-    assert _process_v2(session_factory, command, stale_effects) is None
-    assert stale_effects.events == []
+    assert _process_v2(session_factory, newer, _PrivateDeletionAckCallbackV2()) is not None
+    stale_callback = _PrivateDeletionAckCallbackV2()
+    assert _process_v2(session_factory, command, stale_callback) is None
+    assert stale_callback.acknowledgements == []
 
 
 @pytest.mark.approved_postgres
@@ -1768,12 +1760,13 @@ def test_v2_ack_failure_keeps_receipt_for_full_scope_retry(
     session_factory: sessionmaker[Session],
 ) -> None:
     command = _command(kind="ACCOUNT")
-    failed = _PrivateDeletionSideEffectsV2(fail_acknowledge=True)
-    with pytest.raises(RuntimeError, match="acknowledgement"):
+    failed = _PrivateDeletionAckCallbackV2(fail=True)
+    with pytest.raises(RuntimeError, match="acknowledgement callback"):
         _process_v2(session_factory, command, failed)
-    assert [name for name, _ in failed.events] == ["purge", "acknowledge"]
+    assert len(failed.acknowledgements) == 1
+    assert failed.acknowledgements[0].outcome == "APPLIED"
 
-    retried = _PrivateDeletionSideEffectsV2()
+    retried = _PrivateDeletionAckCallbackV2()
     ack = _process_v2(session_factory, command, retried)
     assert ack is not None and ack.outcome == "DUPLICATE"
-    assert [name for name, _ in retried.events] == ["purge", "acknowledge"]
+    assert retried.acknowledgements == [ack]

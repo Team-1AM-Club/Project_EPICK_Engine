@@ -194,27 +194,19 @@ def command_digest_v2(command: PrivateDeletionCommandV2) -> str:
     ).hexdigest()
 
 
-class PrivateDeletionSideEffectsV2(Protocol):
-    """W1-owned scope purge and acknowledgement boundary for v2."""
+class PrivateDeletionAckCallbackV2(Protocol):
+    """Single W1 callback that atomically purges its scope and records the ACK."""
 
-    def purge_private_scope(
-        self,
-        *,
-        owner_user_id: UUID,
-        scope: PrivateDeletionScope,
-    ) -> None:
-        """Purge W1-private references only after the W2 transaction commits."""
-
-    def acknowledge(self, *, deletion_id: UUID, deletion_epoch: int) -> None:
-        """Acknowledge the exact owner deletion epoch after a successful purge."""
+    def acknowledge(self, *, acknowledgement: PrivateDeletionAckV2) -> None:
+        """Send one exact v2 ACK after the W2 transaction commits."""
 
 
 def process_private_deletion_v2(
     session_factory: sessionmaker[Session],
     command: PrivateDeletionCommandV2,
-    side_effects: PrivateDeletionSideEffectsV2,
+    callback: PrivateDeletionAckCallbackV2,
 ) -> PrivateDeletionAckV2 | None:
-    """Commit W2 scope deletion before W1 purge and publish no stale ACK."""
+    """Commit W2 scope deletion before one W1 purge-and-ACK callback."""
 
     from epick_engine.source_collection.persistence import (  # noqa: PLC0415
         apply_private_deletion_v2,
@@ -225,18 +217,12 @@ def process_private_deletion_v2(
     if outcome == "STALE":
         return None
 
-    side_effects.purge_private_scope(
-        owner_user_id=command.owner_user_id,
-        scope=command.scope,
-    )
-    side_effects.acknowledge(
-        deletion_id=command.deletion_id,
-        deletion_epoch=command.deletion_epoch,
-    )
-    return PrivateDeletionAckV2(
+    acknowledgement = PrivateDeletionAckV2(
         deletion_id=command.deletion_id,
         owner_user_id=command.owner_user_id,
         deletion_epoch=command.deletion_epoch,
         scope=command.scope,
         outcome=outcome,
     )
+    callback.acknowledge(acknowledgement=acknowledgement)
+    return acknowledgement
