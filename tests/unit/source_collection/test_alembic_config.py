@@ -26,7 +26,10 @@ def test_source_collection_migration_is_the_only_head() -> None:
 
     assert head is not None
     assert len(head) <= 64
-    assert scripts.get_heads() == ["0012_private_ack_wire_digest"]
+    assert scripts.get_heads() == ["0013_deletion_ack_confirmed"]
+    assert scripts.get_revision("0013_deletion_ack_confirmed").down_revision == (
+        "0012_private_ack_wire_digest"
+    )
     assert scripts.get_revision("0012_private_ack_wire_digest").down_revision == (
         "0011_private_ack_control_retention"
     )

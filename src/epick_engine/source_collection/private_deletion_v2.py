@@ -6,8 +6,11 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
 from uuid import UUID
+
+from sqlalchemy import select
 
 from epick_engine.source_collection.worker import (
     WorkerContractViolation,
@@ -209,6 +212,7 @@ def process_private_deletion_v2(
     """Commit W2 scope deletion before one W1 purge-and-ACK callback."""
 
     from epick_engine.source_collection.persistence import (  # noqa: PLC0415
+        PrivateDeletionReceipt,
         apply_private_deletion_v2,
     )
 
@@ -225,4 +229,18 @@ def process_private_deletion_v2(
         outcome=outcome,
     )
     callback.acknowledge(acknowledgement=acknowledgement)
+    with session_factory.begin() as session:
+        receipt = session.scalar(
+            select(PrivateDeletionReceipt)
+            .where(PrivateDeletionReceipt.deletion_id == command.deletion_id)
+            .with_for_update()
+        )
+        if (
+            receipt is None
+            or receipt.contract_version != _COMMAND_SCHEMA_VERSION
+            or receipt.command_digest != command_digest_v2(command)
+        ):
+            raise RuntimeError("private deletion ACK receipt binding is invalid")
+        if receipt.ack_confirmed_at is None:
+            receipt.ack_confirmed_at = datetime.now(UTC)
     return acknowledgement

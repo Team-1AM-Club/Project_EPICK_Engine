@@ -1622,8 +1622,10 @@ def test_delivery_migration_precedes_the_forward_non_destructive_head() -> None:
     scope_v2_revision = scripts.get_revision("0010_private_deletion_scope_v2")
     ack_retention_revision = scripts.get_revision("0011_private_ack_control_retention")
     ack_wire_revision = scripts.get_revision("0012_private_ack_wire_digest")
+    deletion_ack_revision = scripts.get_revision("0013_deletion_ack_confirmed")
 
-    assert scripts.get_heads() == [ack_wire_revision.revision]
+    assert scripts.get_heads() == [deletion_ack_revision.revision]
+    assert deletion_ack_revision.down_revision == ack_wire_revision.revision
     assert ack_wire_revision.down_revision == ack_retention_revision.revision
     assert ack_retention_revision.down_revision == scope_v2_revision.revision
     assert scope_v2_revision.down_revision == deletion_revision.revision

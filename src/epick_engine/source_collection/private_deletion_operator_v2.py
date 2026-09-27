@@ -15,12 +15,13 @@ from threading import Event
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from epick_engine.source_collection.commit_gate_runtime import ConsumeResult
 from epick_engine.source_collection.persistence import (
+    PrivateDeletionReceipt,
     create_database_engine,
     create_session_factory,
 )
@@ -44,7 +45,7 @@ from epick_engine.source_collection.w1_private_deletion_ack_client import (
     validate_private_deletion_ack_endpoint,
 )
 
-_MIGRATION_HEAD = "0012_private_ack_wire_digest"
+_MIGRATION_HEAD = "0013_deletion_ack_confirmed"
 _ROLE_ID = re.compile(r"AROA[A-Z0-9]{17}")
 _REGION = re.compile(r"[a-z]{2}-[a-z0-9-]+-[0-9]+")
 _NONCOMMERCIAL_REGION_PREFIXES = ("cn-", "us-gov-", "us-iso", "eu-iso")
@@ -271,7 +272,7 @@ def create_ack_client(settings: PrivateDeletionOperatorSettings) -> W1PrivateDel
         ) from None
 
 
-def _validate_queue_metadata(client: SqsClient, settings: PrivateDeletionOperatorSettings) -> None:
+def _validate_queue_metadata(client: SqsClient, settings: PrivateDeletionOperatorSettings) -> str:
     try:
         attributes = client.get_queue_attributes(
             QueueUrl=settings.queue_url,
@@ -311,9 +312,92 @@ def _validate_queue_metadata(client: SqsClient, settings: PrivateDeletionOperato
             )
         ):
             raise ValueError
+        assert isinstance(dlq_arn, str)
+        return dlq_arn
     except Exception:
         raise PrivateDeletionOperatorConfigurationError(
             "private deletion queue metadata is invalid"
+        ) from None
+
+
+def count_pending_private_deletion_acks(engine: Engine) -> int:
+    """Count v2 receipts without a durable W1 200 ACK confirmation."""
+
+    try:
+        with engine.connect() as connection:
+            count = connection.scalar(
+                select(func.count())
+                .select_from(PrivateDeletionReceipt)
+                .where(
+                    PrivateDeletionReceipt.contract_version == "w2.private-deletion.v2",
+                    PrivateDeletionReceipt.ack_confirmed_at.is_(None),
+                )
+            )
+            if not isinstance(count, int) or count < 0:
+                raise ValueError
+            return count
+    except Exception:
+        raise PrivateDeletionOperatorConfigurationError(
+            "private deletion ACK count is unavailable"
+        ) from None
+
+
+def inspect_counts(
+    engine: Engine,
+    client: SqsClient,
+    settings: PrivateDeletionOperatorSettings,
+) -> dict[str, int]:
+    """Return count-only queue backlog and durable unconfirmed W1 ACKs."""
+
+    try:
+        dlq_arn = _validate_queue_metadata(client, settings)
+        attributes = client.get_queue_attributes(
+            QueueUrl=settings.queue_url,
+            AttributeNames=[
+                "ApproximateNumberOfMessages",
+                "ApproximateNumberOfMessagesNotVisible",
+            ],
+        ).get("Attributes", {})
+        if not isinstance(attributes, Mapping):
+            raise ValueError
+        counts: list[int] = []
+        for name in (
+            "ApproximateNumberOfMessages",
+            "ApproximateNumberOfMessagesNotVisible",
+        ):
+            value = attributes.get(name)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9]+", value) is None:
+                raise ValueError
+            counts.append(int(value))
+
+        dlq_match = _QUEUE_ARN.fullmatch(dlq_arn)
+        if dlq_match is None:
+            raise ValueError
+        dlq_url = (
+            f"https://sqs.{settings.region}.amazonaws.com/"
+            f"{dlq_match.group('account')}/{dlq_match.group('name')}"
+        )
+        dlq_attributes = client.get_queue_attributes(
+            QueueUrl=dlq_url,
+            AttributeNames=["QueueArn", "SqsManagedSseEnabled", "KmsMasterKeyId"],
+        ).get("Attributes", {})
+        if (
+            not isinstance(dlq_attributes, Mapping)
+            or dlq_attributes.get("QueueArn") != dlq_arn
+            or not (
+                dlq_attributes.get("SqsManagedSseEnabled") == "true"
+                or isinstance(dlq_attributes.get("KmsMasterKeyId"), str)
+                and bool(dlq_attributes["KmsMasterKeyId"].strip())
+            )
+        ):
+            raise ValueError
+        return {
+            "pending_deletion_count": sum(counts),
+            "pending_ack_count": count_pending_private_deletion_acks(engine),
+        }
+    except Exception:
+        raise PrivateDeletionOperatorConfigurationError(
+            "private deletion inspect is unavailable"
         ) from None
 
 
@@ -403,7 +487,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run preflight, one bounded delivery, or the SIGTERM-aware local worker."""
 
     parser = argparse.ArgumentParser(description="W2 private-deletion v2 operator")
-    parser.add_argument("action", choices=("preflight", "consume-once", "run"))
+    parser.add_argument("action", choices=("preflight", "inspect", "consume-once", "run"))
     args = parser.parse_args(argv)
     engine: Engine | None = None
     try:
@@ -412,6 +496,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         sqs_client, callback = preflight(engine, settings)
         if args.action == "preflight":
             print(json.dumps({"status": "PREFLIGHT_PASSED", "scope": "metadata_only"}))
+            return 0
+        if args.action == "inspect":
+            print(json.dumps(inspect_counts(engine, sqs_client, settings), sort_keys=True))
             return 0
 
         session_factory = create_session_factory(engine)

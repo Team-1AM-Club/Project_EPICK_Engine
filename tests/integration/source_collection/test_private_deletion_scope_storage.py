@@ -249,7 +249,7 @@ def test_0010_migrates_private_inventory_and_backfills_legacy_rows(
                 == "0010_private_deletion_scope_v2"
             )
             assert ScriptDirectory.from_config(config).get_heads() == [
-                "0012_private_ack_wire_digest"
+                "0013_deletion_ack_confirmed"
             ]
 
 

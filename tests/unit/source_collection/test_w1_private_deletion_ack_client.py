@@ -6,7 +6,7 @@ import importlib
 import importlib.util
 import json
 import ssl
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -67,8 +67,8 @@ def _acknowledgement() -> PrivateDeletionAckV2:
 
 
 class _CommitTrackingTransaction:
-    def __init__(self) -> None:
-        self.session = object()
+    def __init__(self, session: object | None = None) -> None:
+        self.session = object() if session is None else session
         self.committed = False
 
     def __enter__(self) -> object:
@@ -79,11 +79,16 @@ class _CommitTrackingTransaction:
 
 
 class _CommitTrackingSessionFactory:
-    def __init__(self) -> None:
+    def __init__(self, receipt: object) -> None:
         self.transaction = _CommitTrackingTransaction()
+        self.confirmation_transaction = _CommitTrackingTransaction(
+            SimpleNamespace(scalar=lambda _query: receipt)
+        )
+        self.begin_count = 0
 
     def begin(self) -> _CommitTrackingTransaction:
-        return self.transaction
+        self.begin_count += 1
+        return self.transaction if self.begin_count == 1 else self.confirmation_transaction
 
 
 class _CommitObservingCallback:
@@ -122,7 +127,12 @@ def test_process_sends_one_exact_ack_only_after_w2_transaction_commits(
         deletion_epoch=7,
         scope=PrivateDeletionScope(kind="PROJECT", project_id=PROJECT_ID),
     )
-    factory = _CommitTrackingSessionFactory()
+    receipt = SimpleNamespace(
+        contract_version="w2.private-deletion.v2",
+        command_digest=private_deletion_v2.command_digest_v2(command),
+        ack_confirmed_at=None,
+    )
+    factory = _CommitTrackingSessionFactory(receipt)
     callback = _CommitObservingCallback(factory.transaction)
 
     def apply(session: object, applied_command: PrivateDeletionCommandV2) -> str:
@@ -140,6 +150,8 @@ def test_process_sends_one_exact_ack_only_after_w2_transaction_commits(
 
     assert result == _acknowledgement()
     assert callback.acknowledgements == [result]
+    assert factory.confirmation_transaction.committed is True
+    assert receipt.ack_confirmed_at is not None
 
 
 def test_ack_client_posts_exact_v2_body_once_with_authenticated_headers() -> None:

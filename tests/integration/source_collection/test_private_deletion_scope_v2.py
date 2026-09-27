@@ -20,6 +20,7 @@ from sqlalchemy import Engine, create_engine, event, inspect, select, text
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session, sessionmaker
 
+from epick_engine.source_collection import private_deletion_operator_v2 as deletion_operator
 from epick_engine.source_collection.commit_gate_contracts import (
     CommitGateCommand,
     parse_commit_gate_command,
@@ -984,6 +985,51 @@ def test_0012_invalid_legacy_ack_wire_aborts_and_rolls_back_schema(
 
 
 @pytest.mark.approved_postgres
+def test_0013_preserves_existing_v2_receipts_as_unconfirmed(
+    approved_postgres_url: URL,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _migration_schema(approved_postgres_url, monkeypatch) as (engine, config, schema):
+        alembic_command.upgrade(config, "0012_private_ack_wire_digest")
+        deletion_id = uuid4()
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO private_deletion_receipts "
+                    "(deletion_id, owner_user_id, deletion_epoch, contract_version, "
+                    "command_digest, outcome, created_at) VALUES "
+                    "(:deletion_id, :owner_user_id, 1, 'w2.private-deletion.v2', "
+                    ":command_digest, 'APPLIED', :created_at)"
+                ),
+                {
+                    "deletion_id": deletion_id,
+                    "owner_user_id": OWNER_A,
+                    "command_digest": "a" * 64,
+                    "created_at": NOW,
+                },
+            )
+
+        alembic_command.upgrade(config, "0013_deletion_ack_confirmed")
+
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT ack_confirmed_at FROM private_deletion_receipts "
+                        "WHERE deletion_id = :deletion_id"
+                    ),
+                    {"deletion_id": deletion_id},
+                )
+                is None
+            )
+        columns = {
+            column["name"]: column
+            for column in inspect(engine).get_columns("private_deletion_receipts", schema=schema)
+        }
+        assert columns["ack_confirmed_at"]["nullable"] is True
+
+
+@pytest.mark.approved_postgres
 @pytest.mark.parametrize("unknown_parent", ["attempt", "deduplication", "runtime", "stage"])
 def test_v2_project_deletion_rolls_back_on_any_unclassified_owner_row(
     session_factory: sessionmaker[Session],
@@ -1590,6 +1636,95 @@ def test_v2_callback_failure_retries_same_receipt_after_restart(
     stale_callback = _PrivateDeletionAckCallbackV2()
     assert _process_v2(session_factory, command, stale_callback) is None
     assert stale_callback.acknowledgements == []
+
+
+@pytest.mark.approved_postgres
+def test_v2_ack_confirmation_is_durable_only_after_w1_accepts(
+    session_factory: sessionmaker[Session],
+) -> None:
+    command = _command(kind="ACCOUNT")
+    with pytest.raises(RuntimeError, match="acknowledgement callback"):
+        _process_v2(session_factory, command, _PrivateDeletionAckCallbackV2(fail=True))
+
+    with session_factory() as session:
+        receipt = session.get(PrivateDeletionReceipt, command.deletion_id)
+        assert receipt is not None
+        assert receipt.ack_confirmed_at is None
+
+    acknowledgement = _process_v2(session_factory, command, _PrivateDeletionAckCallbackV2())
+    assert acknowledgement is not None and acknowledgement.outcome == "DUPLICATE"
+
+    with session_factory() as session:
+        receipt = session.get(PrivateDeletionReceipt, command.deletion_id)
+        assert receipt is not None
+        confirmed_at = receipt.ack_confirmed_at
+        assert confirmed_at is not None
+
+    _process_v2(session_factory, command, _PrivateDeletionAckCallbackV2())
+    with session_factory() as session:
+        receipt = session.get(PrivateDeletionReceipt, command.deletion_id)
+        assert receipt is not None
+        assert receipt.ack_confirmed_at == confirmed_at
+
+
+@pytest.mark.approved_postgres
+def test_pending_ack_count_excludes_v1_and_w1_confirmed_v2_receipts(
+    database_engine: Engine,
+    session_factory: sessionmaker[Session],
+) -> None:
+    unconfirmed = _command(owner_user_id=OWNER_A)
+    with pytest.raises(RuntimeError, match="acknowledgement callback"):
+        _process_v2(session_factory, unconfirmed, _PrivateDeletionAckCallbackV2(fail=True))
+    confirmed = _command(owner_user_id=OWNER_B)
+    _process_v2(session_factory, confirmed, _PrivateDeletionAckCallbackV2())
+    with session_factory.begin() as session:
+        session.add(
+            PrivateDeletionReceipt(
+                deletion_id=uuid4(),
+                owner_user_id=OWNER_A,
+                deletion_epoch=2,
+                contract_version="w2.private-deletion.v1",
+                command_digest="a" * 64,
+                outcome="APPLIED",
+                created_at=NOW,
+            )
+        )
+
+    assert deletion_operator.count_pending_private_deletion_acks(database_engine) == 1
+
+
+@pytest.mark.approved_postgres
+def test_v2_ack_confirmation_write_failure_keeps_receipt_unconfirmed_for_retry(
+    session_factory: sessionmaker[Session],
+) -> None:
+    command = _command(kind="ACCOUNT")
+    accepted = _PrivateDeletionAckCallbackV2()
+
+    def fail_confirmation(session, _flush_context, _instances):
+        if any(
+            isinstance(row, PrivateDeletionReceipt) and row.ack_confirmed_at is not None
+            for row in session.dirty
+        ):
+            raise RuntimeError("synthetic ACK confirmation write failure")
+
+    event.listen(Session, "before_flush", fail_confirmation)
+    try:
+        with pytest.raises(RuntimeError, match="ACK confirmation write failure"):
+            _process_v2(session_factory, command, accepted)
+    finally:
+        event.remove(Session, "before_flush", fail_confirmation)
+
+    assert len(accepted.acknowledgements) == 1
+    with session_factory() as session:
+        receipt = session.get(PrivateDeletionReceipt, command.deletion_id)
+        assert receipt is not None and receipt.ack_confirmed_at is None
+
+    retry = _PrivateDeletionAckCallbackV2()
+    acknowledgement = _process_v2(session_factory, command, retry)
+    assert acknowledgement is not None and acknowledgement.outcome == "DUPLICATE"
+    with session_factory() as session:
+        receipt = session.get(PrivateDeletionReceipt, command.deletion_id)
+        assert receipt is not None and receipt.ack_confirmed_at is not None
 
 
 @pytest.mark.approved_postgres

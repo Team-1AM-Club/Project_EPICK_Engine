@@ -1,7 +1,7 @@
 # W2 CT15 runtime — local implementation / deployment pending
 
 2026-09-27 private-authority runtime correction: current CT15 preflight requires
-exactly one Alembic head, `0012_private_ack_wire_digest`. Revisions `0005`
+exactly one Alembic head, `0013_deletion_ack_confirmed`. Revisions `0005`
 through `0011` are forward-migration starting points only, not CT15
 runtime-ready heads. The `0011` migration retains only the original ACK control
 graph needed for exact historical replay after private payload deletion, and
@@ -95,7 +95,7 @@ historical 0008 CT15 observation must not be presented as current READY evidence
 
 Everything in this section is a dated historical snapshot, not current operator
 guidance. Current preflight and deployment instructions require the exact
-`0012_private_ack_wire_digest` head described above and under Operator
+`0013_deletion_ack_confirmed` head described above and under Operator
 commands.
 
 T095 local-service update (2026-09-20): full regression is now **1286 passed,
@@ -243,7 +243,7 @@ rendering Compose with secret interpolation into saved logs.
 
 Run from the Engine checkout with `uv run --no-sync epick-w2-ct15 <action>`, or
 the image entrypoint with the same action.
-A W1 operator applies Alembic through `0012_private_ack_wire_digest` to the
+A W1 operator applies Alembic through `0013_deletion_ack_confirmed` to the
 approved W2 DB before starting the runtime. Revisions `0004` through `0011` are
 forward-migration starting points, not runtime-ready heads. Preflight never
 migrates the database.

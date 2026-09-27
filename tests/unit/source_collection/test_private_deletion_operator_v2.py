@@ -211,7 +211,7 @@ def _engine_with_revisions(*revisions: str) -> MagicMock:
 
 
 def test_preflight_requires_exact_head_before_creating_sqs_client() -> None:
-    engine = _engine_with_revisions("0011_private_ack_control_retention")
+    engine = _engine_with_revisions("0012_private_ack_wire_digest")
     created: list[object] = []
 
     with pytest.raises(operator.PrivateDeletionOperatorConfigurationError):
@@ -226,7 +226,7 @@ def test_preflight_requires_exact_head_before_creating_sqs_client() -> None:
 
 
 def test_preflight_accepts_only_exact_head_and_valid_encrypted_dlq_metadata() -> None:
-    engine = _engine_with_revisions("0012_private_ack_wire_digest")
+    engine = _engine_with_revisions("0013_deletion_ack_confirmed")
     sqs = FakeSqs()
     callback = MagicMock()
 
@@ -252,7 +252,7 @@ def test_preflight_rejects_invalid_queue_or_dlq_metadata(missing: str) -> None:
 
     with pytest.raises(operator.PrivateDeletionOperatorConfigurationError):
         operator.preflight(
-            _engine_with_revisions("0012_private_ack_wire_digest"),
+            _engine_with_revisions("0013_deletion_ack_confirmed"),
             operator.PrivateDeletionOperatorSettings.from_environment(environment()),
             sqs_client_factory=lambda _settings: BadMetadataSqs(),
             ack_client_factory=lambda _settings: MagicMock(),
@@ -266,7 +266,7 @@ def test_preflight_rejects_unloadable_ca_without_receiving_a_message(tmp_path: P
 
     with pytest.raises(operator.PrivateDeletionOperatorConfigurationError):
         operator.preflight(
-            _engine_with_revisions("0012_private_ack_wire_digest"),
+            _engine_with_revisions("0013_deletion_ack_confirmed"),
             operator.PrivateDeletionOperatorSettings.from_environment(values),
             sqs_client_factory=lambda _settings: sqs,
         )
@@ -365,3 +365,62 @@ def test_run_loop_finishes_inflight_item_then_observes_stop(
     assert exit_code == 0
     assert calls == ["consumed"]
     assert json.loads(capsys.readouterr().out) == {"status": "APPLIED"}
+
+
+def test_inspect_counts_visible_inflight_messages_and_unconfirmed_receipts() -> None:
+    class CountSqs(FakeSqs):
+        def get_queue_attributes(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["QueueUrl"].endswith("-dlq"):
+                self.calls.append(("attributes", kwargs))
+                return {
+                    "Attributes": {
+                        "QueueArn": "arn:aws:sqs:ap-northeast-2:123456789012:"
+                        "w1-private-deletion-v2-dlq",
+                        "SqsManagedSseEnabled": "true",
+                    }
+                }
+            response = super().get_queue_attributes(**kwargs)
+            response["Attributes"].update(
+                {
+                    "ApproximateNumberOfMessages": "3",
+                    "ApproximateNumberOfMessagesNotVisible": "2",
+                }
+            )
+            return response
+
+    engine = _engine_with_revisions("0013_deletion_ack_confirmed")
+    engine.connect.return_value.__enter__.return_value.scalar.return_value = 4
+    settings = operator.PrivateDeletionOperatorSettings.from_environment(environment())
+
+    counts = operator.inspect_counts(engine, CountSqs(), settings)
+
+    assert counts == {"pending_deletion_count": 5, "pending_ack_count": 4}
+
+
+def test_inspect_rejects_unencrypted_dlq() -> None:
+    class UnencryptedDlqSqs(FakeSqs):
+        def get_queue_attributes(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["QueueUrl"].endswith("-dlq"):
+                return {
+                    "Attributes": {
+                        "QueueArn": "arn:aws:sqs:ap-northeast-2:123456789012:"
+                        "w1-private-deletion-v2-dlq"
+                    }
+                }
+            response = super().get_queue_attributes(**kwargs)
+            response["Attributes"].update(
+                {
+                    "ApproximateNumberOfMessages": "0",
+                    "ApproximateNumberOfMessagesNotVisible": "0",
+                }
+            )
+            return response
+
+    engine = _engine_with_revisions("0013_deletion_ack_confirmed")
+    engine.connect.return_value.__enter__.return_value.scalar.return_value = 0
+    with pytest.raises(operator.PrivateDeletionOperatorConfigurationError):
+        operator.inspect_counts(
+            engine,
+            UnencryptedDlqSqs(),
+            operator.PrivateDeletionOperatorSettings.from_environment(environment()),
+        )
