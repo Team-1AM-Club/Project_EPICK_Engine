@@ -3,7 +3,7 @@
   "$id": "https://epick.dev/contracts/w2-private/w1-source-registration-lookup.proposed.schema.json",
   "title": "PROPOSED W1 source registration lookup response",
   "description": "W2 proposal only. W1 has not accepted or pinned this schema as its canonical contract.",
-  "$comment": "canonical_url also MUST pass w1.private.w2-source-registration-canonical-url.semantic-profile.v1; JSON Schema validation alone is insufficient.",
+  "$comment": "canonical_url MUST pass w1.private.w2-source-registration-canonical-url.semantic-profile.v1. The W1 producer MUST emit execution_fence and owner_deletion_epoch as canonical unsigned decimal tokens under w1-w2.private.source-registration-json-integer-token.semantic-profile.v1. JSON Schema validation alone is insufficient for either semantic profile.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -22,11 +22,13 @@
     },
     "execution_fence": {
       "type": "integer",
-      "minimum": 1
+      "minimum": 1,
+      "description": "Mathematical bound only; W1 producer bytes MUST also follow the separately pinned NORMATIVE integer-token profile."
     },
     "owner_deletion_epoch": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "description": "Mathematical bound only; W1 producer bytes MUST also follow the separately pinned NORMATIVE integer-token profile."
     },
     "company_id": {
       "type": "string",

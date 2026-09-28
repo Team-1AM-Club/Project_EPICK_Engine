@@ -3,16 +3,19 @@
   "$id": "https://contracts.epick.local/w2/private/v1/source-registration-ack.schema.json",
   "title": "RegistrationAck",
   "description": "W2-owned private direct Source registration ACK. W1 route acceptance remains PENDING; READY is not collection or Job completion.",
+  "$comment": "The W2 producer MUST emit execution_fence, owner_deletion_epoch, and non-null READY policy_revision and approval_rule_revision as canonical unsigned decimal tokens under w1-w2.private.source-registration-json-integer-token.semantic-profile.v1. JSON Schema integer validation alone is insufficient to certify producer bytes.",
   "type": "object",
   "additionalProperties": false,
   "$defs": {
     "PositiveWireInt": {
       "type": "integer",
-      "minimum": 1
+      "minimum": 1,
+      "$comment": "Mathematical bound only; affected W2 producer bytes also require the NORMATIVE integer-token profile."
     },
     "NonNegativeWireInt": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "$comment": "Mathematical bound only; affected W2 producer bytes also require the NORMATIVE integer-token profile."
     },
     "NullableUuid": {
       "oneOf": [

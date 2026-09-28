@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import re
 from copy import deepcopy
 from pathlib import Path
 
@@ -25,6 +26,7 @@ FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
 W1 = FIXTURES / "w1_private_contract"
 ONBOARDING = FIXTURES / "w2_source_onboarding"
 CONTRACTS = Path(__file__).resolve().parents[3] / "contracts" / "w2-private"
+CANONICAL_UNSIGNED_DECIMAL_TOKEN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 
 
 def _codec():
@@ -64,6 +66,22 @@ def _unavailable() -> dict:
     } | {"status": "UNAVAILABLE", "reason_code": "REGISTRATION_NOT_AVAILABLE"}
 
 
+def _raw_json_with_number_token(raw: dict, field: str, token: str) -> str:
+    encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    current_member = f'"{field}":{json.dumps(raw[field])}'
+    replacement = f'"{field}":{token}'
+    assert encoded.count(current_member) == 1
+    return encoded.replace(current_member, replacement, 1)
+
+
+def _assert_exact_json_member(encoded: str, field: str, token: str) -> None:
+    assert f'"{field}":{token},' in encoded or f'"{field}":{token}}}' in encoded
+
+
+def _is_canonical_unsigned_decimal_token(token: str) -> bool:
+    return CANONICAL_UNSIGNED_DECIMAL_TOKEN.fullmatch(token) is not None
+
+
 def test_same_source_different_url_is_not_silently_normalized() -> None:
     raw = _available()
     w1_canonical_url = "https://SYNTHETIC-MERIDIAN-A.TEST/jobs/%ED%94%8C%EB%9E%AB%ED%8F%BC?lang=ko"
@@ -100,6 +118,72 @@ def test_canonical_url_semantic_profile_artifact_is_explicitly_proposed() -> Non
     assert vectors["profile_id"] in profile
     assert "NORMATIVE" in profile
     assert "PROPOSED" in profile
+
+
+def test_json_integer_token_profile_artifact_is_explicitly_proposed() -> None:
+    vectors = _load(ONBOARDING, "json-integer-token-semantic-profile-vector.json")
+    profile_path = CONTRACTS.parents[1] / vectors["profile_path"]
+
+    assert profile_path.is_file(), "normative JSON integer-token profile is missing"
+    profile = profile_path.read_text(encoding="utf-8")
+    assert vectors["profile_id"] in profile
+    assert "NORMATIVE" in profile
+    assert "PROPOSED" in profile
+
+
+def test_producers_and_strict_consumers_match_fixed_json_integer_token_vectors() -> None:
+    codec = _codec()
+    vectors = _load(ONBOARDING, "json-integer-token-semantic-profile-vector.json")
+    lookup_raw = _available()
+    ack_raw = _load(ONBOARDING, "registration-ack-ready.json")
+    expected_fields = {
+        "W1_LOOKUP": {"execution_fence", "owner_deletion_epoch"},
+        "W2_ACK": {
+            "execution_fence",
+            "owner_deletion_epoch",
+            "policy_revision",
+            "approval_rule_revision",
+        },
+    }
+
+    for wire, wire_profile in vectors["wires"].items():
+        schema = _load(CONTRACTS, Path(wire_profile["schema_path"]).name)
+        validator = Draft202012Validator(schema, format_checker=FormatChecker())
+        raw = lookup_raw if wire == "W1_LOOKUP" else ack_raw
+        assert {case["field"] for case in wire_profile["fields"]} == expected_fields[wire]
+
+        for case in wire_profile["fields"]:
+            field = case["field"]
+            accepted_json = _raw_json_with_number_token(raw, field, case["accepted_token"])
+            assert _is_canonical_unsigned_decimal_token(case["accepted_token"])
+            validator.validate(json.loads(accepted_json))
+
+            if wire == "W1_LOOKUP":
+                metadata = codec.parse_registration_metadata(accepted_json, _dispatch())
+                assert getattr(metadata, field) == raw[field]
+            else:
+                ack = codec.RegistrationAck.model_validate_json(accepted_json)
+                _assert_exact_json_member(ack.model_dump_json(), field, case["accepted_token"])
+
+            for noncanonical in case["noncanonical_tokens"]:
+                rejected_token = noncanonical["token"]
+                rejected_json = _raw_json_with_number_token(raw, field, rejected_token)
+                assert not _is_canonical_unsigned_decimal_token(rejected_token)
+                validator.validate(json.loads(rejected_json))
+
+                if noncanonical["strict_consumer"] == "REJECT" and wire == "W1_LOOKUP":
+                    with pytest.raises(W1WireContractError):
+                        codec.parse_registration_metadata(rejected_json, _dispatch())
+                elif noncanonical["strict_consumer"] == "REJECT":
+                    with pytest.raises(ValidationError):
+                        codec.RegistrationAck.model_validate_json(rejected_json)
+                elif wire == "W1_LOOKUP":
+                    metadata = codec.parse_registration_metadata(rejected_json, _dispatch())
+                    assert getattr(metadata, field) == 0
+                else:
+                    ack = codec.RegistrationAck.model_validate_json(rejected_json)
+                    assert getattr(ack, field) == 0
+                    _assert_exact_json_member(ack.model_dump_json(), field, "0")
 
 
 def test_schema_and_semantic_profile_match_fixed_canonical_url_vectors() -> None:

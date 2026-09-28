@@ -1,0 +1,111 @@
+{
+  "schema_version": "w2.test.source-registration-json-integer-token-vectors.v1",
+  "profile_id": "w1-w2.private.source-registration-json-integer-token.semantic-profile.v1",
+  "profile_status": "PROPOSED_UNPINNED",
+  "profile_path": "contracts/w2-private/source-registration-json-integer-token.semantic-profile.proposed.md",
+  "provenance": "Synthetic lexical interoperability vectors; no production identifiers or payloads.",
+  "wires": {
+    "W1_LOOKUP": {
+      "schema_path": "contracts/w2-private/w1-source-registration-lookup.proposed.schema.json",
+      "fields": [
+        {
+          "field": "execution_fence",
+          "accepted_token": "1",
+          "noncanonical_tokens": [
+            {
+              "token": "1.0",
+              "strict_consumer": "REJECT"
+            },
+            {
+              "token": "1e0",
+              "strict_consumer": "REJECT"
+            }
+          ]
+        },
+        {
+          "field": "owner_deletion_epoch",
+          "accepted_token": "0",
+          "noncanonical_tokens": [
+            {
+              "token": "0.0",
+              "strict_consumer": "REJECT"
+            },
+            {
+              "token": "0e0",
+              "strict_consumer": "REJECT"
+            },
+            {
+              "token": "-0",
+              "strict_consumer": "ACCEPT_AS_ZERO"
+            }
+          ]
+        }
+      ]
+    },
+    "W2_ACK": {
+      "schema_path": "contracts/w2-private/source-registration-ack.schema.json",
+      "fields": [
+        {
+          "field": "execution_fence",
+          "accepted_token": "1",
+          "noncanonical_tokens": [
+            {
+              "token": "1.0",
+              "strict_consumer": "REJECT"
+            },
+            {
+              "token": "1e0",
+              "strict_consumer": "REJECT"
+            }
+          ]
+        },
+        {
+          "field": "owner_deletion_epoch",
+          "accepted_token": "0",
+          "noncanonical_tokens": [
+            {
+              "token": "0.0",
+              "strict_consumer": "REJECT"
+            },
+            {
+              "token": "0e0",
+              "strict_consumer": "REJECT"
+            },
+            {
+              "token": "-0",
+              "strict_consumer": "ACCEPT_AS_ZERO"
+            }
+          ]
+        },
+        {
+          "field": "policy_revision",
+          "accepted_token": "7",
+          "noncanonical_tokens": [
+            {
+              "token": "7.0",
+              "strict_consumer": "REJECT"
+            },
+            {
+              "token": "7e0",
+              "strict_consumer": "REJECT"
+            }
+          ]
+        },
+        {
+          "field": "approval_rule_revision",
+          "accepted_token": "3",
+          "noncanonical_tokens": [
+            {
+              "token": "3.0",
+              "strict_consumer": "REJECT"
+            },
+            {
+              "token": "3e0",
+              "strict_consumer": "REJECT"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
