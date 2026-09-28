@@ -1671,6 +1671,25 @@ def apply_private_deletion_v2(
         raise PersistenceConflict("deletion epoch is already bound to another command")
 
     if command.scope.kind == "PROJECT":
+        registration_project_refs = session.scalars(
+            select(SourceRegistrationReceipt.project_ref).where(
+                SourceRegistrationReceipt.authenticated_owner_ref == command.owner_user_id
+            )
+        ).all()
+        for project_ref in registration_project_refs:
+            if project_ref is None:
+                continue
+            try:
+                canonical_project_ref = str(UUID(project_ref))
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ScopeUnclassified(
+                    "Project deletion found owner-private unclassified Source registration"
+                ) from exc
+            if project_ref != canonical_project_ref:
+                raise ScopeUnclassified(
+                    "Project deletion found owner-private unclassified Source registration"
+                )
+
         unknown_rows = (
             session.scalar(
                 select(CollectionAttempt.attempt_id)
@@ -1729,11 +1748,18 @@ def apply_private_deletion_v2(
             PrivateCommitStage.private_scope_kind == "PROJECT",
             PrivateCommitStage.project_id == command.scope.project_id,
         )
+        registration_scope = and_(
+            SourceRegistrationReceipt.authenticated_owner_ref == command.owner_user_id,
+            SourceRegistrationReceipt.project_ref == str(command.scope.project_id),
+        )
     else:
         attempt_scope = CollectionAttempt.owner_user_id == command.owner_user_id
         deduplication_scope = RequestDeduplication.owner_user_id == command.owner_user_id
         runtime_scope = CollectionRuntimeAttempt.owner_ref == command.owner_user_id
         stage_scope = PrivateCommitStage.owner_ref == command.owner_user_id
+        registration_scope = (
+            SourceRegistrationReceipt.authenticated_owner_ref == command.owner_user_id
+        )
 
     stage_ids = select(PrivateCommitStage.command_id).where(stage_scope)
     retained_stage_ids = select(PrivateCommitStage.command_id).where(
@@ -1782,6 +1808,15 @@ def apply_private_deletion_v2(
     session.execute(delete(CollectionAttempt).where(attempt_scope))
     session.execute(delete(RequestDeduplication).where(deduplication_scope))
     session.execute(delete(CollectionRuntimeAttempt).where(runtime_scope))
+    registration_command_ids = select(SourceRegistrationReceipt.command_id).where(
+        registration_scope
+    )
+    session.execute(
+        delete(SourceRegistrationAckOutbox).where(
+            SourceRegistrationAckOutbox.command_id.in_(registration_command_ids)
+        )
+    )
+    session.execute(delete(SourceRegistrationReceipt).where(registration_scope))
 
     owner_state.latest_epoch = command.deletion_epoch
     if command.scope.kind == "ACCOUNT":

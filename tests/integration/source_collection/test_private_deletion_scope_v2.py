@@ -54,6 +54,8 @@ from epick_engine.source_collection.persistence import (
     Source,
     SourceObservation,
     SourcePolicyDecision,
+    SourceRegistrationAckOutbox,
+    SourceRegistrationReceipt,
     SourceVersion,
 )
 from epick_engine.source_collection.private_deletion_v2 import (
@@ -163,6 +165,8 @@ class _InventoryIds:
     ack_id: UUID | None = None
     receipt_operation_id: UUID | None = None
     inbox_id: UUID | None = None
+    registration_command_id: UUID | None = None
+    registration_ack_message_id: UUID | None = None
 
 
 @dataclass
@@ -337,6 +341,7 @@ def _add_private_inventory(
     label: str,
     parents: tuple[str, ...] = ("attempt", "deduplication", "runtime", "stage"),
     stage_children: bool = False,
+    registration: bool = False,
 ) -> _InventoryIds:
     attempt_id = uuid4() if "attempt" in parents else None
     deduplication_id = uuid4() if "deduplication" in parents else None
@@ -346,6 +351,8 @@ def _add_private_inventory(
     ack_id = uuid4() if stage_children else None
     receipt_operation_id = uuid4() if stage_children else None
     inbox_id = uuid4() if stage_children else None
+    registration_command_id = uuid4() if registration or "registration" in parents else None
+    registration_ack_message_id = uuid4() if registration_command_id is not None else None
 
     if attempt_id is not None:
         session.add(
@@ -477,6 +484,46 @@ def _add_private_inventory(
                     ),
                 ]
             )
+    if registration_command_id is not None:
+        assert registration_ack_message_id is not None
+        registration_project_ref = (
+            None
+            if kind == "ACCOUNT"
+            else str(project_id)
+            if kind == "PROJECT" and project_id is not None
+            else f"unclassified:{label}"
+        )
+        session.add(
+            SourceRegistrationReceipt(
+                command_id=registration_command_id,
+                job_id=uuid4(),
+                authenticated_owner_ref=owner_user_id,
+                project_ref=registration_project_ref,
+                company_id=public.company_id,
+                source_id=public.source_id,
+                execution_fence=1,
+                owner_deletion_epoch=0,
+                registration_digest="1" * 64,
+                status="HELD",
+                reason_code="POLICY_RULE_MISSING",
+                policy_revision=None,
+                approval_rule_id=None,
+                approval_rule_revision=None,
+                created_at=NOW,
+            )
+        )
+        session.flush()
+        session.add(
+            SourceRegistrationAckOutbox(
+                ack_message_id=registration_ack_message_id,
+                command_id=registration_command_id,
+                payload={"private": label},
+                delivery_state="PENDING",
+                created_at=NOW,
+                delivered_at=None,
+                ack_confirmed_at=None,
+            )
+        )
     return _InventoryIds(
         attempt_id=attempt_id,
         deduplication_id=deduplication_id,
@@ -486,6 +533,8 @@ def _add_private_inventory(
         ack_id=ack_id,
         receipt_operation_id=receipt_operation_id,
         inbox_id=inbox_id,
+        registration_command_id=registration_command_id,
+        registration_ack_message_id=registration_ack_message_id,
     )
 
 
@@ -669,6 +718,21 @@ def _private_snapshot(session: Session, owner_user_id: UUID) -> dict[str, object
                 .order_by(PrivateCommitStage.command_id)
             )
         ),
+        "registration_receipts": tuple(
+            session.scalars(
+                select(SourceRegistrationReceipt.command_id)
+                .where(SourceRegistrationReceipt.authenticated_owner_ref == owner_user_id)
+                .order_by(SourceRegistrationReceipt.command_id)
+            )
+        ),
+        "registration_acks": tuple(
+            session.scalars(
+                select(SourceRegistrationAckOutbox.ack_message_id)
+                .join(SourceRegistrationReceipt)
+                .where(SourceRegistrationReceipt.authenticated_owner_ref == owner_user_id)
+                .order_by(SourceRegistrationAckOutbox.ack_message_id)
+            )
+        ),
         "owner_state": session.execute(
             select(
                 PrivateDeletionOwnerState.latest_epoch,
@@ -700,7 +764,7 @@ def _private_snapshot(session: Session, owner_user_id: UUID) -> dict[str, object
 
 
 def _ids_exist(session: Session, ids: _InventoryIds) -> dict[str, bool]:
-    return {
+    rows = {
         "attempt": ids.attempt_id is not None
         and session.get(CollectionAttempt, ids.attempt_id) is not None,
         "deduplication": ids.deduplication_id is not None
@@ -717,6 +781,15 @@ def _ids_exist(session: Session, ids: _InventoryIds) -> dict[str, bool]:
         "inbox": ids.inbox_id is not None
         and session.get(PrivateCommitGateInbox, ids.inbox_id) is not None,
     }
+    if ids.registration_command_id is not None:
+        rows["registration_receipt"] = (
+            session.get(SourceRegistrationReceipt, ids.registration_command_id) is not None
+        )
+    if ids.registration_ack_message_id is not None:
+        rows["registration_ack"] = (
+            session.get(SourceRegistrationAckOutbox, ids.registration_ack_message_id) is not None
+        )
+    return rows
 
 
 def _wait_for_postgres_lock(database_engine: Engine, backend_pid: int) -> None:
@@ -1030,7 +1103,9 @@ def test_0013_preserves_existing_v2_receipts_as_unconfirmed(
 
 
 @pytest.mark.approved_postgres
-@pytest.mark.parametrize("unknown_parent", ["attempt", "deduplication", "runtime", "stage"])
+@pytest.mark.parametrize(
+    "unknown_parent", ["attempt", "deduplication", "runtime", "stage", "registration"]
+)
 def test_v2_project_deletion_rolls_back_on_any_unclassified_owner_row(
     session_factory: sessionmaker[Session],
     unknown_parent: str,
@@ -1097,6 +1172,7 @@ def test_v2_project_deletion_isolates_projects_owners_and_removes_ackless_stages
             project_id=PROJECT_A,
             public=public,
             label="owner-a-project-a",
+            registration=True,
         )
         same_owner_other_project = _add_private_inventory(
             session,
@@ -1106,6 +1182,7 @@ def test_v2_project_deletion_isolates_projects_owners_and_removes_ackless_stages
             public=public,
             label="owner-a-project-b",
             stage_children=True,
+            registration=True,
         )
         foreign_owner = _add_private_inventory(
             session,
@@ -1115,6 +1192,7 @@ def test_v2_project_deletion_isolates_projects_owners_and_removes_ackless_stages
             public=public,
             label="owner-b-project",
             stage_children=True,
+            registration=True,
         )
 
     callback = _PrivateDeletionAckCallbackV2()
@@ -1257,6 +1335,7 @@ def test_v2_account_deletion_preserves_other_owner_and_public_history(
             project_id=None,
             public=public,
             label="owner-a-account",
+            registration=True,
         )
         owner_a_project = _add_private_inventory(
             session,
@@ -1265,6 +1344,7 @@ def test_v2_account_deletion_preserves_other_owner_and_public_history(
             project_id=PROJECT_A,
             public=public,
             label="owner-a-project",
+            registration=True,
         )
         owner_a_unknown = _add_private_inventory(
             session,
@@ -1273,6 +1353,7 @@ def test_v2_account_deletion_preserves_other_owner_and_public_history(
             project_id=PROJECT_B,
             public=public,
             label="owner-a-unknown",
+            registration=True,
         )
         owner_b = _add_private_inventory(
             session,
@@ -1282,6 +1363,7 @@ def test_v2_account_deletion_preserves_other_owner_and_public_history(
             public=public,
             label="owner-b-account",
             stage_children=True,
+            registration=True,
         )
 
     ack = _process_v2(
