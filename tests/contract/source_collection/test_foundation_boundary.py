@@ -62,6 +62,15 @@ def test_ct15_contract_mentions_t067_schema_and_forward_head() -> None:
     normalized_document = " ".join(document.split())
 
     assert "0013_deletion_ack_confirmed" in normalized_document
+    assert (
+        "current CT15 preflight requires exactly one Alembic head, "
+        "`0014_source_onboarding`" in normalized_document
+    )
+    assert (
+        "Current preflight and deployment instructions require the exact "
+        "`0014_source_onboarding` head" in normalized_document
+    )
+    assert "A W1 operator applies Alembic through `0014_source_onboarding`" in normalized_document
     assert "W1_LOOKUP_ENDPOINT" in normalized_document
     assert "W1_LOOKUP_BEARER" in normalized_document
     assert "W1_LOOKUP_CA_FILE" in normalized_document

@@ -1,13 +1,17 @@
 # W2 CT15 runtime — local implementation / deployment pending
 
-2026-09-27 private-authority runtime correction: current CT15 preflight requires
-exactly one Alembic head, `0013_deletion_ack_confirmed`. Revisions `0005`
-through `0011` are forward-migration starting points only, not CT15
-runtime-ready heads. The `0011` migration retains only the original ACK control
-graph needed for exact historical replay after private payload deletion, and
-`0012` binds each retained ACK to the digest of its original canonical JSON wire.
-Preflight rejects older, unknown, multiple, and duplicate heads before it reads
-any queue metadata. The metadata-only preflight does not grant runtime authority.
+2026-09-28 source-onboarding exact-head correction: current CT15 preflight requires
+exactly one Alembic head, `0014_source_onboarding`. Revisions `0005` through
+`0013` are forward-migration starting points only, not CT15 runtime-ready heads.
+The predecessor `0013_deletion_ack_confirmed` was the exact head for the
+2026-09-27 private-authority runtime snapshot; it remains required migration
+history, not a current runtime-ready alternative. The `0011` migration retains
+only the original ACK control graph needed for exact historical replay after
+private payload deletion, and `0012` binds each retained ACK to the digest of its
+original canonical JSON wire. Preflight rejects older, unknown, multiple, and
+duplicate heads before it reads any queue metadata. The metadata-only preflight
+does not grant runtime authority. W1 lookup/ACK integration and Task 6 runtime
+activation remain **PENDING**.
 
 2026-09-20 follow-up: [B1 scoped inspection and transport controls](ct15-b1-controls.md)
 supersedes the historical missing-harness explanation below. The new W1 action
@@ -95,7 +99,7 @@ historical 0008 CT15 observation must not be presented as current READY evidence
 
 Everything in this section is a dated historical snapshot, not current operator
 guidance. Current preflight and deployment instructions require the exact
-`0013_deletion_ack_confirmed` head described above and under Operator
+`0014_source_onboarding` head described above and under Operator
 commands.
 
 T095 local-service update (2026-09-20): full regression is now **1286 passed,
@@ -243,15 +247,18 @@ rendering Compose with secret interpolation into saved logs.
 
 Run from the Engine checkout with `uv run --no-sync epick-w2-ct15 <action>`, or
 the image entrypoint with the same action.
-A W1 operator applies Alembic through `0013_deletion_ack_confirmed` to the
-approved W2 DB before starting the runtime. Revisions `0004` through `0011` are
+A W1 operator applies Alembic through `0014_source_onboarding` to the approved W2
+DB before starting the runtime. Revisions `0004` through `0013` are
 forward-migration starting points, not runtime-ready heads. Preflight never
 migrates the database.
 
 The `0011` to `0012` rollout requires a coordinated stop: stop every W2 writer
-and relay, apply and verify the digest backfill at the exact new head, then
-restart the new binaries. Mixed-version or online writes during this migration
-are unsupported.
+and relay, apply the digest backfill, then continue the ordered Alembic upgrade
+through `0013_deletion_ack_confirmed` and `0014_source_onboarding`. Verify both
+the digest backfill and the exact `0014_source_onboarding` head before restarting
+the current binaries. Starting them at the intermediate `0013` head,
+mixed-version execution, or online writes during this migration are unsupported.
+W1 lookup/ACK integration and Task 6 runtime activation remain **PENDING**.
 
 | Action | Behavior |
 | --- | --- |
@@ -314,11 +321,13 @@ counts and W2's counts; neither side's local result substitutes for the other.
   account/Project validation remain incomplete.
 - Revisions `0006_source_restriction`, `0007_restriction_receipt`, and
   `0008_collection_runtime`, `0009_private_deletion_receipt`, and
-  `0010_private_deletion_scope_v2` are migration history below the required 0011
-  head, not future migrations or runtime-ready alternatives.
-- No current 0011 deployed-image digest or deployment evidence has been
-  independently verified. The prior W1-reported 0008 image evidence does not
-  establish current READY at 0011.
+  `0010_private_deletion_scope_v2`, `0011_private_ack_control_retention`,
+  `0012_private_ack_wire_digest`, and `0013_deletion_ack_confirmed` are migration
+  history below the required `0014_source_onboarding` head, not future migrations
+  or runtime-ready alternatives.
+- No current `0014_source_onboarding` deployed-image digest or deployment
+  evidence has been independently verified. The prior W1-reported 0008 image
+  evidence does not establish current READY at `0014_source_onboarding`.
 - W3 deployment, retention/monitoring policy and full-app/W4 integration remain
   separate responsibilities and are not completed by these local tests.
 
