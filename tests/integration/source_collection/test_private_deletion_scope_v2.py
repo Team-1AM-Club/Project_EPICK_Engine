@@ -342,6 +342,7 @@ def _add_private_inventory(
     parents: tuple[str, ...] = ("attempt", "deduplication", "runtime", "stage"),
     stage_children: bool = False,
     registration: bool = False,
+    registration_project_ref_override: str | None = None,
 ) -> _InventoryIds:
     attempt_id = uuid4() if "attempt" in parents else None
     deduplication_id = uuid4() if "deduplication" in parents else None
@@ -486,13 +487,15 @@ def _add_private_inventory(
             )
     if registration_command_id is not None:
         assert registration_ack_message_id is not None
-        registration_project_ref = (
-            None
-            if kind == "ACCOUNT"
-            else str(project_id)
-            if kind == "PROJECT" and project_id is not None
-            else f"unclassified:{label}"
-        )
+        registration_project_ref = registration_project_ref_override
+        if registration_project_ref is None:
+            registration_project_ref = (
+                None
+                if kind == "ACCOUNT"
+                else str(project_id)
+                if kind == "PROJECT" and project_id is not None
+                else f"unclassified:{label}"
+            )
         session.add(
             SourceRegistrationReceipt(
                 command_id=registration_command_id,
@@ -1104,11 +1107,24 @@ def test_0013_preserves_existing_v2_receipts_as_unconfirmed(
 
 @pytest.mark.approved_postgres
 @pytest.mark.parametrize(
-    "unknown_parent", ["attempt", "deduplication", "runtime", "stage", "registration"]
+    ("unknown_parent", "registration_project_ref_override"),
+    [
+        pytest.param("attempt", None, id="attempt"),
+        pytest.param("deduplication", None, id="deduplication"),
+        pytest.param("runtime", None, id="runtime"),
+        pytest.param("stage", None, id="stage"),
+        pytest.param("registration", None, id="registration-malformed"),
+        pytest.param(
+            "registration",
+            f"{{{PROJECT_B}}}",
+            id="registration-noncanonical-uuid",
+        ),
+    ],
 )
 def test_v2_project_deletion_rolls_back_on_any_unclassified_owner_row(
     session_factory: sessionmaker[Session],
     unknown_parent: str,
+    registration_project_ref_override: str | None,
 ) -> None:
     callback = _PrivateDeletionAckCallbackV2()
     command = _command(kind="PROJECT", project_id=PROJECT_A)
@@ -1137,6 +1153,7 @@ def test_v2_project_deletion_rolls_back_on_any_unclassified_owner_row(
             public=public,
             label=f"unknown-{unknown_parent}",
             parents=(unknown_parent,),
+            registration_project_ref_override=registration_project_ref_override,
         )
     with session_factory() as session:
         before = _private_snapshot(session, OWNER_A)
