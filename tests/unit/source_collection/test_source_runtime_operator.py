@@ -189,7 +189,7 @@ def _queue_attributes(*, arn_name: str, encrypted: bool = True, dlq: bool = True
     return attributes
 
 
-def _engine(*, revisions: tuple[str, ...] = ("0013_deletion_ack_confirmed",)) -> MagicMock:
+def _engine(*, revisions: tuple[str, ...] = ("0014_source_onboarding",)) -> MagicMock:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
     connection.scalar.return_value = "epick"
@@ -370,13 +370,14 @@ def test_preflight_accepts_numeric_or_string_redrive_max_receive_count(
         pytest.param(("0010_private_deletion_scope_v2",), id="pre-ack-retention-head"),
         pytest.param(("0011_private_ack_control_retention",), id="pre-ack-digest-head"),
         pytest.param(("0012_private_ack_wire_digest",), id="pre-deletion-ack-head"),
+        pytest.param(("0013_deletion_ack_confirmed",), id="pre-onboarding-head"),
         pytest.param(("9999_unknown",), id="unknown-head"),
         pytest.param(
-            ("0013_deletion_ack_confirmed", "9999_unknown"),
+            ("0014_source_onboarding", "9999_unknown"),
             id="multiple-heads",
         ),
         pytest.param(
-            ("0013_deletion_ack_confirmed", "0013_deletion_ack_confirmed"),
+            ("0014_source_onboarding", "0014_source_onboarding"),
             id="duplicate-head",
         ),
     ],

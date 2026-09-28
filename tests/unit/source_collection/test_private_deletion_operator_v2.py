@@ -211,7 +211,7 @@ def _engine_with_revisions(*revisions: str) -> MagicMock:
 
 
 def test_preflight_requires_exact_head_before_creating_sqs_client() -> None:
-    engine = _engine_with_revisions("0012_private_ack_wire_digest")
+    engine = _engine_with_revisions("0013_deletion_ack_confirmed")
     created: list[object] = []
 
     with pytest.raises(operator.PrivateDeletionOperatorConfigurationError):
@@ -226,7 +226,7 @@ def test_preflight_requires_exact_head_before_creating_sqs_client() -> None:
 
 
 def test_preflight_accepts_only_exact_head_and_valid_encrypted_dlq_metadata() -> None:
-    engine = _engine_with_revisions("0013_deletion_ack_confirmed")
+    engine = _engine_with_revisions("0014_source_onboarding")
     sqs = FakeSqs()
     callback = MagicMock()
 
@@ -252,7 +252,7 @@ def test_preflight_rejects_invalid_queue_or_dlq_metadata(missing: str) -> None:
 
     with pytest.raises(operator.PrivateDeletionOperatorConfigurationError):
         operator.preflight(
-            _engine_with_revisions("0013_deletion_ack_confirmed"),
+            _engine_with_revisions("0014_source_onboarding"),
             operator.PrivateDeletionOperatorSettings.from_environment(environment()),
             sqs_client_factory=lambda _settings: BadMetadataSqs(),
             ack_client_factory=lambda _settings: MagicMock(),
@@ -266,7 +266,7 @@ def test_preflight_rejects_unloadable_ca_without_receiving_a_message(tmp_path: P
 
     with pytest.raises(operator.PrivateDeletionOperatorConfigurationError):
         operator.preflight(
-            _engine_with_revisions("0013_deletion_ack_confirmed"),
+            _engine_with_revisions("0014_source_onboarding"),
             operator.PrivateDeletionOperatorSettings.from_environment(values),
             sqs_client_factory=lambda _settings: sqs,
         )
@@ -388,7 +388,7 @@ def test_inspect_counts_visible_inflight_messages_and_unconfirmed_receipts() -> 
             )
             return response
 
-    engine = _engine_with_revisions("0013_deletion_ack_confirmed")
+    engine = _engine_with_revisions("0014_source_onboarding")
     engine.connect.return_value.__enter__.return_value.scalar.return_value = 4
     settings = operator.PrivateDeletionOperatorSettings.from_environment(environment())
 
@@ -416,7 +416,7 @@ def test_inspect_rejects_unencrypted_dlq() -> None:
             )
             return response
 
-    engine = _engine_with_revisions("0013_deletion_ack_confirmed")
+    engine = _engine_with_revisions("0014_source_onboarding")
     engine.connect.return_value.__enter__.return_value.scalar.return_value = 0
     with pytest.raises(operator.PrivateDeletionOperatorConfigurationError):
         operator.inspect_counts(

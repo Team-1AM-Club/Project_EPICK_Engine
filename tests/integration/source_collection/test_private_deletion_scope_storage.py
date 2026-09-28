@@ -248,9 +248,7 @@ def test_0010_migrates_private_inventory_and_backfills_legacy_rows(
                 MigrationContext.configure(connection).get_current_revision()
                 == "0010_private_deletion_scope_v2"
             )
-            assert ScriptDirectory.from_config(config).get_heads() == [
-                "0013_deletion_ack_confirmed"
-            ]
+            assert ScriptDirectory.from_config(config).get_heads() == ["0014_source_onboarding"]
 
 
 @pytest.fixture

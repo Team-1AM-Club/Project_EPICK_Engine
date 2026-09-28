@@ -133,6 +133,108 @@ class CompanyRelationship(Base):
     valid_to: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
+class SourceApprovalRuleHead(Base):
+    __tablename__ = "source_approval_rule_heads"
+    __table_args__ = (
+        CheckConstraint("current_revision > 0", name="positive_current_revision"),
+        ForeignKeyConstraint(
+            ["approval_rule_id", "current_revision"],
+            [
+                "source_approval_rule_revisions.approval_rule_id",
+                "source_approval_rule_revisions.revision",
+            ],
+            name="fk_source_approval_rule_heads_current_revision",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
+
+    approval_rule_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    current_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SourceApprovalRuleRevision(Base):
+    __tablename__ = "source_approval_rule_revisions"
+    __table_args__ = (
+        CheckConstraint("revision > 0", name="positive_revision"),
+        CheckConstraint("path_mode IN ('EXACT', 'SEGMENT_PREFIX')", name="valid_path_mode"),
+        CheckConstraint("length(exact_host) > 0", name="nonempty_exact_host"),
+        CheckConstraint("left(path_value, 1) = '/'", name="absolute_path_value"),
+        CheckConstraint("result_version > 0", name="positive_result_version"),
+        CheckConstraint(
+            "official_status IN ('verified', 'unverified', 'rejected')",
+            name="valid_official_status",
+        ),
+        CheckConstraint(
+            "access_class IN ('public', 'restricted', 'unavailable', 'unknown')",
+            name="valid_access_class",
+        ),
+        CheckConstraint(
+            "collection_permission IN ('allowed', 'denied', 'unknown')",
+            name="valid_collection_permission",
+        ),
+        CheckConstraint(
+            "excerpt_storage_permission IN ('allowed', 'denied', 'unknown')",
+            name="valid_excerpt_storage_permission",
+        ),
+        CheckConstraint(
+            "body_storage_permission IN ('allowed', 'denied', 'unknown')",
+            name="valid_body_storage_permission",
+        ),
+        CheckConstraint(
+            "redistribution_permission IN ('allowed', 'denied', 'unknown')",
+            name="valid_redistribution_permission",
+        ),
+        CheckConstraint(
+            "robots_permission IN ('allowed', 'denied', 'unknown')",
+            name="valid_robots_permission",
+        ),
+        ForeignKeyConstraint(
+            ["approval_rule_id"],
+            ["source_approval_rule_heads.approval_rule_id"],
+            name="fk_source_approval_rule_revisions_head",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        Index(
+            "ix_source_approval_rule_revisions_match_scope",
+            "company_id",
+            "source_type",
+            "exact_host",
+        ),
+    )
+
+    approval_rule_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    company_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    company_official_domain: Mapped[str] = mapped_column(Text, nullable=False)
+    company_legal_identifiers: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    company_identity_evidence_refs: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    exact_host: Mapped[str] = mapped_column(Text, nullable=False)
+    path_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    path_value: Mapped[str] = mapped_column(Text, nullable=False)
+    allowed_query_strings: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    official_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    access_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    collection_permission: Mapped[str] = mapped_column(String(16), nullable=False)
+    excerpt_storage_permission: Mapped[str] = mapped_column(String(16), nullable=False)
+    body_storage_permission: Mapped[str] = mapped_column(String(16), nullable=False)
+    redistribution_permission: Mapped[str] = mapped_column(String(16), nullable=False)
+    evidence_refs: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    robots_permission: Mapped[str] = mapped_column(String(16), nullable=False)
+    result_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    language: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    redirect_robots_permissions: Mapped[list[list[str]]] = mapped_column(JSONB, nullable=False)
+    limits: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Source(Base):
     __tablename__ = "sources"
     __table_args__ = (
@@ -285,6 +387,53 @@ class SourcePolicyDecision(Base):
     evidence_refs: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     policy_version: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class SourceRuntimeApproval(Base):
+    __tablename__ = "source_runtime_approvals"
+    __table_args__ = (
+        CheckConstraint("policy_revision > 0", name="positive_policy_revision"),
+        CheckConstraint("result_version > 0", name="positive_result_version"),
+        CheckConstraint(
+            "robots_permission IN ('allowed', 'denied', 'unknown')",
+            name="valid_robots_permission",
+        ),
+        CheckConstraint(
+            "(approval_rule_id IS NULL AND approval_rule_revision IS NULL) OR "
+            "(approval_rule_id IS NOT NULL AND approval_rule_revision IS NOT NULL)",
+            name="complete_rule_binding",
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "policy_revision"],
+            ["source_policy_decisions.source_id", "source_policy_decisions.revision"],
+            name="fk_source_runtime_approvals_policy_revision",
+        ),
+        ForeignKeyConstraint(
+            ["approval_rule_id", "approval_rule_revision"],
+            [
+                "source_approval_rule_revisions.approval_rule_id",
+                "source_approval_rule_revisions.revision",
+            ],
+            name="fk_source_runtime_approvals_rule_revision",
+        ),
+    )
+
+    source_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("sources.source_id", name="fk_source_runtime_approvals_source_id"),
+        primary_key=True,
+    )
+    approval_rule_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=True
+    )
+    approval_rule_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    policy_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    robots_permission: Mapped[str] = mapped_column(String(16), nullable=False)
+    result_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    language: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    redirect_robots_permissions: Mapped[list[list[str]]] = mapped_column(JSONB, nullable=False)
+    limits: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class SourceVersion(Base):
@@ -1174,6 +1323,115 @@ class PrivateDeletionOwnerState(Base):
         default=False,
         server_default=text("false"),
         nullable=False,
+    )
+
+
+class SourceRegistrationReceipt(Base):
+    __tablename__ = "source_registration_receipts"
+    __table_args__ = (
+        CheckConstraint("execution_fence > 0", name="positive_execution_fence"),
+        CheckConstraint("owner_deletion_epoch >= 0", name="nonnegative_owner_deletion_epoch"),
+        CheckConstraint(
+            "registration_digest ~ '^[0-9a-f]{64}$'",
+            name="registration_digest_format",
+        ),
+        CheckConstraint(
+            "status IN ('READY', 'HELD', 'REJECTED')",
+            name="valid_status",
+        ),
+        CheckConstraint(
+            "(status = 'READY' AND reason_code = 'APPROVED' "
+            "AND policy_revision IS NOT NULL AND approval_rule_id IS NOT NULL "
+            "AND approval_rule_revision IS NOT NULL) OR "
+            "(status = 'HELD' AND reason_code IN "
+            "('POLICY_RULE_MISSING', 'COMPANY_UNVERIFIED', "
+            "'URL_NORMALIZATION_MISMATCH', 'UNSUPPORTED_SOURCE_TYPE') "
+            "AND policy_revision IS NULL AND approval_rule_id IS NULL "
+            "AND approval_rule_revision IS NULL) OR "
+            "(status = 'REJECTED' AND reason_code IN "
+            "('SOURCE_ID_CONFLICT', 'CANONICAL_URL_CONFLICT', "
+            "'EXPLICIT_POLICY_DENIAL') AND policy_revision IS NULL "
+            "AND approval_rule_id IS NULL AND approval_rule_revision IS NULL)",
+            name="valid_result_shape",
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "policy_revision"],
+            ["source_policy_decisions.source_id", "source_policy_decisions.revision"],
+            name="fk_source_registration_receipts_policy_revision",
+        ),
+        ForeignKeyConstraint(
+            ["approval_rule_id", "approval_rule_revision"],
+            [
+                "source_approval_rule_revisions.approval_rule_id",
+                "source_approval_rule_revisions.revision",
+            ],
+            name="fk_source_registration_receipts_rule_revision",
+        ),
+        Index(
+            "ix_source_registration_receipts_owner_project",
+            "authenticated_owner_ref",
+            "project_ref",
+        ),
+    )
+
+    command_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    job_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    authenticated_owner_ref: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(
+            "private_deletion_owner_states.owner_user_id",
+            name="fk_source_registration_receipts_owner_state",
+        ),
+        nullable=False,
+    )
+    project_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    company_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    source_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    execution_fence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    owner_deletion_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    registration_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    approval_rule_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=True
+    )
+    approval_rule_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SourceRegistrationAckOutbox(Base):
+    __tablename__ = "source_registration_ack_outbox"
+    __table_args__ = (
+        UniqueConstraint("command_id", name="uq_source_registration_ack_outbox_command_id"),
+        CheckConstraint(
+            "delivery_state IN ('PENDING', 'DELIVERED')",
+            name="valid_delivery_state",
+        ),
+        Index(
+            "ix_source_registration_ack_outbox_delivery_created",
+            "delivery_state",
+            "created_at",
+            "ack_message_id",
+        ),
+    )
+
+    ack_message_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    command_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(
+            "source_registration_receipts.command_id",
+            name="fk_source_registration_ack_outbox_command_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    delivery_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ack_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

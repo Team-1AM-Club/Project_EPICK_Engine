@@ -175,11 +175,11 @@ def test_sdk_errors_do_not_expose_payload_or_receipt() -> None:
     assert caught.value.__suppress_context__
 
 
-def test_preflight_accepts_only_deletion_ack_confirmation_migration_head() -> None:
+def test_preflight_accepts_only_source_onboarding_migration_head() -> None:
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0013_deletion_ack_confirmed"]
-    connection.scalars.return_value.all.return_value = ["0013_deletion_ack_confirmed"]
+    connection.scalar.side_effect = ["epick_ct15", "0014_source_onboarding"]
+    connection.scalars.return_value.all.return_value = ["0014_source_onboarding"]
     sdk = FakeSqs()
     result = preflight(engine, sdk, Ct15Settings.from_environment(environment()))
     assert result["status"] == "PREFLIGHT_PASSED"
@@ -199,10 +199,11 @@ def test_preflight_accepts_only_deletion_ack_confirmation_migration_head() -> No
         ("0010_private_deletion_scope_v2",),
         ("0011_private_ack_control_retention",),
         ("0012_private_ack_wire_digest",),
+        ("0013_deletion_ack_confirmed",),
         (),
         ("9999_unknown",),
-        ("0013_deletion_ack_confirmed", "9999_unknown"),
-        ("0013_deletion_ack_confirmed", "0013_deletion_ack_confirmed"),
+        ("0014_source_onboarding", "9999_unknown"),
+        ("0014_source_onboarding", "0014_source_onboarding"),
     ],
 )
 def test_preflight_does_not_claim_readiness_for_incompatible_migration(
@@ -229,8 +230,8 @@ def test_preflight_rejects_nonisolated_unencrypted_or_no_dlq_queue(bad_attribute
 
     engine = MagicMock()
     connection = engine.connect.return_value.__enter__.return_value
-    connection.scalar.side_effect = ["epick_ct15", "0013_deletion_ack_confirmed"]
-    connection.scalars.return_value.all.return_value = ["0013_deletion_ack_confirmed"]
+    connection.scalar.side_effect = ["epick_ct15", "0014_source_onboarding"]
+    connection.scalars.return_value.all.return_value = ["0014_source_onboarding"]
     with pytest.raises(Ct15ConfigurationError):
         preflight(engine, BadQueue(), Ct15Settings.from_environment(environment()))
 

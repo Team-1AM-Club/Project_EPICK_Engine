@@ -61,7 +61,7 @@ from epick_engine.source_collection.persistence import (
 pytestmark = pytest.mark.approved_postgres
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_HEAD = "0013_deletion_ack_confirmed"
+MIGRATION_HEAD = "0014_source_onboarding"
 
 
 @pytest.fixture

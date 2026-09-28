@@ -58,7 +58,7 @@ _QUEUE_ARN = re.compile(
     r"^arn:(?P<partition>aws(?:-us-gov|-cn)?):sqs:(?P<region>[a-z0-9-]+):"
     r"(?P<account>[0-9]{12}):(?P<name>[A-Za-z0-9_-]+)$"
 )
-_MIGRATION_HEAD = "0013_deletion_ack_confirmed"
+_MIGRATION_HEAD = "0014_source_onboarding"
 _RUNTIME_CONFIG_PATH = "/run/epick/source-runtime/config.json"
 _LOOKUP_CA_PATH = "/run/epick/source-runtime/w1-ca.pem"
 _STATIC_AWS_CONFIGURATION = frozenset(

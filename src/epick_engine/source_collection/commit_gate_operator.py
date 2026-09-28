@@ -57,7 +57,7 @@ from epick_engine.source_collection.w1_transport import _parse_wire
 
 _ROLE_ID = re.compile(r"AROA[A-Z0-9]{17}")
 _STATES = ("STAGED", "PREPARED", "FINALIZED", "ABORTED", "PURGED")
-_MIGRATION_HEAD = "0013_deletion_ack_confirmed"
+_MIGRATION_HEAD = "0014_source_onboarding"
 
 
 class Ct15ConfigurationError(ValueError):
