@@ -124,14 +124,25 @@ def _query_is_allowed(candidate: str, approved: tuple[str, ...]) -> bool:
     return candidate in approved
 
 
-def _company_legal_identifier_refs(company: Company) -> frozenset[str]:
+def _company_legal_identifier_refs(company: Company) -> frozenset[str] | None:
+    stored: object = company.legal_identifiers
+    if not isinstance(stored, Mapping):
+        return None
     refs: set[str] = set()
-    for kind, raw in company.legal_identifiers.items():
+    for kind, raw in stored.items():
+        if not isinstance(kind, str) or not kind.strip() or kind != kind.strip() or ":" in kind:
+            return None
         values = raw if isinstance(raw, list) else [raw]
+        if not values:
+            return None
         for value in values:
-            if isinstance(value, (str, int)) and not isinstance(value, bool):
-                refs.add(f"{kind}:{value}")
-    return frozenset(refs)
+            if not isinstance(value, (str, int)) or isinstance(value, bool):
+                return None
+            rendered = str(value)
+            if not rendered.strip() or rendered != rendered.strip():
+                return None
+            refs.add(f"{kind}:{rendered}")
+    return frozenset(refs) if refs else None
 
 
 def _version(row: SourceApprovalRuleRevision) -> ApprovedRuleVersion:
@@ -221,8 +232,12 @@ def match_approved_rule(
     )
     matched: list[SourceApprovalRuleRevision] = []
     for row in session.scalars(statement):
+        try:
+            row_official_domain = normalize_company_domain(row.company_official_domain)
+        except (AttributeError, TypeError, ValueError):
+            return None
         if (
-            normalize_company_domain(row.company_official_domain) == official_domain
+            row_official_domain == official_domain
             and frozenset(row.company_legal_identifiers)
             == frozenset(metadata.company_legal_identifiers)
             and frozenset(row.company_identity_evidence_refs)
@@ -313,13 +328,16 @@ def load_source_runtime_approval(
         )
     except (ValidationError, ValueError, TypeError):
         return None
+    legal_identifier_refs = _company_legal_identifier_refs(company)
+    if legal_identifier_refs is None:
+        return None
     if (
         canonical_url != source.canonical_url
         or parts.port not in (None, 443)
         or parts.hostname != rule.exact_host
         or source.source_type != rule.source_type
         or rule_official_domain not in official_domains
-        or frozenset(rule.company_legal_identifiers) != _company_legal_identifier_refs(company)
+        or frozenset(rule.company_legal_identifiers) != legal_identifier_refs
         or frozenset(rule.company_identity_evidence_refs) != frozenset(company.identity_evidence)
         or not _path_matches(parts.path or "/", rule.path_value, mode=rule.path_mode)
         or not _query_is_allowed(parts.query, tuple(rule.allowed_query_strings))
