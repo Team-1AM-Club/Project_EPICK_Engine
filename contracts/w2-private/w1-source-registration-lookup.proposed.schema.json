@@ -50,12 +50,18 @@
     "company_official_domain": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+      "not": {
+        "pattern": "(?:^\\s|\\s$)"
+      }
     },
     "company_legal_name": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+      "not": {
+        "pattern": "(?:^\\s|\\s$)"
+      }
     },
     "company_legal_identifiers": {
       "type": "array",
@@ -63,7 +69,10 @@
       "items": {
         "type": "string",
         "minLength": 1,
-        "pattern": "^[^\\s:](?:[^:]*[^\\s:])?:\\S(?:[\\s\\S]*\\S)?$"
+        "pattern": "^[^\\s:](?:[^:]*[^\\s:])?:\\S(?:[\\s\\S]*\\S)?$",
+        "not": {
+          "pattern": "(?:^\\s|\\s$)"
+        }
       }
     },
     "company_identity_evidence_refs": {
@@ -72,7 +81,10 @@
       "items": {
         "type": "string",
         "minLength": 1,
-        "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        "pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+        "not": {
+          "pattern": "(?:^\\s|\\s$)"
+        }
       }
     },
     "reason_code": {

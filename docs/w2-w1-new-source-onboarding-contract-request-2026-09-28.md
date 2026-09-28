@@ -39,7 +39,7 @@ READY는 등록 수락일 뿐 수집 또는 Job 완료가 아니다. W2가 ACK �
 
 `registration_digest`는 AVAILABLE의 `company_id`, `source_id`, `canonical_url`, `w1_source_type`, `registration_input_version`, `company_official_domain`, `company_legal_name`, `company_legal_identifiers`, `company_identity_evidence_refs`만 포함한다. UUID는 소문자 정규형, 두 배열은 중복 제거 후 사전순이며, object key를 재귀 정렬한 공백 없는 UTF-8 JSON(`ensure_ascii=false`)의 SHA-256 소문자 hex다.
 
-- `contracts/w2-private/w1-source-registration-lookup.proposed.schema.json`: `8e878e15a9aa2594e50dfa6cd0a627e7c03cb3be0eced4ae92541ea2d2b2a07e`
+- `contracts/w2-private/w1-source-registration-lookup.proposed.schema.json`: `6a9ffc3ea78d4a61339a412ac2ca793d14972452016c3cdba0d83a30d2dfdd51`
 - `tests/fixtures/w2_source_onboarding/registration-digest-vector.json`: `7ea018356f86c9bb866611db5ec07c906d87ed4980cd32fbbb083a3455493582`
 - `tests/fixtures/w2_source_onboarding/registration-ack-ready.json`: `9aa6bb1d73b019e4cb9ba2ec18c46a7d3a422bfec98c2847def4469d897bef37`
 - fixture의 `.test` URL, UUID, 식별정보와 근거 참조는 모두 합성이며 실제 owner·기업·URL·비밀값이 아니다.

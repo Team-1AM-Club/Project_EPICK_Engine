@@ -154,7 +154,7 @@ def test_available_rejects_empty_company_legal_name() -> None:
 
 
 @pytest.mark.parametrize("field", ["company_official_domain", "company_legal_name"])
-@pytest.mark.parametrize("value", [" \t", " leading", "trailing "])
+@pytest.mark.parametrize("value", [" \t", " leading", "trailing ", "\nleading", "trailing\n"])
 def test_available_rejects_ambiguous_company_identity_scalar_whitespace(
     field: str, value: str
 ) -> None:
@@ -166,7 +166,7 @@ def test_available_rejects_ambiguous_company_identity_scalar_whitespace(
 
 
 @pytest.mark.parametrize("field", ["company_legal_identifiers", "company_identity_evidence_refs"])
-@pytest.mark.parametrize("value", [" \t", " leading", "trailing "])
+@pytest.mark.parametrize("value", [" \t", " leading", "trailing ", "\nleading", "trailing\n"])
 def test_available_rejects_ambiguous_company_identity_list_item_whitespace(
     field: str, value: str
 ) -> None:
@@ -394,13 +394,13 @@ def test_proposed_lookup_schema_matches_model_and_status_shapes() -> None:
     assert list(validator.iter_errors(invalid_available))
 
     for field in ("company_official_domain", "company_legal_name"):
-        for value in (" \t", " leading", "trailing "):
+        for value in (" \t", " leading", "trailing ", "\nleading", "trailing\n"):
             invalid_available = _available()
             invalid_available[field] = value
             assert list(validator.iter_errors(invalid_available))
 
     for field in ("company_legal_identifiers", "company_identity_evidence_refs"):
-        for value in (" \t", " leading", "trailing "):
+        for value in (" \t", " leading", "trailing ", "\nleading", "trailing\n"):
             invalid_available = _available()
             invalid_available[field] = [*invalid_available[field], value]
             assert list(validator.iter_errors(invalid_available))
