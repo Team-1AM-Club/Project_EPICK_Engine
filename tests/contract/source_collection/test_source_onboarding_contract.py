@@ -64,12 +64,13 @@ def _unavailable() -> dict:
 
 def test_same_source_different_url_is_not_silently_normalized() -> None:
     raw = _available()
-    raw["canonical_url"] = (
-        "https://SYNTHETIC-MERIDIAN-A.TEST/jobs/%ED%94%8C%EB%9E%AB%ED%8F%BC?lang=ko"
-    )
+    w1_canonical_url = "https://SYNTHETIC-MERIDIAN-A.TEST/jobs/%ED%94%8C%EB%9E%AB%ED%8F%BC?lang=ko"
+    raw["canonical_url"] = w1_canonical_url
 
-    with pytest.raises(W1WireContractError):
-        _codec().parse_registration_metadata(raw, _dispatch())
+    metadata = _codec().parse_registration_metadata(raw, _dispatch())
+
+    assert metadata.canonical_url == w1_canonical_url
+    assert metadata.model_dump(mode="json")["canonical_url"] == w1_canonical_url
 
 
 def test_available_metadata_is_strict_and_bound_to_the_dispatch() -> None:
