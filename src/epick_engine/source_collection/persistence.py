@@ -398,11 +398,6 @@ class SourceRuntimeApproval(Base):
             "robots_permission IN ('allowed', 'denied', 'unknown')",
             name="valid_robots_permission",
         ),
-        CheckConstraint(
-            "(approval_rule_id IS NULL AND approval_rule_revision IS NULL) OR "
-            "(approval_rule_id IS NOT NULL AND approval_rule_revision IS NOT NULL)",
-            name="complete_rule_binding",
-        ),
         ForeignKeyConstraint(
             ["source_id", "policy_revision"],
             ["source_policy_decisions.source_id", "source_policy_decisions.revision"],
@@ -423,10 +418,8 @@ class SourceRuntimeApproval(Base):
         ForeignKey("sources.source_id", name="fk_source_runtime_approvals_source_id"),
         primary_key=True,
     )
-    approval_rule_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), nullable=True
-    )
-    approval_rule_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    approval_rule_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    approval_rule_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     policy_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     robots_permission: Mapped[str] = mapped_column(String(16), nullable=False)
     result_version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -2160,6 +2153,20 @@ def lock_source_policy_scope(session: Session, source_id: UUID) -> Source:
     return source
 
 
+def _source_policy_payload(decision: SourcePolicyDecision) -> tuple[object, ...]:
+    return (
+        decision.official_status,
+        decision.access_class,
+        decision.collection_permission,
+        decision.excerpt_storage_permission,
+        decision.body_storage_permission,
+        decision.redistribution_permission,
+        tuple(decision.evidence_refs),
+        decision.checked_at,
+        decision.policy_version,
+    )
+
+
 def append_source_policy_decision(
     session: Session,
     decision: SourcePolicyDecision,
@@ -2168,6 +2175,25 @@ def append_source_policy_decision(
     session.add(decision)
     session.flush()
     return decision
+
+
+def append_or_reuse_source_policy_decision(
+    session: Session,
+    decision: SourcePolicyDecision,
+) -> SourcePolicyDecision:
+    """Append a changed policy or reuse the latest identical snapshot under the Source lock."""
+
+    lock_source_policy_scope(session, decision.source_id)
+    latest = session.scalar(
+        select(SourcePolicyDecision)
+        .where(SourcePolicyDecision.source_id == decision.source_id)
+        .order_by(SourcePolicyDecision.revision.desc())
+        .limit(1)
+    )
+    if latest is not None and _source_policy_payload(latest) == _source_policy_payload(decision):
+        return latest
+    decision.revision = 1 if latest is None else latest.revision + 1
+    return append_source_policy_decision(session, decision)
 
 
 def _restriction_snapshot(

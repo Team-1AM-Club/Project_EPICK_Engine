@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from epick_engine.source_collection.contracts import SourceType
 from epick_engine.source_collection.persistence import (
+    Company,
+    Source,
     SourceApprovalRuleHead,
     SourceApprovalRuleRevision,
     SourcePolicyDecision,
@@ -35,6 +38,9 @@ from epick_engine.source_collection.source_runtime_input import (
 from epick_engine.source_collection.w1_transport import W1WireContractError
 
 type PathMode = Literal["EXACT", "SEGMENT_PREFIX"]
+
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_MAX_PATH_DECODE_PASSES = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +89,27 @@ class ApprovedRuleMatch:
         return self.rule.revision
 
 
+def _path_has_safe_structure(path: str) -> bool:
+    decoded = path
+    for _ in range(_MAX_PATH_DECODE_PASSES):
+        if (
+            _INVALID_PERCENT_ESCAPE.search(decoded)
+            or "\\" in decoded
+            or any(segment in {".", ".."} for segment in decoded.split("/"))
+        ):
+            return False
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            return True
+        if next_decoded.count("/") != decoded.count("/"):
+            return False
+        decoded = next_decoded
+    return False
+
+
 def _path_matches(candidate: str, approved: str, *, mode: str) -> bool:
+    if not _path_has_safe_structure(candidate) or not _path_has_safe_structure(approved):
+        return False
     if mode == "EXACT":
         return candidate == approved
     if mode != "SEGMENT_PREFIX":
@@ -96,6 +122,16 @@ def _path_matches(candidate: str, approved: str, *, mode: str) -> bool:
 
 def _query_is_allowed(candidate: str, approved: tuple[str, ...]) -> bool:
     return candidate in approved
+
+
+def _company_legal_identifier_refs(company: Company) -> frozenset[str]:
+    refs: set[str] = set()
+    for kind, raw in company.legal_identifiers.items():
+        values = raw if isinstance(raw, list) else [raw]
+        for value in values:
+            if isinstance(value, (str, int)) and not isinstance(value, bool):
+                refs.add(f"{kind}:{value}")
+    return frozenset(refs)
 
 
 def _version(row: SourceApprovalRuleRevision) -> ApprovedRuleVersion:
@@ -207,30 +243,21 @@ def load_source_runtime_approval(
     session: Session,
     source_id: UUID,
 ) -> RuntimeSourceConfig | None:
-    """Load only a current per-Source approval; legacy unbound rows remain readable."""
+    """Load only a current approval exactly bound to its Source, policy, and rule."""
 
+    source = session.scalar(
+        select(Source)
+        .where(Source.source_id == source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if source is None:
+        return None
     row = session.get(SourceRuntimeApproval, source_id)
     if row is None:
         return None
-    latest_policy_revision = session.scalar(
-        select(func.max(SourcePolicyDecision.revision)).where(
-            SourcePolicyDecision.source_id == source_id
-        )
-    )
-    if latest_policy_revision != row.policy_revision:
-        return None
-    if row.approval_rule_id is not None:
-        current = session.scalar(
-            select(SourceApprovalRuleHead.approval_rule_id).where(
-                SourceApprovalRuleHead.approval_rule_id == row.approval_rule_id,
-                SourceApprovalRuleHead.current_revision == row.approval_rule_revision,
-                SourceApprovalRuleHead.is_active.is_(True),
-            )
-        )
-        if current is None:
-            return None
     try:
-        return RuntimeSourceConfig.model_validate(
+        runtime = RuntimeSourceConfig.model_validate(
             {
                 "policy_revision": row.policy_revision,
                 "robots_permission": row.robots_permission,
@@ -242,3 +269,84 @@ def load_source_runtime_approval(
         )
     except (ValidationError, ValueError, TypeError):
         raise SourceRuntimeInputError("stored source runtime approval is invalid") from None
+
+    company = session.get(Company, source.company_id)
+    if company is None or company.identity_status != "verified":
+        return None
+
+    rule = session.scalar(
+        select(SourceApprovalRuleRevision)
+        .join(
+            SourceApprovalRuleHead,
+            and_(
+                SourceApprovalRuleHead.approval_rule_id
+                == SourceApprovalRuleRevision.approval_rule_id,
+                SourceApprovalRuleHead.current_revision == SourceApprovalRuleRevision.revision,
+            ),
+        )
+        .where(
+            SourceApprovalRuleRevision.approval_rule_id == row.approval_rule_id,
+            SourceApprovalRuleRevision.revision == row.approval_rule_revision,
+            SourceApprovalRuleHead.is_active.is_(True),
+        )
+        .with_for_update(of=SourceApprovalRuleHead)
+    )
+    if rule is None or source.company_id != rule.company_id:
+        return None
+
+    try:
+        official_domains = frozenset(
+            normalize_company_domain(domain) for domain in company.official_domains
+        )
+        rule_official_domain = normalize_company_domain(rule.company_official_domain)
+        canonical_url = canonicalize_source_url(source.canonical_url)
+        parts = urlsplit(canonical_url)
+        rule_runtime = RuntimeSourceConfig.model_validate(
+            {
+                "policy_revision": row.policy_revision,
+                "robots_permission": rule.robots_permission,
+                "result_version": rule.result_version,
+                "language": rule.language,
+                "redirect_robots_permissions": rule.redirect_robots_permissions,
+                "limits": rule.limits,
+            }
+        )
+    except (ValidationError, ValueError, TypeError):
+        return None
+    if (
+        canonical_url != source.canonical_url
+        or parts.port not in (None, 443)
+        or parts.hostname != rule.exact_host
+        or source.source_type != rule.source_type
+        or rule_official_domain not in official_domains
+        or frozenset(rule.company_legal_identifiers) != _company_legal_identifier_refs(company)
+        or frozenset(rule.company_identity_evidence_refs) != frozenset(company.identity_evidence)
+        or not _path_matches(parts.path or "/", rule.path_value, mode=rule.path_mode)
+        or not _query_is_allowed(parts.query, tuple(rule.allowed_query_strings))
+        or runtime != rule_runtime
+    ):
+        return None
+
+    policy = session.scalar(
+        select(SourcePolicyDecision)
+        .where(SourcePolicyDecision.source_id == source_id)
+        .order_by(SourcePolicyDecision.revision.desc())
+        .limit(1)
+    )
+    if policy is None or policy.revision != row.policy_revision:
+        return None
+    if any(
+        (
+            policy.official_status != rule.official_status,
+            policy.access_class != rule.access_class,
+            policy.collection_permission != rule.collection_permission,
+            policy.excerpt_storage_permission != rule.excerpt_storage_permission,
+            policy.body_storage_permission != rule.body_storage_permission,
+            policy.redistribution_permission != rule.redistribution_permission,
+            tuple(policy.evidence_refs) != tuple(rule.evidence_refs),
+            policy.checked_at != rule.checked_at,
+            policy.policy_version != rule.policy_version,
+        )
+    ):
+        return None
+    return runtime

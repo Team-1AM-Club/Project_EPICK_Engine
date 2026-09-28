@@ -4,15 +4,16 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Thread
 from uuid import UUID, uuid4
 
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import Engine, create_engine, func, select, text
+from sqlalchemy import Engine, create_engine, func, inspect, select, text
 from sqlalchemy.engine import URL
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from epick_engine.source_collection.contracts import SourceType
@@ -26,6 +27,7 @@ from epick_engine.source_collection.persistence import (
     SourcePolicyDecision,
     SourceRegistrationReceipt,
     SourceRuntimeApproval,
+    append_or_reuse_source_policy_decision,
 )
 from epick_engine.source_collection.source_onboarding_contracts import RegistrationMetadata
 from epick_engine.source_collection.source_onboarding_policy import (
@@ -287,9 +289,9 @@ def _add_source_policy(session: Session) -> SourcePolicyDecision:
             legal_name="Synthetic Company",
             aliases=[],
             official_domains=["company.test"],
-            legal_identifiers={"kind": "synthetic"},
+            legal_identifiers={"corp": str(COMPANY_A)},
             identity_status="verified",
-            identity_evidence=["evidence:company"],
+            identity_evidence=[f"evidence:{COMPANY_A}"],
         )
     )
     session.add(
@@ -318,12 +320,12 @@ def _add_source_policy(session: Session) -> SourcePolicyDecision:
     return decision
 
 
-def _add_runtime_approval(session: Session, *, legacy: bool = False) -> None:
+def _add_runtime_approval(session: Session) -> None:
     session.add(
         SourceRuntimeApproval(
             source_id=SOURCE_ID,
-            approval_rule_id=None if legacy else RULE_A,
-            approval_rule_revision=None if legacy else 1,
+            approval_rule_id=RULE_A,
+            approval_rule_revision=1,
             policy_revision=1,
             robots_permission="allowed",
             result_version=1,
@@ -336,7 +338,7 @@ def _add_runtime_approval(session: Session, *, legacy: bool = False) -> None:
 
 
 @pytest.mark.approved_postgres
-def test_runtime_approval_loads_bound_and_legacy_rows_but_not_absence_or_revocation(
+def test_runtime_approval_loads_bound_row_but_not_absence_or_revocation(
     session_factory: sessionmaker[Session],
 ) -> None:
     with session_factory.begin() as session:
@@ -351,11 +353,115 @@ def test_runtime_approval_loads_bound_and_legacy_rows_but_not_absence_or_revocat
         session.get(SourceApprovalRuleHead, RULE_A).is_active = False  # type: ignore[union-attr]
     with session_factory.begin() as session:
         assert load_source_runtime_approval(session, SOURCE_ID) is None
-        session.delete(session.get(SourceRuntimeApproval, SOURCE_ID))  # type: ignore[arg-type]
-        _add_runtime_approval(session, legacy=True)
+
+
+@pytest.mark.approved_postgres
+def test_runtime_approval_requires_rule_binding(
+    session_factory: sessionmaker[Session],
+) -> None:
     with session_factory.begin() as session:
-        legacy = load_source_runtime_approval(session, SOURCE_ID)
-        assert legacy is not None and legacy.result_version == 1
+        _add_source_policy(session)
+    with pytest.raises(IntegrityError):
+        with session_factory.begin() as session:
+            session.add(
+                SourceRuntimeApproval(
+                    source_id=SOURCE_ID,
+                    approval_rule_id=None,
+                    approval_rule_revision=None,
+                    policy_revision=1,
+                    robots_permission="allowed",
+                    result_version=1,
+                    language="ko",
+                    redirect_robots_permissions=[],
+                    limits=_limits(),
+                    updated_at=NOW,
+                )
+            )
+
+
+@pytest.mark.approved_postgres
+def test_runtime_approval_denies_cross_company_rule_binding(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory.begin() as session:
+        _add_source_policy(session)
+        _add_rule(session)
+        _add_runtime_approval(session)
+        session.add(
+            Company(
+                company_id=COMPANY_B,
+                legal_name="Other Company",
+                aliases=[],
+                official_domains=["company.test"],
+                legal_identifiers={"corp": str(COMPANY_B)},
+                identity_status="verified",
+                identity_evidence=[f"evidence:{COMPANY_B}"],
+            )
+        )
+        source = session.get(Source, SOURCE_ID)
+        assert source is not None
+        source.company_id = COMPANY_B
+    with session_factory.begin() as session:
+        assert load_source_runtime_approval(session, SOURCE_ID) is None
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("canonical_url", "https://careers.company.test/admin"),
+        ("source_type", SourceType.COMPANY_WEBSITE.value),
+    ],
+    ids=["url", "source-type"],
+)
+def test_runtime_approval_denies_source_url_or_type_outside_rule(
+    session_factory: sessionmaker[Session], field: str, value: str
+) -> None:
+    with session_factory.begin() as session:
+        _add_source_policy(session)
+        _add_rule(session)
+        _add_runtime_approval(session)
+        source = session.get(Source, SOURCE_ID)
+        assert source is not None
+        setattr(source, field, value)
+    with session_factory.begin() as session:
+        assert load_source_runtime_approval(session, SOURCE_ID) is None
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("evidence_refs", ["policy:other"]),
+        ("collection_permission", "denied"),
+    ],
+    ids=["evidence", "policy"],
+)
+def test_runtime_approval_denies_policy_or_evidence_outside_rule(
+    session_factory: sessionmaker[Session], field: str, value: object
+) -> None:
+    with session_factory.begin() as session:
+        decision = _add_source_policy(session)
+        _add_rule(session)
+        _add_runtime_approval(session)
+        setattr(decision, field, value)
+    with session_factory.begin() as session:
+        assert load_source_runtime_approval(session, SOURCE_ID) is None
+
+
+@pytest.mark.approved_postgres
+def test_runtime_approval_denies_limits_wider_than_bound_rule(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory.begin() as session:
+        _add_source_policy(session)
+        _add_rule(session)
+        _add_runtime_approval(session)
+        approval = session.get(SourceRuntimeApproval, SOURCE_ID)
+        assert approval is not None
+        approval.limits = {**_limits(), "max_response_bytes": 2_097_152}
+    with session_factory.begin() as session:
+        assert load_source_runtime_approval(session, SOURCE_ID) is None
 
 
 @pytest.mark.approved_postgres
@@ -401,6 +507,118 @@ def test_two_owner_receipts_share_one_source_policy_revision(
             )
             == 1
         )
+
+
+@pytest.mark.approved_postgres
+def test_concurrent_duplicate_policy_candidates_reuse_one_source_revision(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory.begin() as session:
+        session.add(
+            Company(
+                company_id=COMPANY_A,
+                legal_name="Synthetic Company",
+                aliases=[],
+                official_domains=["company.test"],
+                legal_identifiers={"corp": str(COMPANY_A)},
+                identity_status="verified",
+                identity_evidence=[f"evidence:{COMPANY_A}"],
+            )
+        )
+        session.add(
+            Source(
+                source_id=SOURCE_ID,
+                company_id=COMPANY_A,
+                source_type=SourceType.JOB_POSTING.value,
+                canonical_url="https://careers.company.test/jobs",
+            )
+        )
+
+    first_wrote = Event()
+    release_first = Event()
+    second_started = Event()
+    second_finished = Event()
+    errors: list[BaseException] = []
+    returned_ids: list[UUID] = []
+
+    def candidate() -> SourcePolicyDecision:
+        return SourcePolicyDecision(
+            policy_decision_id=uuid4(),
+            source_id=SOURCE_ID,
+            revision=1,
+            official_status="verified",
+            access_class="public",
+            collection_permission="allowed",
+            excerpt_storage_permission="allowed",
+            body_storage_permission="denied",
+            redistribution_permission="denied",
+            evidence_refs=["policy:evidence"],
+            checked_at=NOW,
+            policy_version="policy-v1",
+        )
+
+    def first_write() -> None:
+        try:
+            with session_factory.begin() as session:
+                returned_ids.append(
+                    append_or_reuse_source_policy_decision(
+                        session,
+                        candidate(),
+                    ).policy_decision_id
+                )
+                first_wrote.set()
+                if not release_first.wait(timeout=10):
+                    raise TimeoutError("test did not release first policy transaction")
+        except BaseException as error:
+            errors.append(error)
+            first_wrote.set()
+
+    def second_write() -> None:
+        second_started.set()
+        try:
+            with session_factory.begin() as session:
+                returned_ids.append(
+                    append_or_reuse_source_policy_decision(
+                        session,
+                        candidate(),
+                    ).policy_decision_id
+                )
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            second_finished.set()
+
+    first = Thread(target=first_write)
+    second = Thread(target=second_write)
+    first.start()
+    try:
+        assert first_wrote.wait(timeout=10)
+        assert not errors
+        second.start()
+        assert second_started.wait(timeout=10)
+        assert not second_finished.wait(timeout=0.3)
+        release_first.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
+    finally:
+        release_first.set()
+        first.join(timeout=10)
+        if second.ident is not None:
+            second.join(timeout=10)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert not errors
+    assert len(returned_ids) == 2
+    assert returned_ids[0] == returned_ids[1]
+    with session_factory.begin() as session:
+        decisions = list(
+            session.scalars(
+                select(SourcePolicyDecision).where(SourcePolicyDecision.source_id == SOURCE_ID)
+            )
+        )
+        assert len(decisions) == 1
+        assert decisions[0].revision == 1
 
 
 @pytest.mark.approved_postgres
@@ -560,3 +778,33 @@ def test_0013_to_0014_preserves_existing_source_and_private_receipt(
             assert MigrationContext.configure(connection).get_current_revision() == (
                 "0014_source_onboarding"
             )
+
+
+@pytest.mark.approved_postgres
+def test_0014_requires_rule_bound_runtime_rows_and_denies_revision_mutation(
+    approved_postgres_url: URL,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _migration_schema(approved_postgres_url, monkeypatch) as (engine, config):
+        alembic_command.upgrade(config, "0014_source_onboarding")
+
+        runtime_columns = {
+            column["name"]: column
+            for column in inspect(engine).get_columns("source_runtime_approvals")
+        }
+        assert runtime_columns["approval_rule_id"]["nullable"] is False
+        assert runtime_columns["approval_rule_revision"]["nullable"] is False
+
+        with Session(engine) as session, session.begin():
+            _add_rule(session)
+
+        for statement in (
+            "UPDATE source_approval_rule_revisions SET policy_version = 'mutated' ",
+            "DELETE FROM source_approval_rule_revisions ",
+        ):
+            with pytest.raises(DBAPIError, match="approval rule revisions are immutable"):
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(statement + "WHERE approval_rule_id = :rule_id AND revision = 1"),
+                        {"rule_id": RULE_A},
+                    )

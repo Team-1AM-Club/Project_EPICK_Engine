@@ -130,12 +130,33 @@ def upgrade() -> None:
         deferrable=True,
         initially="DEFERRED",
     )
+    op.execute(
+        """
+        CREATE FUNCTION epick_deny_source_approval_rule_revision_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'source approval rule revisions are immutable'
+                USING ERRCODE = '55000';
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER source_approval_rule_revisions_immutable
+        BEFORE UPDATE OR DELETE ON source_approval_rule_revisions
+        FOR EACH ROW
+        EXECUTE FUNCTION epick_deny_source_approval_rule_revision_mutation()
+        """
+    )
 
     op.create_table(
         "source_runtime_approvals",
         sa.Column("source_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("approval_rule_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("approval_rule_revision", sa.Integer(), nullable=True),
+        sa.Column("approval_rule_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("approval_rule_revision", sa.Integer(), nullable=False),
         sa.Column("policy_revision", sa.Integer(), nullable=False),
         sa.Column("robots_permission", sa.String(length=16), nullable=False),
         sa.Column("result_version", sa.Integer(), nullable=False),
@@ -152,11 +173,6 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "robots_permission IN ('allowed', 'denied', 'unknown')",
             name=op.f("ck_source_runtime_approvals_valid_robots_permission"),
-        ),
-        sa.CheckConstraint(
-            "(approval_rule_id IS NULL AND approval_rule_revision IS NULL) OR "
-            "(approval_rule_id IS NOT NULL AND approval_rule_revision IS NOT NULL)",
-            name=op.f("ck_source_runtime_approvals_complete_rule_binding"),
         ),
         sa.ForeignKeyConstraint(
             ["source_id"], ["sources.source_id"], name="fk_source_runtime_approvals_source_id"

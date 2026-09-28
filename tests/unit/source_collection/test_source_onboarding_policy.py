@@ -25,6 +25,27 @@ def test_exact_path_does_not_match_a_descendant() -> None:
     assert not _path_matches("/jobs/1", "/jobs", mode="EXACT")
 
 
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "/jobs/../admin",
+        "/jobs/%2e%2e/admin",
+        "/jobs%2fadmin",
+        "/jobs/%2fadmin",
+        "/jobs/%252e%252e/admin",
+    ],
+    ids=[
+        "dot-segment",
+        "encoded-dot-segment",
+        "encoded-separator",
+        "encoded-descendant-separator",
+        "double-encoded-dot",
+    ],
+)
+def test_segment_prefix_denies_ambiguous_or_encoded_path_structure(candidate: str) -> None:
+    assert not _path_matches(candidate, "/jobs", mode="SEGMENT_PREFIX")
+
+
 def test_query_is_denied_until_the_exact_form_is_approved() -> None:
     assert not _query_is_allowed("", ())
     assert _query_is_allowed("", ("",))
