@@ -90,6 +90,48 @@ def test_available_rejects_non_https_or_malformed_canonical_url(canonical_url: s
         _codec().parse_registration_metadata(raw, _dispatch())
 
 
+@pytest.mark.parametrize(
+    "canonical_url",
+    [
+        "not-a-url",
+        "ftp://synthetic.invalid/source",
+        "https://synthetic-user:synthetic-password@synthetic-meridian-a.test/jobs",
+        f"https://{'a' * 64}.test/jobs",
+    ],
+)
+def test_proposed_schema_and_model_reject_invalid_canonical_url(
+    canonical_url: str,
+) -> None:
+    raw = _available()
+    raw["canonical_url"] = canonical_url
+    schema = _load(CONTRACTS, "w1-source-registration-lookup.proposed.schema.json")
+    validator = Draft202012Validator(schema)
+
+    with pytest.raises(W1WireContractError):
+        _codec().parse_registration_metadata(raw, _dispatch())
+    assert list(validator.iter_errors(raw))
+
+
+@pytest.mark.parametrize(
+    "canonical_url",
+    [
+        "HTTPS://SYNTHETIC-MERIDIAN-A.TEST/jobs/%ED%94%8C%EB%9E%AB%ED%8F%BC?lang=ko",
+        "https://[2001:db8::1]:443/jobs/platform-engineer?opening=101#apply",
+        "https://합성기업.test/jobs/platform-engineer",
+    ],
+)
+def test_proposed_schema_accepts_model_valid_https_bytes(canonical_url: str) -> None:
+    raw = _available()
+    raw["canonical_url"] = canonical_url
+    schema = _load(CONTRACTS, "w1-source-registration-lookup.proposed.schema.json")
+    validator = Draft202012Validator(schema)
+
+    metadata = _codec().parse_registration_metadata(raw, _dispatch())
+    validator.validate(raw)
+
+    assert metadata.canonical_url == canonical_url
+
+
 def test_available_metadata_is_strict_and_bound_to_the_dispatch() -> None:
     raw = _available()
     metadata = _codec().parse_registration_metadata(raw, _dispatch())
@@ -201,10 +243,25 @@ def test_available_legal_identifier_value_may_contain_colons_without_rewriting()
     raw = _available()
     identifier = "registration_number:KR:SYNTHETIC:01"
     raw["company_legal_identifiers"] = [identifier]
+    schema = _load(CONTRACTS, "w1-source-registration-lookup.proposed.schema.json")
+    validator = Draft202012Validator(schema)
 
     metadata = _codec().parse_registration_metadata(raw, _dispatch())
+    validator.validate(raw)
 
     assert metadata.company_legal_identifiers == [identifier]
+
+
+@pytest.mark.parametrize("field", ["company_legal_identifiers", "company_identity_evidence_refs"])
+def test_proposed_schema_and_model_reject_empty_identity_array(field: str) -> None:
+    raw = _available()
+    raw[field] = []
+    schema = _load(CONTRACTS, "w1-source-registration-lookup.proposed.schema.json")
+    validator = Draft202012Validator(schema)
+
+    with pytest.raises(W1WireContractError):
+        _codec().parse_registration_metadata(raw, _dispatch())
+    assert list(validator.iter_errors(raw))
 
 
 @pytest.mark.parametrize(

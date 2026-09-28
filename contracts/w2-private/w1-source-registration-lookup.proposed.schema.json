@@ -37,7 +37,20 @@
     },
     "canonical_url": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]://(?:\\[[0-9A-Fa-f:.]+\\]|[^\\s@:/?#]+)(?::[0-9]+)?(?:[/?#]|$)",
+      "allOf": [
+        {
+          "not": {
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]://[^/?#]*@"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]://(?:[^/?#]*\\.)?[^./:?#]{64,}(?:\\.|:|/|\\?|#|$)"
+          }
+        }
+      ]
     },
     "w1_source_type": {
       "type": "string",
