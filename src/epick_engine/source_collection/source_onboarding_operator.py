@@ -573,7 +573,7 @@ class LegacyImportSummary:
 def _company_legal_identifier_refs(company: Company) -> tuple[str, ...] | None:
     refs: set[str] = set()
     for kind, raw in company.legal_identifiers.items():
-        if not isinstance(kind, str) or not kind.strip() or kind != kind.strip():
+        if not isinstance(kind, str) or not kind.strip() or kind != kind.strip() or ":" in kind:
             return None
         values = raw if isinstance(raw, list) else [raw]
         if not values:

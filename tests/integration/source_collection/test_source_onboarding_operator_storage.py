@@ -392,6 +392,7 @@ def test_v1_user_config_cannot_enable_source_without_w2_policy_evidence(
         {"corp": ["synthetic-legal-id", "\t"]},
         {" corp": "synthetic-legal-id"},
         {"corp": "synthetic-legal-id "},
+        {"corp:division": "synthetic-legal-id"},
     ],
 )
 def test_v1_import_leaves_malformed_legal_identifiers_disabled(
