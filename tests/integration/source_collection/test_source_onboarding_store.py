@@ -651,6 +651,42 @@ def test_existing_company_identifier_kind_with_colon_is_held_without_public_muta
 
 
 @pytest.mark.approved_postgres
+def test_existing_company_identifier_with_empty_extra_kind_is_held_without_public_mutation(
+    session_factory: sessionmaker[Session],
+) -> None:
+    dispatch = _dispatch()
+    legal_identifiers = ["corp:sub:x"]
+    with session_factory.begin() as session:
+        session.add(
+            Company(
+                company_id=COMPANY_A,
+                legal_name="Synthetic Company A Ltd.",
+                aliases=[],
+                official_domains=["synthetic.test"],
+                legal_identifiers={"corp": "sub:x", "unused": []},
+                identity_status="verified",
+                identity_evidence=[f"evidence:{COMPANY_A}"],
+            )
+        )
+        _add_rule(session, legal_identifiers=legal_identifiers)
+        ack = _register(
+            session,
+            dispatch,
+            _metadata(dispatch, legal_identifiers=legal_identifiers),
+        )
+
+    assert ack.status == "HELD"
+    assert ack.reason_code == "COMPANY_UNVERIFIED"
+    with session_factory.begin() as session:
+        company = session.get(Company, COMPANY_A)
+        assert company is not None
+        assert company.legal_identifiers == {"corp": "sub:x", "unused": []}
+        assert session.scalar(select(func.count()).select_from(Source)) == 0
+        assert session.scalar(select(func.count()).select_from(SourcePolicyDecision)) == 0
+        assert session.scalar(select(func.count()).select_from(SourceRuntimeApproval)) == 0
+
+
+@pytest.mark.approved_postgres
 def test_existing_company_integer_identifier_preserves_legacy_exact_match(
     session_factory: sessionmaker[Session],
 ) -> None:

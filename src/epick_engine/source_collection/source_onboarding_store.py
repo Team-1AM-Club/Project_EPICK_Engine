@@ -239,6 +239,8 @@ def _company_identifier_refs(company: Company) -> frozenset[str] | None:
         if not isinstance(kind, str) or not kind or kind != kind.strip() or ":" in kind:
             return None
         values = raw if isinstance(raw, list) else [raw]
+        if not values:
+            return None
         for value in values:
             if isinstance(value, bool):
                 return None
