@@ -73,6 +73,22 @@ def test_same_source_different_url_is_not_silently_normalized() -> None:
     assert metadata.model_dump(mode="json")["canonical_url"] == w1_canonical_url
 
 
+@pytest.mark.parametrize(
+    "canonical_url",
+    [
+        "mailto:x@synthetic.invalid",
+        "ftp://synthetic.invalid/source",
+        "not-a-url",
+    ],
+)
+def test_available_rejects_non_https_or_malformed_canonical_url(canonical_url: str) -> None:
+    raw = _available()
+    raw["canonical_url"] = canonical_url
+
+    with pytest.raises(W1WireContractError):
+        _codec().parse_registration_metadata(raw, _dispatch())
+
+
 def test_available_metadata_is_strict_and_bound_to_the_dispatch() -> None:
     raw = _available()
     metadata = _codec().parse_registration_metadata(raw, _dispatch())

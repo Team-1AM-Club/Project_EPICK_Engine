@@ -15,6 +15,7 @@ from uuid import UUID
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from epick_engine.source_collection.contracts import ContractModel, SourceType
+from epick_engine.source_collection.service import canonicalize_source_url
 from epick_engine.source_collection.w1_transport import (
     NonNegativeWireInt,
     PositiveWireInt,
@@ -101,6 +102,10 @@ class RegistrationMetadata(ContractModel):
                 or not self.company_identity_evidence_refs
             ):
                 raise ValueError("AVAILABLE requires non-empty approval input")
+            try:
+                canonicalize_source_url(self.canonical_url)
+            except ValueError:
+                raise ValueError("AVAILABLE requires a valid HTTPS URL") from None
         elif (
             present_available
             or "reason_code" not in self.model_fields_set
