@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
 from epick_engine.source_collection.contracts import SourceType
-from epick_engine.source_collection.source_onboarding_operator import ApprovedRuleManifest
+from epick_engine.source_collection.source_onboarding_operator import (
+    _MAX_INPUT_BYTES,
+    ApprovedRuleManifest,
+    SourceOnboardingOperatorError,
+    _read_bounded,
+)
 
 NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
 RULE_ID = UUID("00000000-0000-4000-8000-00000000c301")
@@ -77,6 +86,43 @@ def test_manifest_rejects_absent_operator_evidence(field: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "field",
+    [
+        "company_legal_identifiers",
+        "company_identity_evidence_refs",
+        "evidence_refs",
+    ],
+)
+def test_manifest_rejects_whitespace_only_identity_or_evidence(field: str) -> None:
+    payload = _manifest_payload()
+    payload[field] = [" \t "]
+
+    with pytest.raises(ValidationError):
+        ApprovedRuleManifest.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [":synthetic", "corp:   ", " corp:synthetic", "corp:synthetic "],
+)
+def test_manifest_rejects_blank_legal_identifier_parts(identifier: str) -> None:
+    payload = _manifest_payload()
+    payload["company_legal_identifiers"] = [identifier]
+
+    with pytest.raises(ValidationError):
+        ApprovedRuleManifest.model_validate(payload)
+
+
+def test_manifest_preserves_a_legal_identifier_with_colons_inside_the_value() -> None:
+    payload = _manifest_payload()
+    payload["company_legal_identifiers"] = ["corp:synthetic:division"]
+
+    manifest = ApprovedRuleManifest.model_validate(payload)
+
+    assert manifest.company_legal_identifiers == ("corp:synthetic:division",)
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("exact_host", "*.company.test"),
@@ -101,3 +147,40 @@ def test_manifest_accepts_complete_exact_synthetic_scope() -> None:
     assert manifest.exact_host == "careers.company.test"
     assert manifest.path_value == "/jobs"
     assert manifest.allowed_query_strings == ("team=engineering",)
+
+
+def test_manifest_can_explicitly_approve_an_absent_query_string() -> None:
+    payload = _manifest_payload()
+    payload["allowed_query_strings"] = [""]
+
+    manifest = ApprovedRuleManifest.model_validate(payload)
+
+    assert manifest.allowed_query_strings == ("",)
+
+
+class _BoundedGrowingInputStream(BytesIO):
+    def read(self, size: int = -1) -> bytes:
+        assert size == _MAX_INPUT_BYTES + 1
+        return super().read(size)
+
+
+class _InputThatGrowsAfterMetadataCheck:
+    def is_file(self) -> bool:
+        return True
+
+    def stat(self) -> SimpleNamespace:
+        return SimpleNamespace(st_size=1)
+
+    def read_bytes(self) -> bytes:
+        return b"x" * (_MAX_INPUT_BYTES + 1)
+
+    def open(self, mode: str) -> BytesIO:
+        assert mode == "rb"
+        return _BoundedGrowingInputStream(b"x" * (_MAX_INPUT_BYTES + 1))
+
+
+def test_bounded_input_rejects_content_that_grows_after_metadata_check() -> None:
+    changing_input = cast(Path, _InputThatGrowsAfterMetadataCheck())
+
+    with pytest.raises(SourceOnboardingOperatorError):
+        _read_bounded(changing_input)

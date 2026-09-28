@@ -243,6 +243,32 @@ class ApprovedRuleManifest(BaseModel):
             raise ValueError("manifest list values must be unique")
         return value
 
+    @field_validator(
+        "company_legal_identifiers",
+        "company_identity_evidence_refs",
+        "evidence_refs",
+    )
+    @classmethod
+    def require_nonblank_identity_and_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not item.strip() for item in value):
+            raise ValueError("manifest identity and evidence values must be nonblank")
+        return value
+
+    @field_validator("company_legal_identifiers")
+    @classmethod
+    def require_legal_identifier_parts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for identifier in value:
+            kind, separator, identifier_value = identifier.partition(":")
+            if (
+                not separator
+                or not kind.strip()
+                or kind != kind.strip()
+                or not identifier_value.strip()
+                or identifier_value != identifier_value.strip()
+            ):
+                raise ValueError("company legal identifier kind and value must be nonblank")
+        return value
+
     @field_validator("company_official_domain", "exact_host")
     @classmethod
     def require_exact_hostname(cls, value: str) -> str:
@@ -544,14 +570,22 @@ class LegacyImportSummary:
     disabled_pending_evidence: int
 
 
-def _company_legal_identifier_refs(company: Company) -> tuple[str, ...]:
+def _company_legal_identifier_refs(company: Company) -> tuple[str, ...] | None:
     refs: set[str] = set()
     for kind, raw in company.legal_identifiers.items():
+        if not isinstance(kind, str) or not kind.strip() or kind != kind.strip():
+            return None
         values = raw if isinstance(raw, list) else [raw]
+        if not values:
+            return None
         for value in values:
-            if isinstance(value, (str, int)) and not isinstance(value, bool):
-                refs.add(f"{kind}:{value}")
-    return tuple(sorted(refs))
+            if not isinstance(value, (str, int)) or isinstance(value, bool):
+                return None
+            rendered = str(value)
+            if not rendered.strip() or rendered != rendered.strip():
+                return None
+            refs.add(f"{kind}:{rendered}")
+    return tuple(sorted(refs)) if refs else None
 
 
 def _nonempty_strings(values: Sequence[object]) -> bool:
@@ -726,11 +760,13 @@ def _reject_nonfinite_number(_value: str) -> NoReturn:
 
 def _read_bounded(path: Path) -> bytes:
     try:
-        if not path.is_file() or path.stat().st_size > _MAX_INPUT_BYTES:
-            raise ValueError
-        return path.read_bytes()
+        with path.open("rb") as stream:
+            raw = stream.read(_MAX_INPUT_BYTES + 1)
     except OSError:
         raise SourceOnboardingOperatorError("operator input is unavailable") from None
+    if len(raw) > _MAX_INPUT_BYTES:
+        raise SourceOnboardingOperatorError("operator input exceeds the size limit")
+    return raw
 
 
 def _parse_manifest(raw: bytes) -> ApprovedRuleManifest:

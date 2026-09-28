@@ -106,6 +106,7 @@ def _metadata(url: str) -> RegistrationMetadata:
         canonical_url=url,
         w1_source_type="JOB_POSTING",
         registration_input_version="input-v1",
+        company_legal_name="Synthetic Company",
         company_official_domain="company.test",
         company_legal_identifiers=["corp:synthetic-legal-id"],
         company_identity_evidence_refs=["company-evidence:synthetic"],
@@ -178,14 +179,21 @@ def _migrated_schema(
         admin_engine.dispose()
 
 
-def _add_legacy_source(session: Session, *, policy_evidence: bool = True) -> None:
+def _add_legacy_source(
+    session: Session,
+    *,
+    policy_evidence: bool = True,
+    legal_identifiers: dict[str, object] | None = None,
+) -> None:
     session.add(
         Company(
             company_id=COMPANY_ID,
             legal_name="Synthetic Company",
             aliases=[],
             official_domains=["company.test"],
-            legal_identifiers={"corp": "synthetic-legal-id"},
+            legal_identifiers=(
+                {"corp": "synthetic-legal-id"} if legal_identifiers is None else legal_identifiers
+            ),
             identity_status="verified",
             identity_evidence=["company-evidence:synthetic"],
         )
@@ -373,6 +381,30 @@ def test_v1_user_config_cannot_enable_source_without_w2_policy_evidence(
         assert result.disabled_pending_evidence == 1
         assert session.get(SourceRuntimeApproval, SOURCE_ID) is None
         assert load_source_runtime_approval(session, SOURCE_ID) is None
+
+
+@pytest.mark.approved_postgres
+@pytest.mark.parametrize(
+    "legal_identifiers",
+    [
+        {"": "synthetic-legal-id"},
+        {"corp": "   "},
+        {"corp": ["synthetic-legal-id", "\t"]},
+        {" corp": "synthetic-legal-id"},
+        {"corp": "synthetic-legal-id "},
+    ],
+)
+def test_v1_import_leaves_malformed_legal_identifiers_disabled(
+    session_factory: sessionmaker[Session],
+    legal_identifiers: dict[str, object],
+) -> None:
+    with session_factory.begin() as session:
+        _add_legacy_source(session, legal_identifiers=legal_identifiers)
+    with session_factory.begin() as session:
+        result = import_v1_config(session, _runtime_config())
+        assert result.disabled_pending_evidence == 1
+        assert session.get(SourceRuntimeApproval, SOURCE_ID) is None
+        assert session.scalar(select(func.count()).select_from(SourceApprovalRuleHead)) == 0
 
 
 @pytest.mark.approved_postgres
