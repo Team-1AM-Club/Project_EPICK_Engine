@@ -127,6 +127,7 @@ def _metadata(
         w1_source_type=source_type,
         registration_input_version="input-v1",
         company_official_domain=official_domain,
+        company_legal_name="Synthetic Company A Ltd.",
         company_legal_identifiers=legal_identifiers or [f"corp:{company_id}"],
         company_identity_evidence_refs=[f"evidence:{company_id}"],
     )

@@ -8,7 +8,7 @@
   "source_id": "40000000-0000-4000-8000-000000000005",
   "execution_fence": 1,
   "owner_deletion_epoch": 0,
-  "registration_digest": "fd95ea0534e088cb623fb6f64ef04fea37a58d6fc20ba2981d816625184bdad7",
+  "registration_digest": "a9d0dd2d8ebf47e34faab0bd35a12e118624fb34453f2d394eb716b44a9151e0",
   "status": "READY",
   "reason_code": "APPROVED",
   "policy_revision": 7,

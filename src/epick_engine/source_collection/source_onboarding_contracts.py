@@ -12,7 +12,13 @@ import json
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from epick_engine.source_collection.contracts import ContractModel, SourceType
 from epick_engine.source_collection.service import canonicalize_source_url
@@ -45,6 +51,7 @@ _AVAILABLE_ONLY_FIELDS = frozenset(
         "w1_source_type",
         "registration_input_version",
         "company_official_domain",
+        "company_legal_name",
         "company_legal_identifiers",
         "company_identity_evidence_refs",
     }
@@ -80,9 +87,43 @@ class RegistrationMetadata(ContractModel):
     w1_source_type: NonEmptyWireStr | None = None
     registration_input_version: NonEmptyWireStr | None = None
     company_official_domain: NonEmptyWireStr | None = None
+    company_legal_name: NonEmptyWireStr | None = None
     company_legal_identifiers: list[NonEmptyWireStr] | None = None
     company_identity_evidence_refs: list[NonEmptyWireStr] | None = None
     reason_code: NonEmptyWireStr | None = None
+
+    @field_validator("company_official_domain", "company_legal_name")
+    @classmethod
+    def validate_company_identity_text(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or value != value.strip()):
+            raise ValueError("company identity text must have exact non-blank boundaries")
+        return value
+
+    @field_validator("company_legal_identifiers")
+    @classmethod
+    def validate_company_legal_identifiers(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        for identifier in value:
+            kind, separator, identifier_value = identifier.partition(":")
+            if (
+                not separator
+                or not kind.strip()
+                or kind != kind.strip()
+                or not identifier_value.strip()
+                or identifier_value != identifier_value.strip()
+            ):
+                raise ValueError("company legal identifiers must use exact non-blank kind:value")
+        return value
+
+    @field_validator("company_identity_evidence_refs")
+    @classmethod
+    def validate_company_identity_evidence_refs(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and any(
+            not reference.strip() or reference != reference.strip() for reference in value
+        ):
+            raise ValueError("company identity evidence refs must have exact non-blank boundaries")
+        return value
 
     @model_validator(mode="after")
     def validate_status_shape(self) -> RegistrationMetadata:
@@ -98,6 +139,7 @@ class RegistrationMetadata(ContractModel):
                 or self.w1_source_type is None
                 or self.registration_input_version is None
                 or self.company_official_domain is None
+                or self.company_legal_name is None
                 or not self.company_legal_identifiers
                 or not self.company_identity_evidence_refs
             ):
@@ -234,6 +276,7 @@ def registration_digest(metadata: RegistrationMetadata) -> str:
             set(metadata.company_identity_evidence_refs or [])
         ),
         "company_legal_identifiers": sorted(set(metadata.company_legal_identifiers or [])),
+        "company_legal_name": metadata.company_legal_name,
         "company_official_domain": metadata.company_official_domain,
         "registration_input_version": metadata.registration_input_version,
         "source_id": str(metadata.source_id),

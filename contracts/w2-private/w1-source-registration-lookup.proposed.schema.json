@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://epick.dev/contracts/w2-private/w1-source-registration-lookup.proposed.schema.json",
+  "title": "PROPOSED W1 source registration lookup response",
+  "description": "W2 proposal only. W1 has not accepted or pinned this schema as its canonical contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "w1.private.w2-source-registration-lookup.v1"
+    },
+    "status": {
+      "enum": [
+        "AVAILABLE",
+        "UNAVAILABLE"
+      ]
+    },
+    "command_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "execution_fence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "owner_deletion_epoch": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "company_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "source_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "canonical_url": {
+      "type": "string",
+      "minLength": 1
+    },
+    "w1_source_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "registration_input_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "company_official_domain": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+    },
+    "company_legal_name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+    },
+    "company_legal_identifiers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[^\\s:](?:[^:]*[^\\s:])?:\\S(?:[\\s\\S]*\\S)?$"
+      }
+    },
+    "company_identity_evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+      }
+    },
+    "reason_code": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "command_id",
+    "execution_fence",
+    "owner_deletion_epoch",
+    "company_id",
+    "source_id"
+  ],
+  "oneOf": [
+    {
+      "properties": {
+        "status": {
+          "const": "AVAILABLE"
+        }
+      },
+      "required": [
+        "canonical_url",
+        "w1_source_type",
+        "registration_input_version",
+        "company_official_domain",
+        "company_legal_name",
+        "company_legal_identifiers",
+        "company_identity_evidence_refs"
+      ],
+      "not": {
+        "required": [
+          "reason_code"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "status": {
+          "const": "UNAVAILABLE"
+        }
+      },
+      "required": [
+        "reason_code"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "canonical_url"
+            ]
+          },
+          {
+            "required": [
+              "w1_source_type"
+            ]
+          },
+          {
+            "required": [
+              "registration_input_version"
+            ]
+          },
+          {
+            "required": [
+              "company_official_domain"
+            ]
+          },
+          {
+            "required": [
+              "company_legal_name"
+            ]
+          },
+          {
+            "required": [
+              "company_legal_identifiers"
+            ]
+          },
+          {
+            "required": [
+              "company_identity_evidence_refs"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

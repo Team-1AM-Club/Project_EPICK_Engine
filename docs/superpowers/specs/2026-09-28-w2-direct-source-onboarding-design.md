@@ -27,7 +27,7 @@ W1이 이 계약을 수락하고 스키마를 고정하기 전에는 생산 wire
 | 경계 | 생산자 → 소비자 | 제안 계약 |
 | --- | --- | --- |
 | 기존 direct-registration dispatch | W1 worker → W2 collection command SQS | `w1.private.w2.direct-source-registration.v1` 유지. command/job/fence/owner epoch/Project/Company/Source/decision pin 결속을 변경하지 않는다. |
-| 등록정보 보호 조회 | W2 → W1 `POST /internal/v1/w2-private/source-registration/lookup` | 요청 `command_id`, `execution_fence`, `owner_deletion_epoch`, `company_id`, `source_id`. 응답 `schema_version: w1.private.w2-source-registration-lookup.v1`, `status: AVAILABLE | UNAVAILABLE`; AVAILABLE에만 W1 canonical URL, W1 목적 유형, 확인된 Company 공식 도메인·법인 식별정보·근거 참조, `registration_input_version`을 포함한다. W1은 현재 owner/Project/Job/command와 삭제 epoch를 검사한다. |
+| 등록정보 보호 조회 | W2 → W1 `POST /internal/v1/w2-private/source-registration/lookup` | 요청 `command_id`, `execution_fence`, `owner_deletion_epoch`, `company_id`, `source_id`. 응답 `schema_version: w1.private.w2-source-registration-lookup.v1`, `status: AVAILABLE | UNAVAILABLE`; AVAILABLE에만 W1 canonical URL, W1 목적 유형, W1이 확인한 Company 공식 도메인·법인명·법인 식별정보·근거 참조, `registration_input_version`을 포함한다. W1은 현재 owner/Project/Job/command와 삭제 epoch를 검사한다. |
 | 등록 상태 callback | W2 → W1 `POST /internal/v1/w2-private/source-registration/ack` | `schema_version: w2.private.source-registration-ack.v1`, `command_id`, `job_id`, `company_id`, `source_id`, owner/Project scope, fence, epoch, 등록정보 digest, 결과 `READY | HELD | REJECTED`, 고정 reason code. READY에만 양의 W2 정책 revision·승인 규칙 ID/revision을 포함한다. URL·원문·비밀값은 싣지 않는다. W1은 현재성 재검사 후 정확한 `200 {"status":"ACKNOWLEDGED"}`만 성공으로 반환하고 동일 ACK를 멱등 수락한다. |
 | 수집 결과 | W2 → W1 기존 private staged-result/commit-gate | READY callback이 W2에서 확인 기록으로 영속화된 뒤에만 첫 fetch를 시작한다. 신규 등록 ACK가 FINALIZE를 대신하지 않는다. |
 
@@ -35,7 +35,11 @@ ACK reason code는 READY=`APPROVED`, HELD=`POLICY_RULE_MISSING | COMPANY_UNVERIF
 
 W2는 새 조회/ACK에도 기존 보호 HTTPS의 CA 검증, 고정 target, bearer, 응답 크기·시간 제한, redirect/proxy 금지 및 비밀값 없는 오류 규칙을 적용한다. W1의 기존 command lookup은 등록정보 조회나 W2 정책 승인으로 재해석하지 않는다. URL 원문은 보호 조회와 W2 비공개 저장소에만 존재하며 공용 증거·로그에 넣지 않는다.
 
-`registration_digest`는 AVAILABLE 응답에서 승인 판단에 사용하는 `company_id`, `source_id`, `canonical_url`, W1 목적 유형, `registration_input_version`, 기업 공식 도메인·법인 식별정보·근거 참조만의 SHA-256 소문자 hex다. 먼저 UUID를 소문자 정규형으로, 법인 식별정보·근거 참조 배열을 중복 없이 사전순으로 정규화한다. 그다음 모든 object key를 재귀적으로 정렬한 UTF-8 JSON(`ensure_ascii=false`, 공백 없는 `,`/`:` 구분자)을 해시한다. W1과 W2는 동일 벡터로 이를 검증하며, 조회 응답에 없는 임의 추가 필드는 digest나 승인 근거로 사용하지 않는다.
+W2 제안 lookup schema는 `contracts/w2-private/w1-source-registration-lookup.proposed.schema.json`이다. 파일명과 schema title/description대로 W1이 아직 수락하거나 pin하지 않은 **PROPOSED** 산출물이며 W1 정본이 아니다. W1이 자기 저장소의 versioned schema와 fixture SHA를 회신하기 전에는 runtime client를 활성화하지 않는다.
+
+`registration_digest`는 AVAILABLE 응답에서 승인 판단에 사용하는 `company_id`, `source_id`, `canonical_url`, W1 목적 유형, `registration_input_version`, 기업 공식 도메인·W1 검증 법인명·법인 식별정보·근거 참조만의 SHA-256 소문자 hex다. 먼저 UUID를 소문자 정규형으로, 법인 식별정보·근거 참조 배열을 중복 없이 사전순으로 정규화한다. 그다음 모든 object key를 재귀적으로 정렬한 UTF-8 JSON(`ensure_ascii=false`, 공백 없는 `,`/`:` 구분자)을 해시한다. W1과 W2는 동일 벡터로 이를 검증하며, 조회 응답에 없는 임의 추가 필드는 digest나 승인 근거로 사용하지 않는다. W1 검증 법인명은 도메인이나 식별자에서 추론하지 않는다.
+
+`company_legal_identifiers`는 W2 Company JSON의 `kind → value`를 손실 없이 전달하는 문자열 배열이며 각 항목은 정확한 `kind:value`다. 첫 `:`만 구분자로 사용하므로 value 내부 `:`는 허용한다. kind/value가 비거나 whitespace-only인 값과 양끝 whitespace가 있는 값은 거부하며 trim하거나 digest 입력을 재작성하지 않는다. `company_official_domain`, `company_legal_name`, `company_identity_evidence_refs`도 whitespace-only 또는 양끝 whitespace를 거부하고 원문을 자동 수정하지 않는다. 이 네 identity 입력은 AVAILABLE에만 완전하고 비어 있지 않게 존재해야 하며 UNAVAILABLE에는 필드가 `null`인 경우까지 금지한다.
 
 W1 목적 유형은 `JOB_POSTING → job_posting`, `COMPANY_PROFILE → company_website`로만 매핑한다. 그 밖의 값, 또는 `COMPANY_PROFILE` 중 승인된 공식 기업 웹페이지 규칙에 맞지 않는 URL은 HELD다. W2는 자체 `canonicalize_source_url`로 재정규화한 결과와 W1 canonical URL을 정확히 비교한다. 차이는 조용히 수정·합치지 않고 충돌로 보류하며, 양측 정규화 버전·검증 벡터를 계약 테스트에 고정한다.
 
@@ -70,11 +74,11 @@ READY는 W3 입력이 아니다. 기존 W1 FINALIZE 이후의 W2 공용 outbox�
 
 | 담당 | 구현 책임 |
 | --- | --- |
-| W1 | `backend/app/services/source_collections.py`/`backend/app/repo/source_collections.py`의 canonical URL·Source/Company identity 결속, `backend/app/runtime/workers.py`의 dispatch/currentness, `backend/app/runtime/lookup_adapter.py`와 보호 등록정보 조회, 등록 ACK 보호 route 및 owner/Project/epoch 검증, versioned W1 schema/fixture와 사용자 Job 상태. W1 DB를 W2가 직접 쓰지 않는다. |
+| W1 | `backend/app/services/source_collections.py`/`backend/app/repo/source_collections.py`의 canonical URL·Source/Company identity 결속과 검증 법인명 제공, `backend/app/runtime/workers.py`의 dispatch/currentness, `backend/app/runtime/lookup_adapter.py`와 보호 등록정보 조회, 등록 ACK 보호 route 및 owner/Project/epoch 검증, versioned W1 schema/fixture와 사용자 Job 상태. W1 DB를 W2가 직접 쓰지 않는다. |
 | W2 | `source_runtime.py`/`source_runtime_operator.py`의 등록→ACK→수집 순서, `source_runtime_input.py`의 DB 기반 승인 설정, `w1_transport.py` 및 새 보호 조회/ACK client, `persistence.py`와 후속 migration의 규칙·per-Source 설정·private receipt/outbox, `private_deletion_v2.py` 연동, W2 schema/fixture/계약 테스트. W1 정책을 W2 승인 정책으로 추정하지 않는다. |
 | W3 | 기존 W2 공용 outbox Source ID·revision 계약의 소비 검증. 등록 READY를 신규 분석 이벤트로 해석하지 않는다. |
 
-신규 보호 route/스키마는 W1의 수락과 pinned SHA가 필요하다. W2는 W1 합의 전 자체 테스트 seam과 계약 초안까지만 검증할 수 있으며, 이 문서의 경로·필드를 이미 배포된 W1 계약이라고 주장하지 않는다.
+신규 보호 route/스키마는 W1의 수락과 pinned SHA가 필요하다. W2는 W1 합의 전 자체 테스트 seam과 명시적인 PROPOSED schema/계약 초안까지만 검증할 수 있으며, 이 문서의 경로·필드를 이미 배포된 W1 계약이라고 주장하지 않는다.
 
 배포 순서는 W1 보호 조회·ACK route와 계약 테스트를 먼저 배포하되 기존 W1 dispatch는 유지하고, W2의 새 DB migration과 새 runtime 이미지를 같은 head로 배포한 뒤 W1 신규 온보딩 경로를 활성화하는 것이다. 구 W2 runtime은 새 migration head에 호환된다고 간주하지 않는다. 이전 이미지로의 DB downgrade는 계획하지 않고, 오류 시 새 경로를 비활성화한 다음 forward corrective migration/이미지로 복구한다.
 
