@@ -236,13 +236,19 @@ def _company_identifier_refs(company: Company) -> frozenset[str] | None:
     if not isinstance(stored, Mapping):
         return None
     for kind, raw in stored.items():
-        if not isinstance(kind, str) or not kind:
+        if not isinstance(kind, str) or not kind or kind != kind.strip() or ":" in kind:
             return None
         values = raw if isinstance(raw, list) else [raw]
         for value in values:
-            if not isinstance(value, str) or not value:
+            if isinstance(value, bool):
                 return None
-            refs.add(f"{kind}:{value}")
+            if isinstance(value, int):
+                rendered = str(value)
+            elif isinstance(value, str) and value and value == value.strip():
+                rendered = value
+            else:
+                return None
+            refs.add(f"{kind}:{rendered}")
     return frozenset(refs)
 
 
