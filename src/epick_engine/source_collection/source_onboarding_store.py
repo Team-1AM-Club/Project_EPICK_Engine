@@ -378,6 +378,19 @@ def _lock_public_registration_identities(
         session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
 
+def _lock_registration_command(session: Session, command_id: UUID) -> None:
+    """Serialize an absent receipt before deciding whether this is a replay."""
+
+    if session.get_bind().dialect.name != "postgresql":
+        raise PersistenceConflict("Source registration storage requires PostgreSQL")
+    key = int.from_bytes(
+        hashlib.sha256(b"epick.w2.source-onboarding.v1\0command\0" + command_id.bytes).digest()[:8],
+        "big",
+        signed=True,
+    )
+    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
 def _policy_from_rule(
     *,
     source_id: UUID,
@@ -438,6 +451,7 @@ def register_direct_source(
     _require_aware_now(now)
     _assert_dispatch_binding(dispatch, metadata, private_scope)
     lock_private_write_scope(session, private_scope)
+    _lock_registration_command(session, dispatch.payload.command_id)
     digest = registration_digest(metadata)
     replay = _load_registration_replay(session, dispatch=dispatch, digest=digest)
     if replay is not None:
@@ -475,19 +489,6 @@ def register_direct_source(
             now=now,
         )
 
-    matched = match_approved_rule(session, metadata)
-    if matched is None:
-        return _record_ack(
-            session,
-            _ack(
-                dispatch,
-                digest=digest,
-                status="HELD",
-                reason_code="POLICY_RULE_MISSING",
-            ),
-            now=now,
-        )
-
     _lock_public_registration_identities(
         session,
         company_id=metadata.company_id,
@@ -509,6 +510,18 @@ def register_direct_source(
                 digest=digest,
                 status="REJECTED",
                 reason_code=conflict,
+            ),
+            now=now,
+        )
+    matched = match_approved_rule(session, metadata)
+    if matched is None:
+        return _record_ack(
+            session,
+            _ack(
+                dispatch,
+                digest=digest,
+                status="HELD",
+                reason_code="POLICY_RULE_MISSING",
             ),
             now=now,
         )

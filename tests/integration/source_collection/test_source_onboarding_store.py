@@ -372,6 +372,62 @@ def test_same_source_id_with_different_public_identity_is_rejected_without_overw
 
 
 @pytest.mark.approved_postgres
+@pytest.mark.parametrize("changed", ["url", "company", "type"])
+def test_same_source_id_conflict_is_rejected_even_without_an_approval_rule(
+    session_factory: sessionmaker[Session],
+    changed: str,
+) -> None:
+    with session_factory.begin() as session:
+        _add_company(session, COMPANY_A, "synthetic.test")
+        _add_company(session, COMPANY_B, "subsidiary.test")
+        session.add(
+            Source(
+                source_id=SOURCE_A,
+                company_id=COMPANY_A,
+                source_type=SourceType.JOB_POSTING.value,
+                canonical_url="https://careers.synthetic.test/jobs",
+                title=None,
+                pointer_update_mode="FINALIZE_GATE",
+            )
+        )
+
+    company_id = COMPANY_B if changed == "company" else COMPANY_A
+    dispatch = _dispatch(company_id=company_id, source_id=SOURCE_A)
+    if changed == "url":
+        metadata = _metadata(
+            dispatch,
+            canonical_url="https://careers.synthetic.test/jobs/changed",
+        )
+    elif changed == "company":
+        metadata = _metadata(
+            dispatch,
+            canonical_url="https://careers.subsidiary.test/jobs",
+            official_domain="subsidiary.test",
+            legal_name=f"Synthetic Company {COMPANY_B}",
+        )
+    else:
+        metadata = _metadata(
+            dispatch,
+            canonical_url="https://www.synthetic.test/about",
+            w1_source_type="COMPANY_PROFILE",
+        )
+
+    with session_factory.begin() as session:
+        ack = _register(session, dispatch, metadata)
+
+    assert ack.status == "REJECTED"
+    assert ack.reason_code == "SOURCE_ID_CONFLICT"
+    with session_factory.begin() as session:
+        source = session.get(Source, SOURCE_A)
+        assert source is not None
+        assert source.company_id == COMPANY_A
+        assert source.source_type == SourceType.JOB_POSTING.value
+        assert source.canonical_url == "https://careers.synthetic.test/jobs"
+        assert session.scalar(select(func.count()).select_from(Source)) == 1
+        assert session.scalar(select(func.count()).select_from(SourcePolicyDecision)) == 0
+
+
+@pytest.mark.approved_postgres
 def test_same_company_url_with_different_source_id_is_rejected_without_alias(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -390,6 +446,35 @@ def test_same_company_url_with_different_source_id_is_rejected_without_alias(
     with session_factory.begin() as session:
         assert session.scalar(select(func.count()).select_from(Source)) == 1
         assert session.get(Source, SOURCE_B) is None
+
+
+@pytest.mark.approved_postgres
+def test_same_company_url_conflict_is_rejected_even_without_an_approval_rule(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory.begin() as session:
+        _add_company(session, COMPANY_A, "synthetic.test")
+        session.add(
+            Source(
+                source_id=SOURCE_A,
+                company_id=COMPANY_A,
+                source_type=SourceType.JOB_POSTING.value,
+                canonical_url="https://careers.synthetic.test/jobs",
+                title=None,
+                pointer_update_mode="FINALIZE_GATE",
+            )
+        )
+
+    dispatch = _dispatch(source_id=SOURCE_B)
+    with session_factory.begin() as session:
+        ack = _register(session, dispatch, _metadata(dispatch))
+
+    assert ack.status == "REJECTED"
+    assert ack.reason_code == "CANONICAL_URL_CONFLICT"
+    with session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(Source)) == 1
+        assert session.get(Source, SOURCE_B) is None
+        assert session.scalar(select(func.count()).select_from(SourcePolicyDecision)) == 0
 
 
 @pytest.mark.approved_postgres
@@ -548,6 +633,62 @@ def test_same_command_with_changed_digest_is_an_immutable_conflict(
     with session_factory.begin() as session:
         assert session.scalar(select(func.count()).select_from(SourceRegistrationReceipt)) == 1
         assert session.scalar(select(func.count()).select_from(SourceRegistrationAckOutbox)) == 1
+
+
+@pytest.mark.approved_postgres
+def test_concurrent_different_owners_same_command_is_an_immutable_conflict(
+    session_factory: sessionmaker[Session],
+) -> None:
+    command_id = uuid4()
+    job_id = uuid4()
+    first_dispatch = _dispatch(
+        command_id=command_id,
+        job_id=job_id,
+        owner_id=OWNER_A,
+    )
+    second_dispatch = _dispatch(
+        command_id=command_id,
+        job_id=job_id,
+        owner_id=OWNER_B,
+    )
+    second_started = Event()
+    second_finished = Event()
+    errors: list[BaseException] = []
+
+    def second_registration() -> None:
+        second_started.set()
+        try:
+            with session_factory.begin() as session:
+                _register(session, second_dispatch, _metadata(second_dispatch))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            second_finished.set()
+
+    first = session_factory()
+    second = Thread(target=second_registration)
+    try:
+        first.begin()
+        assert _register(first, first_dispatch, _metadata(first_dispatch)).status == "HELD"
+        second.start()
+        assert second_started.wait(timeout=10)
+        assert not second_finished.wait(timeout=0.3)
+        first.commit()
+        second.join(timeout=10)
+    finally:
+        first.rollback()
+        first.close()
+        if second.ident is not None:
+            second.join(timeout=10)
+
+    assert not second.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], PersistenceConflict)
+    assert "immutable payload" in str(errors[0])
+    with session_factory.begin() as session:
+        assert session.scalar(select(func.count()).select_from(SourceRegistrationReceipt)) == 1
+        assert session.scalar(select(func.count()).select_from(SourceRegistrationAckOutbox)) == 1
+        assert session.scalar(select(func.count()).select_from(Source)) == 0
 
 
 @pytest.mark.approved_postgres
