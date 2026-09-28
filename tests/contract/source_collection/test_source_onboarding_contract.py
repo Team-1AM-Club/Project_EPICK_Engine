@@ -14,6 +14,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import ValidationError
 
 from epick_engine.source_collection.contracts import SourceType
+from epick_engine.source_collection.service import canonicalize_source_url
 from epick_engine.source_collection.w1_transport import (
     W1DirectSourceRegistrationDispatch,
     W1WireContractError,
@@ -90,46 +91,51 @@ def test_available_rejects_non_https_or_malformed_canonical_url(canonical_url: s
         _codec().parse_registration_metadata(raw, _dispatch())
 
 
-@pytest.mark.parametrize(
-    "canonical_url",
-    [
-        "not-a-url",
-        "ftp://synthetic.invalid/source",
-        "https://synthetic-user:synthetic-password@synthetic-meridian-a.test/jobs",
-        f"https://{'a' * 64}.test/jobs",
-    ],
-)
-def test_proposed_schema_and_model_reject_invalid_canonical_url(
-    canonical_url: str,
-) -> None:
-    raw = _available()
-    raw["canonical_url"] = canonical_url
+def test_canonical_url_semantic_profile_artifact_is_explicitly_proposed() -> None:
+    vectors = _load(ONBOARDING, "canonical-url-semantic-profile-vector.json")
+    profile_path = CONTRACTS.parents[1] / vectors["profile_path"]
+
+    assert profile_path.is_file(), "normative canonical URL semantic profile is missing"
+    profile = profile_path.read_text(encoding="utf-8")
+    assert vectors["profile_id"] in profile
+    assert "NORMATIVE" in profile
+    assert "PROPOSED" in profile
+
+
+def test_schema_and_semantic_profile_match_fixed_canonical_url_vectors() -> None:
+    vectors = _load(ONBOARDING, "canonical-url-semantic-profile-vector.json")
     schema = _load(CONTRACTS, "w1-source-registration-lookup.proposed.schema.json")
     validator = Draft202012Validator(schema)
 
-    with pytest.raises(W1WireContractError):
-        _codec().parse_registration_metadata(raw, _dispatch())
-    assert list(validator.iter_errors(raw))
+    for case in vectors["accepted"]:
+        raw = _available()
+        raw["canonical_url"] = case["canonical_url"]
 
+        validator.validate(raw)
+        metadata = _codec().parse_registration_metadata(raw, _dispatch())
 
-@pytest.mark.parametrize(
-    "canonical_url",
-    [
-        "HTTPS://SYNTHETIC-MERIDIAN-A.TEST/jobs/%ED%94%8C%EB%9E%AB%ED%8F%BC?lang=ko",
-        "https://[2001:db8::1]:443/jobs/platform-engineer?opening=101#apply",
-        "https://합성기업.test/jobs/platform-engineer",
-    ],
-)
-def test_proposed_schema_accepts_model_valid_https_bytes(canonical_url: str) -> None:
-    raw = _available()
-    raw["canonical_url"] = canonical_url
-    schema = _load(CONTRACTS, "w1-source-registration-lookup.proposed.schema.json")
-    validator = Draft202012Validator(schema)
+        assert metadata.canonical_url == case["canonical_url"], case["case_id"]
+        assert (
+            canonicalize_source_url(case["canonical_url"])
+            == case["expected_reference_canonical_url"]
+        ), case["case_id"]
 
-    metadata = _codec().parse_registration_metadata(raw, _dispatch())
-    validator.validate(raw)
+    for case in vectors["rejected"]:
+        raw = _available()
+        raw["canonical_url"] = case["canonical_url"]
+        schema_errors = list(validator.iter_errors(raw))
 
-    assert metadata.canonical_url == canonical_url
+        if case["schema_shape"] == "REJECT":
+            assert schema_errors, case["case_id"]
+        else:
+            assert not schema_errors, case["case_id"]
+
+        with pytest.raises(ValueError):
+            canonicalize_source_url(case["canonical_url"])
+        with pytest.raises(W1WireContractError):
+            _codec().parse_registration_metadata(raw, _dispatch())
+
+    assert any(case["schema_shape"] == "ACCEPT" for case in vectors["rejected"])
 
 
 def test_available_metadata_is_strict_and_bound_to_the_dispatch() -> None:

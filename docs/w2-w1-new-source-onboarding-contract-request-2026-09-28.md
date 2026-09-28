@@ -20,6 +20,8 @@
 
 W2 제안본은 `contracts/w2-private/w1-source-registration-lookup.proposed.schema.json`이며, W1이 자기 저장소의 versioned schema와 fixture를 게시하기 전까지 **PROPOSED / UNPINNED**다. 파일명과 schema title/description도 이 상태를 명시하며 W1 정본으로 취급하지 않는다.
 
+Schema의 `canonical_url` 검사는 HTTPS authority의 구조 precheck일 뿐이며 DNS/IDNA label, IPv4/IPv6 literal, port 범위의 의미 검증을 완성하지 않는다. **Schema validation alone is insufficient.** W1은 `contracts/w2-private/w1-source-registration-canonical-url.semantic-profile.proposed.md`와 `tests/fixtures/w2_source_onboarding/canonical-url-semantic-profile-vector.json`의 제안 알고리즘을 동등하게 구현하고, 해당 profile을 통과한 URL만 AVAILABLE의 `canonical_url`로 반환해야 한다. W2 reference implementation은 `canonicalize_source_url`이며 W1 acceptance 때 schema/profile/vector 각각의 W1-owned 경로와 SHA 및 accept/reject 교차 결과를 pin해야 한다.
+
 `company_legal_name`은 W1이 확인한 비어 있지 않은 법인명이어야 하며 도메인·Source 식별자·법인 식별정보에서 추론해 채우지 않는다. `company_legal_identifiers`는 문자열 배열을 유지하되 각 항목이 정확한 `kind:value` 형식이어야 한다. 첫 `:`만 구분자이므로 value 내부 `:`는 허용한다. kind/value가 비거나 whitespace-only인 값, 양끝 whitespace가 있는 값은 거부하며 trim하거나 digest 입력을 재작성하지 않는다. 공식 도메인·법인명·identity evidence ref도 whitespace-only 또는 양끝 whitespace를 거부한다. 이 AVAILABLE 전용 필드는 UNAVAILABLE 응답에는 `null`로도 포함하지 않는다.
 
 ### 등록 상태 ACK — W2 소유
@@ -39,7 +41,9 @@ READY는 등록 수락일 뿐 수집 또는 Job 완료가 아니다. W2가 ACK �
 
 `registration_digest`는 AVAILABLE의 `company_id`, `source_id`, `canonical_url`, `w1_source_type`, `registration_input_version`, `company_official_domain`, `company_legal_name`, `company_legal_identifiers`, `company_identity_evidence_refs`만 포함한다. UUID는 소문자 정규형, 두 배열은 중복 제거 후 사전순이며, object key를 재귀 정렬한 공백 없는 UTF-8 JSON(`ensure_ascii=false`)의 SHA-256 소문자 hex다.
 
-- `contracts/w2-private/w1-source-registration-lookup.proposed.schema.json`: `f336004f336dfca01b8c917cbffc3bf7e7c6600a23fcc463cb30e4864fa0b84f`
+- `contracts/w2-private/w1-source-registration-lookup.proposed.schema.json`: `ac4343d4a9b06f9ecc2f817dce90d381b0f05c0d8ad9a4a8125770b924034ced`
+- `contracts/w2-private/w1-source-registration-canonical-url.semantic-profile.proposed.md`: `12d7091d05731e4238f5934de379c659b741a6f6600f439739a08adccf890823`
+- `tests/fixtures/w2_source_onboarding/canonical-url-semantic-profile-vector.json`: `e8a0efc18b3927579a70642f83b91d567cbce18bd0b0bfb00c908e1e20b036d4`
 - `tests/fixtures/w2_source_onboarding/registration-digest-vector.json`: `7ea018356f86c9bb866611db5ec07c906d87ed4980cd32fbbb083a3455493582`
 - `tests/fixtures/w2_source_onboarding/registration-ack-ready.json`: `9aa6bb1d73b019e4cb9ba2ec18c46a7d3a422bfec98c2847def4469d897bef37`
 - fixture의 `.test` URL, UUID, 식별정보와 근거 참조는 모두 합성이며 실제 owner·기업·URL·비밀값이 아니다.
@@ -53,14 +57,15 @@ W1은 아래 기존 정확한 파일 및 그 소유 경계에서 lookup/ACK curr
 - `backend/app/runtime/workers.py`
 - `backend/app/runtime/lookup_adapter.py`
 
-보호 route 파일, W1-owned lookup JSON Schema 및 동일 digest vector fixture의 최종 정확한 경로는 W1이 결정해 full SHA와 함께 회신해야 한다. W1은 canonical URL·W1 검증 법인명·Source/Company identity, owner/Project/Job/command, fence, deletion epoch를 재검사하고 HELD/REJECTED를 READY나 수집 성공으로 해석하지 않는다.
+보호 route 파일, W1-owned lookup JSON Schema, canonical URL semantic profile, accept/reject vector 및 동일 digest vector fixture의 최종 정확한 경로는 W1이 결정해 full SHA와 함께 회신해야 한다. W1은 schema와 semantic profile을 모두 통과한 canonical URL·W1 검증 법인명·Source/Company identity, owner/Project/Job/command, fence, deletion epoch를 재검사하고 HELD/REJECTED를 READY나 수집 성공으로 해석하지 않는다.
 
 ## W1 회신 게이트
 
 다음 항목이 모두 제공되기 전 W2 runtime/client 연결과 신규 경로 활성화는 금지한다.
 
 1. lookup/ACK route와 HTTP 동작의 수락 또는 수정안
-2. W1-owned exact schema/fixture 파일 경로와 SHA-256
-3. 동일 digest vector의 교차 검증 결과
-4. owner/Project/currentness/deletion 검증과 동일 ACK 멱등성 테스트 결과
-5. W1 acceptance 상태를 `ACCEPTED`로 바꾸는 명시적 회신
+2. W1-owned exact schema/profile/vector 파일 경로와 각각의 SHA-256
+3. canonical URL accept/reject vector의 W1/W2 교차 검증 결과
+4. 동일 registration digest vector의 교차 검증 결과
+5. owner/Project/currentness/deletion 검증과 동일 ACK 멱등성 테스트 결과
+6. W1 acceptance 상태를 `ACCEPTED`로 바꾸는 명시적 회신

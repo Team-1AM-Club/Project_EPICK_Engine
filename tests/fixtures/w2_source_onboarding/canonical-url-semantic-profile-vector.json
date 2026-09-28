@@ -1,0 +1,81 @@
+{
+  "schema_version": "w2.test.w1-source-registration-canonical-url-vectors.v1",
+  "profile_id": "w1.private.w2-source-registration-canonical-url.semantic-profile.v1",
+  "profile_status": "PROPOSED_UNPINNED",
+  "profile_path": "contracts/w2-private/w1-source-registration-canonical-url.semantic-profile.proposed.md",
+  "provenance": "Synthetic fixed URLs only; no real company, owner, credential, or private endpoint data.",
+  "accepted": [
+    {
+      "case_id": "uppercase-https-host-and-fragment",
+      "canonical_url": "HTTPS://SYNTHETIC-MERIDIAN-A.TEST/jobs/%ED%94%8C%EB%9E%AB%ED%8F%BC?lang=ko#details",
+      "expected_reference_canonical_url": "https://synthetic-meridian-a.test/jobs/%ED%94%8C%EB%9E%AB%ED%8F%BC?lang=ko"
+    },
+    {
+      "case_id": "ipv6-default-port",
+      "canonical_url": "https://[2001:db8::1]:443/jobs/platform-engineer?opening=101#apply",
+      "expected_reference_canonical_url": "https://[2001:db8::1]/jobs/platform-engineer?opening=101"
+    },
+    {
+      "case_id": "unicode-idn-host",
+      "canonical_url": "https://합성기업.test/jobs/platform-engineer",
+      "expected_reference_canonical_url": "https://xn--ok0bj47arkdsru.test/jobs/platform-engineer"
+    }
+  ],
+  "rejected": [
+    {
+      "case_id": "relative-or-malformed",
+      "canonical_url": "not-a-url",
+      "schema_shape": "REJECT"
+    },
+    {
+      "case_id": "non-https-scheme",
+      "canonical_url": "ftp://synthetic.invalid/source",
+      "schema_shape": "REJECT"
+    },
+    {
+      "case_id": "userinfo-credentials",
+      "canonical_url": "https://synthetic-user:synthetic-password@synthetic-meridian-a.test/jobs",
+      "schema_shape": "REJECT"
+    },
+    {
+      "case_id": "dns-label-over-63-idna-bytes",
+      "canonical_url": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.test/jobs",
+      "schema_shape": "ACCEPT"
+    },
+    {
+      "case_id": "hostname-underscore",
+      "canonical_url": "https://bad_host.test/jobs",
+      "schema_shape": "ACCEPT"
+    },
+    {
+      "case_id": "hostname-leading-hyphen",
+      "canonical_url": "https://-bad.test/jobs",
+      "schema_shape": "ACCEPT"
+    },
+    {
+      "case_id": "hostname-trailing-hyphen",
+      "canonical_url": "https://bad-.test/jobs",
+      "schema_shape": "ACCEPT"
+    },
+    {
+      "case_id": "hostname-empty-label",
+      "canonical_url": "https://bad..test/jobs",
+      "schema_shape": "ACCEPT"
+    },
+    {
+      "case_id": "invalid-ipv6-literal",
+      "canonical_url": "https://[2001:db8:::1]/jobs",
+      "schema_shape": "ACCEPT"
+    },
+    {
+      "case_id": "port-zero",
+      "canonical_url": "https://synthetic.test:0/jobs",
+      "schema_shape": "ACCEPT"
+    },
+    {
+      "case_id": "port-over-65535",
+      "canonical_url": "https://synthetic.test:65536/jobs",
+      "schema_shape": "ACCEPT"
+    }
+  ]
+}

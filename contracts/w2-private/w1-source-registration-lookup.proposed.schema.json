@@ -3,6 +3,7 @@
   "$id": "https://epick.dev/contracts/w2-private/w1-source-registration-lookup.proposed.schema.json",
   "title": "PROPOSED W1 source registration lookup response",
   "description": "W2 proposal only. W1 has not accepted or pinned this schema as its canonical contract.",
+  "$comment": "canonical_url also MUST pass w1.private.w2-source-registration-canonical-url.semantic-profile.v1; JSON Schema validation alone is insufficient.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -38,19 +39,8 @@
     "canonical_url": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[Hh][Tt][Tt][Pp][Ss]://(?:\\[[0-9A-Fa-f:.]+\\]|[^\\s@:/?#]+)(?::[0-9]+)?(?:[/?#]|$)",
-      "allOf": [
-        {
-          "not": {
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]://[^/?#]*@"
-          }
-        },
-        {
-          "not": {
-            "pattern": "^[Hh][Tt][Tt][Pp][Ss]://(?:[^/?#]*\\.)?[^./:?#]{64,}(?:\\.|:|/|\\?|#|$)"
-          }
-        }
-      ]
+      "description": "Structural HTTPS shape only. The value MUST also pass the separately pinned NORMATIVE canonical URL semantic profile; schema acceptance alone is insufficient.",
+      "pattern": "^[Hh][Tt][Tt][Pp][Ss]://(?:\\[[^\\]\\s/?#@]+\\]|[^\\s@:/?#]+)(?::[0-9]+)?(?:[/?#]|$)"
     },
     "w1_source_type": {
       "type": "string",
