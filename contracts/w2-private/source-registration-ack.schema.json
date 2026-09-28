@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.epick.local/w2/private/v1/source-registration-ack.schema.json",
+  "title": "RegistrationAck",
+  "description": "W2-owned private direct Source registration ACK. W1 route acceptance remains PENDING; READY is not collection or Job completion.",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "PositiveWireInt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "NonNegativeWireInt": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "NullableUuid": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "w2.private.source-registration-ack.v1"
+    },
+    "command_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "job_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "authenticated_owner_ref": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "project_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "company_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "source_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "execution_fence": {
+      "$ref": "#/$defs/PositiveWireInt"
+    },
+    "owner_deletion_epoch": {
+      "$ref": "#/$defs/NonNegativeWireInt"
+    },
+    "registration_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "READY",
+        "HELD",
+        "REJECTED"
+      ]
+    },
+    "reason_code": {
+      "type": "string",
+      "enum": [
+        "APPROVED",
+        "POLICY_RULE_MISSING",
+        "COMPANY_UNVERIFIED",
+        "URL_NORMALIZATION_MISMATCH",
+        "UNSUPPORTED_SOURCE_TYPE",
+        "SOURCE_ID_CONFLICT",
+        "CANONICAL_URL_CONFLICT",
+        "EXPLICIT_POLICY_DENIAL"
+      ]
+    },
+    "policy_revision": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/PositiveWireInt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "approval_rule_id": {
+      "$ref": "#/$defs/NullableUuid"
+    },
+    "approval_rule_revision": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/PositiveWireInt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "command_id",
+    "job_id",
+    "authenticated_owner_ref",
+    "project_ref",
+    "company_id",
+    "source_id",
+    "execution_fence",
+    "owner_deletion_epoch",
+    "registration_digest",
+    "status",
+    "reason_code",
+    "policy_revision",
+    "approval_rule_id",
+    "approval_rule_revision"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "READY"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason_code": {
+            "const": "APPROVED"
+          },
+          "policy_revision": {
+            "$ref": "#/$defs/PositiveWireInt"
+          },
+          "approval_rule_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "approval_rule_revision": {
+            "$ref": "#/$defs/PositiveWireInt"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "HELD"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason_code": {
+            "enum": [
+              "POLICY_RULE_MISSING",
+              "COMPANY_UNVERIFIED",
+              "URL_NORMALIZATION_MISMATCH",
+              "UNSUPPORTED_SOURCE_TYPE"
+            ]
+          },
+          "policy_revision": {
+            "type": "null"
+          },
+          "approval_rule_id": {
+            "type": "null"
+          },
+          "approval_rule_revision": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "REJECTED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason_code": {
+            "enum": [
+              "SOURCE_ID_CONFLICT",
+              "CANONICAL_URL_CONFLICT",
+              "EXPLICIT_POLICY_DENIAL"
+            ]
+          },
+          "policy_revision": {
+            "type": "null"
+          },
+          "approval_rule_id": {
+            "type": "null"
+          },
+          "approval_rule_revision": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

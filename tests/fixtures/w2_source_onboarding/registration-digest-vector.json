@@ -1,0 +1,28 @@
+{
+  "provenance": "Synthetic fixed input; expected digest independently computed with Node crypto before codec implementation.",
+  "metadata": {
+    "schema_version": "w1.private.w2-source-registration-lookup.v1",
+    "status": "AVAILABLE",
+    "command_id": "40000000-0000-4000-8000-000000000001",
+    "execution_fence": 1,
+    "owner_deletion_epoch": 0,
+    "company_id": "40000000-0000-4000-8000-000000000004",
+    "source_id": "40000000-0000-4000-8000-000000000005",
+    "canonical_url": "https://synthetic-meridian-a.test/jobs/%ED%94%8C%EB%9E%AB%ED%8F%BC?lang=ko",
+    "w1_source_type": "JOB_POSTING",
+    "registration_input_version": "direct:40000000-0000-4000-8000-000000000005:1",
+    "company_official_domain": "synthetic-meridian-a.test",
+    "company_legal_identifiers": [
+      "KR-SYNTHETIC-02",
+      "KR-SYNTHETIC-01",
+      "KR-SYNTHETIC-01"
+    ],
+    "company_identity_evidence_refs": [
+      "evidence:synthetic:한글",
+      "evidence:synthetic:alpha",
+      "evidence:synthetic:한글"
+    ]
+  },
+  "canonical_json": "{\"canonical_url\":\"https://synthetic-meridian-a.test/jobs/%ED%94%8C%EB%9E%AB%ED%8F%BC?lang=ko\",\"company_id\":\"40000000-0000-4000-8000-000000000004\",\"company_identity_evidence_refs\":[\"evidence:synthetic:alpha\",\"evidence:synthetic:한글\"],\"company_legal_identifiers\":[\"KR-SYNTHETIC-01\",\"KR-SYNTHETIC-02\"],\"company_official_domain\":\"synthetic-meridian-a.test\",\"registration_input_version\":\"direct:40000000-0000-4000-8000-000000000005:1\",\"source_id\":\"40000000-0000-4000-8000-000000000005\",\"w1_source_type\":\"JOB_POSTING\"}",
+  "expected_digest": "fd95ea0534e088cb623fb6f64ef04fea37a58d6fc20ba2981d816625184bdad7"
+}

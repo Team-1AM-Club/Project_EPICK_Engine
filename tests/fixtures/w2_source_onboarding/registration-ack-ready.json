@@ -1,0 +1,17 @@
+{
+  "schema_version": "w2.private.source-registration-ack.v1",
+  "command_id": "40000000-0000-4000-8000-000000000001",
+  "job_id": "40000000-0000-4000-8000-000000000002",
+  "authenticated_owner_ref": "40000000-0000-4000-8000-000000000003",
+  "project_ref": null,
+  "company_id": "40000000-0000-4000-8000-000000000004",
+  "source_id": "40000000-0000-4000-8000-000000000005",
+  "execution_fence": 1,
+  "owner_deletion_epoch": 0,
+  "registration_digest": "fd95ea0534e088cb623fb6f64ef04fea37a58d6fc20ba2981d816625184bdad7",
+  "status": "READY",
+  "reason_code": "APPROVED",
+  "policy_revision": 7,
+  "approval_rule_id": "42000000-0000-4000-8000-000000000001",
+  "approval_rule_revision": 3
+}
